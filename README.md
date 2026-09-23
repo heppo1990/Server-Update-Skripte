@@ -28,6 +28,8 @@ Wenn sich benötigte Skriptdateien geändert haben, speichert der Updater zunäc
 4. Optional mit `Download-ServersUpdates.ps1` herunterladen.
 5. Mit `Install-ServersUpdates.ps1` installieren.
 
+Bei einem lokalen Start aus PowerShell 7 aktiviert `Enable-PSRemoting` nur PowerShell-7-Remoting; die erwartete Hinweiszeile dazu wird im Setup-Protokoll erklärt und nicht auf der Konsole wiederholt. Der benötigte WindowsUpdateAdm-JEA-Endpunkt wird separat registriert. Das Setup aktiviert dafür nicht zusätzlich die allgemeinen Windows-PowerShell-Remoting-Endpunkte.
+
 ## Einstellungen
 
 `default_settings.json` ist die zentrale Fallback-Basis. Die allgemeine `settings.json` ist normalerweise ausreichend und überschreibt deren Werte. Existiert zusätzlich eine skriptspezifische Datei wie `Install-ServersUpdates.settings.json`, hat diese für das betreffende Skript Vorrang.

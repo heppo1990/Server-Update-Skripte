@@ -495,8 +495,18 @@ try {
         Write-SetupLog "Remote-Setup erkannt – PS-Remoting wird nicht erneut aktiviert." "INFO"
     } else {
         try {
-            Enable-PSRemoting -Force -ErrorAction Stop
-            Write-SetupLog "PS-Remoting aktiviert" "SUCCESS"
+            if ($PSVersionTable.PSEdition -eq 'Core') {
+                # Die PowerShell-7-Warnung, dass Windows-PowerShell-Endpunkte
+                # nicht mit aktiviert werden, ist hier erwartet: Das Setup
+                # registriert den benötigten WindowsUpdateAdm-Endpunkt separat.
+                # Kein zweiter Enable-PSRemoting-Lauf, der weitere Standard-
+                # Endpunkte für eingehenden Remotezugriff freischalten würde.
+                Enable-PSRemoting -Force -WarningAction SilentlyContinue -ErrorAction Stop
+                Write-SetupLog "PowerShell-7-Remoting aktiviert; WindowsUpdateAdm wird separat als JEA-Endpunkt registriert." "SUCCESS"
+            } else {
+                Enable-PSRemoting -Force -ErrorAction Stop
+                Write-SetupLog "PS-Remoting aktiviert" "SUCCESS"
+            }
         }
         catch {
             Write-SetupLog "PS-Remoting bereits aktiv oder Fehler: $($_.Exception.Message)" "INFO"
