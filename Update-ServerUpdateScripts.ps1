@@ -1,9 +1,17 @@
-﻿# Aktualisiert vor dem Skriptlauf nur die benötigten Dateien aus dem öffentlichen main-Branch.
+﻿# Aktualisiert vor dem Skriptlauf alle geänderten Programmdateien aus dem öffentlichen main-Branch.
 
-function Get-ServerUpdateFileHash {
+function Get-ServerUpdateGitBlobSha1 {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    $content = [IO.File]::ReadAllBytes($Path)
+    $header = [Text.Encoding]::UTF8.GetBytes(('blob {0}' -f $content.Length))
+    $gitObject = New-Object byte[] ($header.Length + 1 + $content.Length)
+    [Array]::Copy($header, 0, $gitObject, 0, $header.Length)
+    $gitObject[$header.Length] = 0
+    [Array]::Copy($content, 0, $gitObject, $header.Length + 1, $content.Length)
+    $sha1 = [Security.Cryptography.SHA1]::Create()
+    try { return ([BitConverter]::ToString($sha1.ComputeHash($gitObject))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha1.Dispose() }
 }
 
 function Get-ServerUpdateConfiguration {
@@ -21,6 +29,8 @@ function Get-ServerUpdateConfiguration {
         (Join-Path $ScriptRoot 'settings.json'),
         (Join-Path $ScriptRoot ($ScriptName + '.settings.json'))
     )
+    $configurationFiles += @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.settings.json' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    $configurationFiles = @($configurationFiles | Select-Object -Unique)
 
     foreach ($configurationFile in $configurationFiles) {
         if (-not (Test-Path -LiteralPath $configurationFile -PathType Leaf)) { continue }
@@ -45,47 +55,46 @@ function Get-ServerUpdateRequiredFiles {
     param(
         [Parameter(Mandatory)][string]$ScriptRoot,
         [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$RepositoryBlobs,
         [System.Collections.IDictionary]$BoundParameters = @{}
     )
 
     $scriptName = [IO.Path]::GetFileName($ScriptPath)
-    $requiredFiles = [System.Collections.Generic.List[string]]::new()
-    $requiredFiles.Add('Update-ServerUpdateScripts.ps1')
-    $requiredFiles.Add($scriptName)
-
-    $scriptsUsingCommonModule = @(
-        'Check-ServersUpdates.ps1', 'Download-ServersUpdates.ps1', 'Install-ServersUpdates.ps1',
-        'Install-Linux Updates.ps1', 'Install-HomeAssistant Updates.ps1', 'PendingReboot.ps1',
-        'Setup-ClientCertificate.ps1', 'Verteilung_WindowsUpdateAdmConfig.ps1'
-    )
-    if ($scriptName -in $scriptsUsingCommonModule) { $requiredFiles.Add('WindowsUpdate.Common.psm1') }
-
-    if ($scriptName -eq 'Verteilung_WindowsUpdateAdmConfig.ps1') {
-        $requiredFiles.Add('New-WindowsUpdateAdmConfig.ps1')
-        $requiredFiles.Add('Setup-ClientCertificate.ps1')
-    }
-
-    $supportsOptionalSystems = $scriptName -in @(
-        'Check-ServersUpdates.ps1', 'Download-ServersUpdates.ps1',
-        'Install-ServersUpdates.ps1', 'Verteilung_WindowsUpdateAdmConfig.ps1'
-    )
+    $requiredFiles = [System.Collections.Generic.List[object]]::new()
     $windowsOnlyRun = $false
     if ($scriptName -eq 'Install-ServersUpdates.ps1' -or $scriptName -eq 'Verteilung_WindowsUpdateAdmConfig.ps1') {
         $windowsOnlyRun = $BoundParameters.Contains('TargetComputer') -and @($BoundParameters['TargetComputer'] | Where-Object { $_ }).Count -gt 0
     }
 
-    if ($supportsOptionalSystems -and -not $windowsOnlyRun) {
+    $configuration = @{ LinuxHosts = @(); HomeAssistantHost = '' }
+    if (-not $windowsOnlyRun) {
         $configuration = Get-ServerUpdateConfiguration -ScriptRoot $ScriptRoot -ScriptName $scriptName
-        if ($configuration.LinuxHosts.Count -gt 0) { $requiredFiles.Add('Install-Linux Updates.ps1') }
-        if (-not [string]::IsNullOrWhiteSpace($configuration.HomeAssistantHost)) { $requiredFiles.Add('Install-HomeAssistant Updates.ps1') }
     }
 
-    # Die Standarddatei wird nur dann aus dem Repository ergänzt, wenn sie lokal fehlt.
-    if (-not (Test-Path -LiteralPath (Join-Path $ScriptRoot 'default_settings.json') -PathType Leaf)) {
-        $requiredFiles.Add('default_settings.json')
+    $linuxRequired = $configuration.LinuxHosts.Count -gt 0 -or $scriptName -eq 'Install-Linux Updates.ps1'
+    $homeAssistantRequired = -not [string]::IsNullOrWhiteSpace($configuration.HomeAssistantHost) -or $scriptName -eq 'Install-HomeAssistant Updates.ps1'
+
+    foreach ($relativePath in $RepositoryBlobs.Keys) {
+        if ([string]::IsNullOrWhiteSpace($relativePath) -or [IO.Path]::IsPathRooted($relativePath) -or $relativePath -match '(^|/)\.\.(/|$)') { continue }
+        if ($relativePath -match '(^|/)\.git(/|$)') { continue }
+
+        $leafName = [IO.Path]::GetFileName($relativePath)
+        if ($leafName -ieq '.gitignore' -or [IO.Path]::GetExtension($leafName) -ieq '.md') { continue }
+        if ($leafName -ieq 'settings.json' -or $leafName -like '*.settings.json') { continue }
+        if ($leafName -match '\.(cer|pfx|p12|key)$') { continue }
+        if ($leafName -match '^\.env($|\.)|(^|[._-])(secret|secrets|credential|credentials)([._-]|$)') { continue }
+        if ($relativePath -match '(^|/)(Logs|Reports|Certificates|Secrets|RuntimeData)(/|$)') { continue }
+
+        $isLinuxFile = $leafName -match '^(Install-Linux|Linux[._-])' -or $relativePath -match '(^|/)(Linux|linux)/'
+        $isHomeAssistantFile = $leafName -match '^(Install-HomeAssistant|HomeAssistant[._-]|HA[._-])' -or $relativePath -match '(^|/)(HomeAssistant|HA)/'
+        if ($isLinuxFile -and -not $linuxRequired) { continue }
+        if ($isHomeAssistantFile -and -not $homeAssistantRequired) { continue }
+        if ($leafName -ieq 'default_settings.json' -and (Test-Path -LiteralPath (Join-Path $ScriptRoot $relativePath) -PathType Leaf)) { continue }
+
+        $requiredFiles.Add([PSCustomObject]@{ Path = [string]$relativePath; Sha = [string]$RepositoryBlobs[$relativePath] })
     }
 
-    return @($requiredFiles | Select-Object -Unique)
+    return @($requiredFiles | Sort-Object Path -Unique)
 }
 
 function Invoke-ServerUpdateScripts {
@@ -115,25 +124,49 @@ function Invoke-ServerUpdateScripts {
             $env:SERVER_UPDATE_LATEST_COMMIT = $latestCommit
         }
 
-        $requiredFiles = Get-ServerUpdateRequiredFiles -ScriptRoot $scriptRoot -ScriptPath $ScriptPath -BoundParameters $BoundParameters
-        $fileState = @{}
+        $manifestCommit = ''
+        $repositoryBlobs = @{}
         if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
             try {
                 $existingCache = Get-Content -LiteralPath $cachePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-                if ($existingCache.Files) {
-                    foreach ($property in $existingCache.Files.PSObject.Properties) {
-                        $fileState[$property.Name] = [string]$property.Value
+                $manifestCommit = [string]$existingCache.ManifestCommit
+                if ($existingCache.RepositoryBlobs) {
+                    foreach ($property in $existingCache.RepositoryBlobs.PSObject.Properties) {
+                        $repositoryBlobs[$property.Name] = [string]$property.Value
                     }
                 }
             }
-            catch { $fileState = @{} }
+            catch { $repositoryBlobs = @{} }
         }
 
+        if ($manifestCommit -ne $latestCommit -or $repositoryBlobs.Count -eq 0) {
+            $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'Server-Update-Skripte-Updater' }
+            $treeUrl = "https://api.github.com/repos/$repoOwner/$repoName/git/trees/$latestCommit`?recursive=1"
+            $treeResponse = Invoke-RestMethod -Uri $treeUrl -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+            if ($treeResponse.truncated) { throw 'GitHub lieferte eine unvollständige Dateiliste.' }
+            $repositoryBlobs = @{}
+            foreach ($item in @($treeResponse.tree | Where-Object { $_.type -eq 'blob' })) {
+                $repositoryBlobs[[string]$item.path] = [string]$item.sha
+            }
+            if ($repositoryBlobs.Count -eq 0) { throw 'Die Dateiliste des Repositorys ist leer.' }
+            $manifestCommit = $latestCommit
+        }
+
+        $requiredFiles = Get-ServerUpdateRequiredFiles -ScriptRoot $scriptRoot -ScriptPath $ScriptPath -RepositoryBlobs $repositoryBlobs -BoundParameters $BoundParameters
+
         $filesToFetch = @($requiredFiles | Where-Object {
-            $localPath = Join-Path $scriptRoot $_
-            -not (Test-Path -LiteralPath $localPath -PathType Leaf) -or $fileState[$_] -ne $latestCommit
+            $localPath = Join-Path $scriptRoot $_.Path
+            (Get-ServerUpdateGitBlobSha1 -Path $localPath) -ne $_.Sha
         })
-        if ($filesToFetch.Count -eq 0) { return }
+        if ($filesToFetch.Count -eq 0) {
+            try {
+                New-Item -Path $cacheDirectory -ItemType Directory -Force | Out-Null
+                [PSCustomObject]@{ ManifestCommit = $manifestCommit; RepositoryBlobs = $repositoryBlobs } |
+                    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cachePath -Encoding UTF8 -Force
+            }
+            catch { Write-Warning 'Update-Metadaten konnten nicht lokal gespeichert werden; beim nächsten Lauf wird erneut geprüft.' }
+            return
+        }
 
         $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) ('ServerUpdateSkripte-' + [guid]::NewGuid().ToString('N'))
         $stageDirectory = Join-Path $temporaryDirectory 'stage'
@@ -143,17 +176,25 @@ function Invoke-ServerUpdateScripts {
         $changedFiles = [System.Collections.Generic.List[string]]::new()
 
         try {
-            foreach ($relativePath in $filesToFetch) {
+            foreach ($file in $filesToFetch) {
+                $relativePath = $file.Path
                 $encodedPath = (($relativePath -split '/') | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
                 $sourceUrl = "https://raw.githubusercontent.com/$repoOwner/$repoName/$latestCommit/$encodedPath"
                 $stagePath = Join-Path $stageDirectory $relativePath
+                $stageParent = Split-Path -Parent $stagePath
+                if (-not (Test-Path -LiteralPath $stageParent -PathType Container)) {
+                    New-Item -Path $stageParent -ItemType Directory -Force | Out-Null
+                }
                 Invoke-WebRequest -Uri $sourceUrl -UseBasicParsing -TimeoutSec 30 -OutFile $stagePath -ErrorAction Stop
-                if (-not (Test-Path -LiteralPath $stagePath -PathType Leaf) -or (Get-Item -LiteralPath $stagePath).Length -eq 0) {
+                if (-not (Test-Path -LiteralPath $stagePath -PathType Leaf)) {
                     throw "GitHub lieferte keine gültige Datei für '$relativePath'."
+                }
+                if ((Get-ServerUpdateGitBlobSha1 -Path $stagePath) -ne $file.Sha) {
+                    throw "Die heruntergeladene Datei '$relativePath' stimmt nicht mit dem GitHub-Hash überein."
                 }
 
                 $localPath = Join-Path $scriptRoot $relativePath
-                if ((Get-ServerUpdateFileHash -Path $localPath) -ne (Get-ServerUpdateFileHash -Path $stagePath)) {
+                if ((Get-ServerUpdateGitBlobSha1 -Path $localPath) -ne $file.Sha) {
                     $changedFiles.Add($relativePath)
                 }
             }
@@ -161,7 +202,12 @@ function Invoke-ServerUpdateScripts {
             foreach ($relativePath in $changedFiles) {
                 $localPath = Join-Path $scriptRoot $relativePath
                 if (Test-Path -LiteralPath $localPath -PathType Leaf) {
-                    Copy-Item -LiteralPath $localPath -Destination (Join-Path $backupDirectory $relativePath) -Force -ErrorAction Stop
+                    $backupPath = Join-Path $backupDirectory $relativePath
+                    $backupParent = Split-Path -Parent $backupPath
+                    if (-not (Test-Path -LiteralPath $backupParent -PathType Container)) {
+                        New-Item -Path $backupParent -ItemType Directory -Force | Out-Null
+                    }
+                    Copy-Item -LiteralPath $localPath -Destination $backupPath -Force -ErrorAction Stop
                 }
             }
 
@@ -189,12 +235,12 @@ function Invoke-ServerUpdateScripts {
                 throw
             }
 
-            foreach ($relativePath in $filesToFetch) { $fileState[$relativePath] = $latestCommit }
             try {
                 New-Item -Path $cacheDirectory -ItemType Directory -Force | Out-Null
-                [PSCustomObject]@{ Files = $fileState } |
-                    ConvertTo-Json -Depth 5 |
-                    Set-Content -LiteralPath $cachePath -Encoding UTF8 -Force
+                [PSCustomObject]@{
+                    ManifestCommit = $manifestCommit
+                    RepositoryBlobs = $repositoryBlobs
+                } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cachePath -Encoding UTF8 -Force
             }
             catch {
                 Write-Warning 'Update-Metadaten konnten nicht lokal gespeichert werden; beim nächsten Lauf wird erneut geprüft.'
