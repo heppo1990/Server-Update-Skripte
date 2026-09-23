@@ -600,6 +600,24 @@ if ($ServerADList -ne $null) {
           # SYSTEM-Kontext einer kurzlebigen, selbstlöschenden Aufgabe geprüft.
           Write-ScriptLog "Remote Update-Check als SYSTEM-Aufgabe auf $Servername..."
           $UpdResult = Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $svcCredential -Mode Check -SearchOnline $SucheOnline -WriteLog { param($message) Write-ScriptLog $message }
+          $systemTaskRows = @($UpdResult | Where-Object { $null -ne $_ })
+          $systemTaskHasUpdateData = @($systemTaskRows | Where-Object {
+            $row = $_
+            $hasUpdateData = $false
+            foreach ($fieldName in @('Status', 'KB', 'Title')) {
+              $property = $row.PSObject.Properties[$fieldName]
+              if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                $hasUpdateData = $true
+                break
+              }
+            }
+            $hasUpdateData
+          }).Count -gt 0
+          if ($systemTaskRows.Count -gt 0 -and -not $systemTaskHasUpdateData) {
+            Write-ScriptLog "WARNUNG: Leeres Ergebnis von $Servername erhalten; wiederhole die Windows-Update-Suche einmal nach 20 Sekunden."
+            Start-Sleep -Seconds 20
+            $UpdResult = Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $svcCredential -Mode Check -SearchOnline $SucheOnline -WriteLog { param($message) Write-ScriptLog $message }
+          }
         } else {
           Write-ScriptLog "Remote Update-Check via Standard-Remoting auf $Servername..."
 
@@ -656,9 +674,25 @@ if ($ServerADList -ne $null) {
 
         Write-ScriptLog "Ergebnis der Update-Suche:"
 
-        # Leere Update-Ergebnisse sollen keinen irreführenden Tabellenkopf
-        # ohne Datenzeilen erzeugen.
-        $updateRows = @($UpdResult | Where-Object { $null -ne $_ })
+        # Remote-SYSTEM-Aufgaben können bei leerer Suche ein leeres Ergebnisobjekt
+        # zurückgeben. Nur Einträge mit Update-Status, KB oder Titel sind Updates.
+        $rawUpdateRows = @($UpdResult | Where-Object { $null -ne $_ })
+        $updateRows = @($rawUpdateRows | Where-Object {
+          $row = $_
+          $hasUpdateData = $false
+          foreach ($fieldName in @('Status', 'KB', 'Title')) {
+            $property = $row.PSObject.Properties[$fieldName]
+            if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+              $hasUpdateData = $true
+              break
+            }
+          }
+          $hasUpdateData
+        })
+        $emptyUpdateRowCount = $rawUpdateRows.Count - $updateRows.Count
+        if ($emptyUpdateRowCount -gt 0) {
+          Write-ScriptLog "WARNUNG: $emptyUpdateRowCount leere Ergebniszeile(n) von $Servername verworfen; sie werden nicht als Updates gezählt."
+        }
         if ($updateRows.Count -gt 0) {
           ($updateRows | Select-Object ComputerName, Status, KB, Size, Title | Format-Table -AutoSize | Out-String) `
             -split "\r?\n" | ForEach-Object { if ($_) { Write-ScriptLog $_ } }
@@ -681,6 +715,9 @@ if ($ServerADList -ne $null) {
           $RepBody += "</table>"
 
           $UpdCount += $updateRows.Count
+        } elseif ($rawUpdateRows.Count -gt 0) {
+          Write-ScriptLog "WARNUNG: Die Update-Suche auf $Servername lieferte keine auswertbaren Update-Daten."
+          $RepBody += "<div class='warning-box'>Die Update-Suche lieferte keine auswertbaren Update-Daten.</div>"
         } else {
           Write-ScriptLog "... es sind keine Windows-Updates verfügbar."
           $RepBody += "<div class='no-updates'>Es sind keine Updates zu installieren.</div>"
