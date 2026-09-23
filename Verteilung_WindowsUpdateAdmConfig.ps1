@@ -265,9 +265,96 @@ function Invoke-WinRMDeployment {
             $session = New-PSSession -ComputerName $Servername -ErrorAction Stop
         }
 
+        # Alte Ablagerungen der früheren benutzerspezifischen TEMP-Ablage bereinigen.
+        # Profilverzeichnisse werden nur dann entfernt, wenn sie unregistriert und
+        # nach dem Löschen der eindeutig benannten Setup-Reste vollständig leer sind.
+        $removedLegacyPaths = Invoke-Command -Session $session -ScriptBlock {
+            $removed = [System.Collections.Generic.List[string]]::new()
+            $cutoff = (Get-Date).AddHours(-24)
+            $windowsTemp = Join-Path $env:WINDIR 'Temp'
+            $usersRoot = Join-Path $env:SystemDrive 'Users'
+            $registeredProfiles = @{}
+
+            try {
+                Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction Stop | ForEach-Object {
+                    $profilePath = (Get-ItemProperty -LiteralPath $_.PSPath -Name ProfileImagePath -ErrorAction SilentlyContinue).ProfileImagePath
+                    if ($profilePath) {
+                        $normalizedProfile = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$profilePath)).TrimEnd('\')
+                        $registeredProfiles[$normalizedProfile] = $true
+                    }
+                }
+            }
+            catch {
+                # Ohne sichere Profilliste keine Benutzerordner entfernen.
+                $registeredProfiles['__PROFILE_LOOKUP_FAILED__'] = $true
+            }
+
+            $legacyTemps = [System.Collections.Generic.List[string]]::new()
+            $legacyTemps.Add($windowsTemp)
+            $userDirectories = @()
+            if (Test-Path -LiteralPath $usersRoot -PathType Container) {
+                $userDirectories = @(Get-ChildItem -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue)
+                foreach ($userDirectory in $userDirectories) {
+                    $legacyTemps.Add((Join-Path $userDirectory.FullName 'AppData\Local\Temp'))
+                }
+            }
+
+            foreach ($tempDirectory in @($legacyTemps | Select-Object -Unique)) {
+                if (-not (Test-Path -LiteralPath $tempDirectory -PathType Container)) { continue }
+                try {
+                    $tempItem = Get-Item -LiteralPath $tempDirectory -Force -ErrorAction Stop
+                    if ($tempItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                    foreach ($staleSetup in @(Get-ChildItem -LiteralPath $tempDirectory -Directory -Filter 'WindowsUpdateAdmSetup_*' -Force -ErrorAction SilentlyContinue)) {
+                        if ($staleSetup.LastWriteTime -gt $cutoff -or ($staleSetup.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+                        Remove-Item -LiteralPath $staleSetup.FullName -Recurse -Force -ErrorAction Stop
+                        $removed.Add($staleSetup.FullName)
+                    }
+                }
+                catch {
+                    # Eine einzelne gesperrte Alt-Ablage verhindert keine neue Verteilung.
+                }
+            }
+
+            foreach ($userDirectory in $userDirectories) {
+                try {
+                    if ($userDirectory.Name -in @('Default', 'Default User', 'Public', 'All Users')) { continue }
+                    if ($userDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                    $profileTempPath = Join-Path $userDirectory.FullName 'AppData\Local\Temp'
+                    if (-not (Test-Path -LiteralPath $profileTempPath -PathType Container)) { continue }
+                    $normalizedUserPath = [IO.Path]::GetFullPath($userDirectory.FullName).TrimEnd('\')
+                    if ($registeredProfiles.ContainsKey($normalizedUserPath) -or $registeredProfiles.ContainsKey('__PROFILE_LOOKUP_FAILED__')) { continue }
+
+                    foreach ($emptyPath in @(
+                        $profileTempPath,
+                        (Join-Path $userDirectory.FullName 'AppData\Local'),
+                        (Join-Path $userDirectory.FullName 'AppData'),
+                        $userDirectory.FullName
+                    )) {
+                        if (-not (Test-Path -LiteralPath $emptyPath -PathType Container)) { continue }
+                        $item = Get-Item -LiteralPath $emptyPath -Force -ErrorAction Stop
+                        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { break }
+                        if ([IO.Directory]::GetFileSystemEntries($emptyPath).Count -ne 0) { break }
+                        Remove-Item -LiteralPath $emptyPath -Force -ErrorAction Stop
+                        $removed.Add($emptyPath)
+                    }
+                }
+                catch {
+                    # Bei Unsicherheit bleibt der betreffende Ordner unangetastet.
+                }
+            }
+
+            return @($removed)
+        } -ErrorAction Stop
+        foreach ($removedPath in @($removedLegacyPaths)) {
+            Write-Host "  +- Veraltete, eindeutig markierte Temp-Ablage bereinigt: $removedPath" -ForegroundColor DarkYellow
+        }
+
         $remoteTemp = Invoke-Command -Session $session -ScriptBlock {
             param($folderName)
-            Join-Path ([System.IO.Path]::GetTempPath()) $folderName
+            # Nicht den benutzerspezifischen TEMP-Pfad verwenden: WinRM kann
+            # dort einen nicht existierenden Profilpfad liefern. Der Ordner
+            # bleibt deshalb im maschinenweiten Windows-Temp-Verzeichnis.
+            Join-Path (Join-Path $env:WINDIR 'Temp') $folderName
         } -ArgumentList "WindowsUpdateAdmSetup_$([guid]::NewGuid().ToString('N'))" -ErrorAction Stop
 
         Invoke-Command -Session $session -ScriptBlock {

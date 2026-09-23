@@ -72,7 +72,9 @@ Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 
 ## Dateien auf Zielsystemen
 
-Der GitHub-Updater läuft nur auf dem Verwaltungsrechner, auf dem die Skriptsammlung liegt. `New-WindowsUpdateAdmConfig.ps1` lädt auf Zielservern keine Repository-Dateien nach. Die Verteilung überträgt dieses eine Setup-Skript vorübergehend in `%TEMP%\WindowsUpdateAdmSetup_<Kennung>`; bei Nicht-AD-Zielen kommt das Client-Zertifikat dazu. Nach dem Lauf wird genau dieser Ordner entfernt. Wenn die Verbindung die Bereinigung verhindert, meldet die Verteilung den Zielpfad als Warnung.
+Der GitHub-Updater läuft nur auf dem Verwaltungsrechner, auf dem die Skriptsammlung liegt. `New-WindowsUpdateAdmConfig.ps1` lädt auf Zielservern keine Repository-Dateien nach. Die Verteilung überträgt dieses eine Setup-Skript vorübergehend nach `%WINDIR%\Temp\WindowsUpdateAdmSetup_<Kennung>`; sie verwendet ausdrücklich nicht den benutzerspezifischen Temp-Pfad unter `C:\Users`. Bei Nicht-AD-Zielen kommt das Client-Zertifikat dazu. Nach dem Lauf wird genau dieser Ordner entfernt. Wenn die Verbindung die Bereinigung verhindert, meldet die Verteilung den Zielpfad als Warnung.
+
+Bei jeder Verteilung werden außerdem alte Ordner mit dem eindeutigen Namen `WindowsUpdateAdmSetup_*` in `%WINDIR%\Temp` und unter `C:\Users\*\AppData\Local\Temp` bereinigt, sofern sie älter als 24 Stunden sind. Unregistrierte, danach vollständig leere Profil-Gerüste werden entfernt. Registrierte Benutzerprofile, Verknüpfungen und Ordner mit anderen Inhalten bleiben unangetastet.
 
 Windows-Update-Prüfungen und -Installationen führen Befehle direkt per PowerShell-Remoting aus. Für bestimmte Nicht-AD-Systeme wird ein kurzlebiger Worker unter `C:\ProgramData\WindowsUpdateAdm` als SYSTEM-Aufgabe ausgeführt; Worker-Skript und Aufgabe löschen sich nach Abschluss. Geplante Neustart- und Nachinstallationsaufgaben speichern ihren kleinen Befehlsinhalt in der Windows-Aufgabenplanung statt als Repository-Skriptdatei. Das Installationsprotokoll `C:\ProgramData\WindowsUpdateAdm\DeferredUpdates.log` bleibt für die Nachvollziehbarkeit erhalten.
 
