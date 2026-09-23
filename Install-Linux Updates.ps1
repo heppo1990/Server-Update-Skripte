@@ -216,6 +216,11 @@ $RemoteUser ALL=(ALL) NOPASSWD: /sbin/shutdown
     $bootstrapScript = @'
 #!/bin/sh
 set -eu
+# Das kurzlebige Setup-Skript entfernt sich auch bei einem abgebrochenen SSH-Aufruf.
+trap 'rm -f "$0"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 sudo -S -p '' /bin/sh -c 'printf %s "$1" | base64 -d > "$2" && chmod 440 "$2" && chown root:root "$2" && visudo -c -f "$2" >/dev/null' -- '__SUDOERS_B64__' '__SUDOERS_PATH__'
 echo SUDOERS_CONFIGURED
 '@.Replace('__SUDOERS_B64__',$encodedSudoers).Replace('__SUDOERS_PATH__',$remoteSudoers)
@@ -260,6 +265,11 @@ function Invoke-LinuxUpdate {
     $scriptContent = @'
 #!/bin/sh
 set -u
+# Das kurzlebige Update-Skript entfernt sich auch bei einem abgebrochenen SSH-Aufruf.
+trap 'rm -f "$0"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 export DEBIAN_FRONTEND=noninteractive
 CHECK_ONLY="${1:-0}"
 UPDATE_COUNT=0

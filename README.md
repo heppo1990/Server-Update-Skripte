@@ -70,6 +70,14 @@ Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 "VMRebootIntervalMinutes": 30
 ```
 
+## Dateien auf Zielsystemen
+
+Der GitHub-Updater läuft nur auf dem Verwaltungsrechner, auf dem die Skriptsammlung liegt. `New-WindowsUpdateAdmConfig.ps1` lädt auf Zielservern keine Repository-Dateien nach. Die Verteilung überträgt dieses eine Setup-Skript vorübergehend in `%TEMP%\WindowsUpdateAdmSetup_<Kennung>`; bei Nicht-AD-Zielen kommt das Client-Zertifikat dazu. Nach dem Lauf wird genau dieser Ordner entfernt. Wenn die Verbindung die Bereinigung verhindert, meldet die Verteilung den Zielpfad als Warnung.
+
+Windows-Update-Prüfungen und -Installationen führen Befehle direkt per PowerShell-Remoting aus. Für bestimmte Nicht-AD-Systeme wird ein kurzlebiger Worker unter `C:\ProgramData\WindowsUpdateAdm` als SYSTEM-Aufgabe ausgeführt; Worker-Skript und Aufgabe löschen sich nach Abschluss. Geplante Neustart- und Nachinstallationsaufgaben speichern ihren kleinen Befehlsinhalt in der Windows-Aufgabenplanung statt als Repository-Skriptdatei. Das Installationsprotokoll `C:\ProgramData\WindowsUpdateAdm\DeferredUpdates.log` bleibt für die Nachvollziehbarkeit erhalten.
+
+Linux-Updates laden jeweils ein eigens erzeugtes Shell-Skript nach `/tmp`; es entfernt sich nach Ausführung selbst, ebenso das kurze Skript zur Einrichtung der begrenzten sudo-Regeln. Home Assistant erhält keine Skriptdateien; die Befehle laufen direkt über SSH. Dauerhafte SSH-Schlüssel, sudo-Regeln, PSWindowsUpdate-/JEA-Konfiguration und Protokolle sind Betriebszustand, keine Kopien der Repository-Skripte.
+
 ## Windows-Skripte
 
 ### `Verteilung_WindowsUpdateAdmConfig.ps1`

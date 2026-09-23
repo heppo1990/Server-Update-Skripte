@@ -387,12 +387,23 @@ function Invoke-WinRMDeployment {
     }
     finally {
         if ($session) {
-            try {
-                Invoke-Command -Session $session -ScriptBlock {
-                    param($path)
-                    Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
-                } -ArgumentList $remoteTemp -ErrorAction SilentlyContinue
-            } catch { }
+            if ($remoteTemp) {
+                try {
+                    $remoteTempRemoved = Invoke-Command -Session $session -ScriptBlock {
+                        param($path)
+                        if (Test-Path -LiteralPath $path) {
+                            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                        }
+                        return (-not (Test-Path -LiteralPath $path))
+                    } -ArgumentList $remoteTemp -ErrorAction Stop
+                    if (-not $remoteTempRemoved) {
+                        Write-Warning "Temporärer Setup-Ordner auf $Servername konnte nicht bestätigt entfernt werden: $remoteTemp"
+                    }
+                }
+                catch {
+                    Write-Warning "Temporärer Setup-Ordner auf $Servername konnte nicht entfernt werden: $remoteTemp. Ursache: $($_.Exception.Message)"
+                }
+            }
             Remove-PSSession -Session $session -ErrorAction SilentlyContinue
         }
     }
