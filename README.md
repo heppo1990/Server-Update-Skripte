@@ -1,0 +1,228 @@
+# Server Updates
+
+Diese Sammlung verwaltet Windows-, Linux- und Home-Assistant-Updates zentral. Alle Skripte erwarten, dass sie gemeinsam in einem Verzeichnis liegen. Pfade werden jeweils relativ zum Skriptverzeichnis bestimmt.
+
+`WindowsUpdate.Common.psm1` ist ein internes Modul und muss im selben Verzeichnis bleiben. Check, Download, Installation und die Verteilung verwenden daraus dieselbe Zielermittlung für AD-Computer, zusätzliche Geräte und Hypervisoren. Check und Installation verwenden zusätzlich die zentrale Ermittlung von Winget- und Chocolatey-Paketupdates. Check, Download und Installation verwenden dieselbe Logik für das Laden der Settings-Dateien, die Nicht-AD-Remoting-Vorbereitung (TrustedHosts und Client-Zertifikat), WinRM/JEA-Aufrufe mit einheitlichen Open-/Operation-Timeouts, Protokollierung, Konsolen-Zusammenfassungen, Dateiaufbewahrung und den technischen SMTP-Versand. Wiederholbare WinRM-Operationen und Remote-Aufgaben verwenden eine zentrale Retry-Logik. Linux und Home Assistant verwenden gemeinsame SSH-Optionen mit Verbindungs- und Keepalive-Timeout. Es wird nicht direkt ausgeführt. Die HTML-Inhalte und Farben der drei Berichte bleiben bewusst in den jeweiligen Skripten.
+
+`default_settings.json` ist optional. Liegt sie nicht im Skriptordner, wird eine vollständige `settings.json` direkt verwendet; skriptspezifische `*.settings.json`-Dateien bleiben weiterhin möglich und haben Vorrang.
+
+## Reihenfolge der Verwendung
+
+1. Einstellungen in `settings.json` pflegen.
+2. Einmalig oder nach Änderungen an der Remoting-Konfiguration `Verteilung_WindowsUpdateAdmConfig.ps1` ausführen.
+3. Mit `Check-ServersUpdates.ps1` verfügbare Updates prüfen.
+4. Optional mit `Download-ServersUpdates.ps1` herunterladen.
+5. Mit `Install-ServersUpdates.ps1` installieren.
+
+## Einstellungen
+
+`default_settings.json` ist die zentrale Fallback-Basis. Die allgemeine `settings.json` ist normalerweise ausreichend und überschreibt deren Werte. Existiert zusätzlich eine skriptspezifische Datei wie `Install-ServersUpdates.settings.json`, hat diese für das betreffende Skript Vorrang.
+
+Für eine geplante Aufgabe den Skriptordner im Feld **„Starten in“** setzen und das jeweilige Skript relativ aufrufen, beispielsweise `powershell.exe -NonInteractive -ExecutionPolicy Bypass -File ".\Install-ServersUpdates.ps1"`. Dadurch bleibt der Speicherort der Skripte frei wählbar.
+
+Wichtige Werte in `UpdateSettings`:
+
+| Einstellung                   | Bedeutung                                                                                                                                                                                                |
+|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `TargetComputers`             | `Server` für Windows Server oder `All` für alle Windows-Computer in AD.                                                                                                                                  |
+| `AdditionalComputers`         | Zusätzliche Rechner außerhalb der AD.                                                                                                                                                                    |
+| `HypervisorComputers`         | Hypervisoren außerhalb der AD, z. B. `SrvHv01`.                                                                                                                                                          |
+| `ClientCertThumbprint`        | Fingerabdruck des lokalen Client-Zertifikats für Nicht-AD-Ziele. Wird durch das Zertifikat-Setup synchronisiert.                                                                                         |
+| `ClearUpdateCacheBeforeCheck` | `true` (Standard): Leert vor dem Update-Check Download und DataStore und stößt eine neue Erkennung an. `false`: überspringt diese Bereinigung, etwa bei häufigen Prüfungen.                              |
+| `EnableWingetUpdates`         | `true` (Standard): Winget-Pakete prüfen und beim Installationslauf aktualisieren. `false`: Winget vollständig überspringen.                                                                              |
+| `EnableChocolateyUpdates`     | `true` (Standard): Chocolatey-Pakete prüfen und beim Installationslauf aktualisieren. `false`: Chocolatey vollständig überspringen.                                                                      |
+| `DeferredUpdateCategories`    | Kategorien, die zunächst ausgelassen werden sollen, z. B. `Exchange` und `SQL`.                                                                                                                          |
+| `DeferredUpdateKBs`           | Einzelne KBs, die zunächst ausgelassen werden sollen, z. B. `KB5122871`.                                                                                                                                 |
+| `InstallDeferredUpdates`      | `true`: zurückgestellte Updates werden nur dann nach dem nächsten Neustart nachinstalliert, wenn die Auswahl auf dem jeweiligen Ziel tatsächlich noch Updates enthält. `false`: sie bleiben ausgelassen. |
+| `DeferredUpdateDelayMinutes`  | Wartezeit ab dem tatsächlichen Neustart bis zur Nachinstallation. `1440` entspricht 24 Stunden.                                                                                                          |
+| `PhysicalRebootTime`          | Uhrzeit für physische Rechner, z. B. `03:00`. Leer bedeutet: kein automatischer Neustart.                                                                                                                |
+| `VMRebootStartTime`           | Uhrzeit für die erste VM, z. B. `19:00`. Leer bedeutet: kein zeitgesteuerter VM-Neustart.                                                                                                                |
+| `VMRebootIntervalMinutes`     | Zeitversatz jeder weiteren VM, normalerweise `30`.                                                                                                                                                       |
+| `VMRebootImmediately`         | `true` startet VMs nach einer erfolgreichen, neustartpflichtigen Installation zeitnah neu. Dieser Wert hat Vorrang vor `VMRebootStartTime`.                                                              |
+
+Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
+
+```json
+"ClearUpdateCacheBeforeCheck": true,
+"EnableWingetUpdates": true,
+"EnableChocolateyUpdates": true,
+"DeferredUpdateCategories": ["Exchange", "SQL"],
+"DeferredUpdateKBs": [],
+"InstallDeferredUpdates": true,
+"DeferredUpdateDelayMinutes": 1440,
+"PhysicalRebootTime": "03:00",
+"VMRebootStartTime": "19:00",
+"VMRebootImmediately": false,
+"VMRebootIntervalMinutes": 30
+```
+
+## Windows-Skripte
+
+### `Verteilung_WindowsUpdateAdmConfig.ps1`
+
+Richtet die sichere Update-Verbindung auf den Windows-Zielen ein oder aktualisiert sie.
+
+- AD-Rechner verwenden Kerberos und benötigen kein Client-Zertifikat.
+- Nicht-AD-Rechner verwenden WinRM über HTTPS mit Client-Zertifikat.
+- Bei einer Wiederholung prüft das Skript zuerst die Zertifikatsverbindung. Nur falls sie noch nicht funktioniert, werden einmalig lokale Administrator-Anmeldedaten abgefragt.
+- Das Admin-Share (`C$`) ist keine Voraussetzung.
+- Eigene Update-Service-Accounts werden nicht verwendet. Alte Konten `svc-updates` und `svc-wupdate-hv` werden bei der erneuten Einrichtung eines Nicht-AD-Geräts entfernt.
+- Die Verteilung übernimmt das am Nicht-AD-Ziel gebundene WinRM-Serverzertifikat in den vertrauenswürdigen Zertifikatsspeicher des Verwaltungsservers und prüft die anschließende Verbindung vollständig. Check, Download und Installation verwenden danach keine `SkipCACheck`- oder `SkipCNCheck`-Optionen mehr. Deshalb Ziele immer per DNS-Namen, nicht per IP-Adresse eintragen.
+- Die JEA-Sitzung `WindowsUpdateAdm` beschränkt die Update-Befehle. Die festen, selbstlöschenden Wartungsaufgaben werden nicht über zusätzliche JEA-Rechte angelegt.
+- Auf Nicht-AD-Systemen mit Windows Server 2016 ist JEA mit Client-Zertifikat nicht zuverlässig mit dem SYSTEM-Kontext kombinierbar. Check, Download und Installation legen deshalb über die bereits geprüfte HTTPS-Zertifikatsverbindung eine temporäre Aufgabe im lokalen SYSTEM-Kontext an. Sie schreibt das Ergebnis zurück und löscht sich einschließlich ihrer Arbeitsdatei nach Abschluss. AD-Systeme sowie neuere Nicht-AD-Systeme laufen weiterhin mit dem JEA-Endpunkt und virtuellem SYSTEM-Konto.
+- Da Windows Update auf diesen Nicht-AD-Server-2016-Systemen im Kompatibilitätsmodus keine Downloads/Installationen zulässt, führen Check, Download und Installation dort die Update-Befehle automatisch über die geprüfte WinRM-HTTPS-Clientzertifikatsverbindung aus; für alle anderen Ziele bleibt JEA aktiv.
+- Im normalen Gesamtlauf werden zusätzlich Linux und Home Assistant im Check-Modus kontaktiert. Dadurch erfolgen SSH-Schlüssel-, Schlüssel-Login- und NOPASSWD-Ersteinrichtung bereits bei der Verteilung. Sie bleiben aus Sicherheitsgründen auch bei Check, Download und Installation erhalten.
+- Nach der JEA-Registrierung testet die Verteilung den Endpunkt bis zu fünfmal im Abstand von 30 Sekunden. Die Konsole meldet nur noch den kompakten Wiederholungsstatus; die Zusammenfassung enthält bei einem endgültigen Fehler die Ursache in Kurzform.
+
+Aufruf:
+
+```powershell
+.\Verteilung_WindowsUpdateAdmConfig.ps1
+```
+
+Nur ein Windows-Ziel einrichten (Linux und Home Assistant werden dabei übersprungen):
+
+```powershell
+.\Verteilung_WindowsUpdateAdmConfig.ps1 -TargetComputer VHost00
+```
+
+### `Setup-ClientCertificate.ps1`
+
+Erstellt oder prüft das Client-Zertifikat auf dem Verwaltungsrechner und synchronisiert dessen Fingerabdruck in die vorhandenen Settings-Dateien. Normalerweise wird es automatisch durch die Verteilung aufgerufen und muss nicht manuell gestartet werden.
+
+### `Check-ServersUpdates.ps1`
+
+Prüft verfügbare Windows-, Winget-, Chocolatey-, Linux- und Home-Assistant-Updates und erzeugt optional einen HTML-Bericht mit E-Mail. Standardmäßig wird der Windows-Update-Cache vor der Suche bereinigt und danach eine neue Erkennung angestoßen. Mit `ClearUpdateCacheBeforeCheck: false` kann dies je Konfiguration übersprungen werden. Linux und Home Assistant werden ohne Update, Backup oder Neustart geprüft; fehlt die SSH-Einrichtung, wird sie beim ersten Aufruf einmalig durchgeführt.
+
+Aufruf:
+
+```powershell
+.\Check-ServersUpdates.ps1
+```
+
+### `Download-ServersUpdates.ps1`
+
+Lädt verfügbare Windows-Updates herunter, ohne sie zu installieren. Die Auswahl der Rechner und die Verbindung folgen derselben Konfiguration wie beim Check.
+
+Aufruf:
+
+```powershell
+.\Download-ServersUpdates.ps1
+```
+
+### `Install-ServersUpdates.ps1`
+
+Installiert Windows-Updates sowie verfügbare Chocolatey- und Winget-Updates. Die Winget-Ausgabe nennt zunächst die gefundenen Pakete und danach den Installationsfortschritt.
+
+Neustart-Ablauf:
+
+1. Nach Windows-Updates wird mit `Get-WURebootStatus -Silent` geprüft, ob ein Neustart erforderlich ist.
+2. Bei VMs erfolgt der Neustart entweder sofort (`VMRebootImmediately`) oder ab der konfigurierten Uhrzeit zeitversetzt.
+3. Physische Geräte starten zum nächsten konfigurierten Zeitpunkt neu.
+4. Vor dem Anlegen prüft das Skript pro Ziel die zurückgestellten Kategorien bzw. KBs. Ohne verfügbare Updates wird keine Nachinstallationsaufgabe angelegt; eine vorhandene alte Aufgabe wird gelöscht.
+5. Die Nachinstallationsaufgabe erkennt den tatsächlichen Neustart und wartet danach `DeferredUpdateDelayMinutes`.
+6. Sie installiert die zurückgestellten Kategorien oder KBs, versendet eine HTML-E-Mail im gleichen Layout wie der normale Installationsbericht und startet bei erneutem Neustartbedarf noch einmal neu.
+7. Jeder HTML-Mailversand wird bis zu dreimal versucht, mit jeweils 30 Sekunden Abstand – auch die normalen Check-, Download- und Installationsberichte.
+8. Die angelegten Aufgaben löschen sich selbst. Ein manueller Neustart verhindert einen unnötigen späteren ersten Neustart.
+
+Ist der Verwaltungsserver selbst ein Ziel und eine VM, wird sein Neustart unabhängig von seiner Position in der Serverliste immer bis zum Ende des gesamten Installationslaufs zurückgestellt. Erst nachdem alle übrigen Ziele, Berichte und E-Mails verarbeitet wurden, wird seine Neustartaufgabe angelegt.
+
+Gezielter Testlauf für nur einen Windows-Server; Linux und Home Assistant werden dabei übersprungen:
+
+```powershell
+.\Install-ServersUpdates.ps1 -TargetComputer SRVSVC
+```
+
+Test des Mailversands aus dem späteren SYSTEM-Kontext der Nachinstallationsaufgabe – ohne Update und ohne Neustart:
+
+```powershell
+.\Install-ServersUpdates.ps1 -TargetComputer SRVSVC -TestDeferredMail
+```
+
+Die einmalige Testaufgabe löscht sich nach dem Versand. Sie verwendet dieselben SMTP-Einstellungen wie die Nachinstallation und versucht den Versand ebenfalls bis zu dreimal. Das Ergebnis steht auf dem Zielsystem in `C:\ProgramData\WindowsUpdateAdm\DeferredUpdates.log`.
+
+Normaler Lauf für alle konfigurierten Ziele:
+
+```powershell
+.\Install-ServersUpdates.ps1
+```
+
+### `PendingReboot.ps1`
+
+Prüft ausstehende Neustarts zentral. Ohne Parameter werden die AD-Ziele sowie `AdditionalComputers` und `HypervisorComputers` aus der Konfiguration verwendet. AD-Ziele werden per Kerberos abgefragt, Nicht-AD-Ziele per Client-Zertifikat. Berücksichtigt Windows Update, Component-Based Servicing, ausstehende Dateiumbenennungen und – sofern vorhanden – SCCM.
+
+```powershell
+.\PendingReboot.ps1
+.\PendingReboot.ps1 -ComputerName SRVSVC,SrvHv01
+```
+
+### `Updateverlauf auslesen.ps1`
+
+Liest den Windows-Updateverlauf aus. Für eine schnelle lokale Prüfung eignet sich auch:
+
+```powershell
+Get-WUHistory
+```
+
+## Linux und Home Assistant
+
+### `Install-Linux Updates.ps1`
+
+Führt die konfigurierten Linux-Updates aus und schreibt die Ergebnisse für den Gesamtbericht. Linux-Hosts stehen nicht mehr fest im Skript, sondern optional in der allgemeinen `settings.json` oder mit Vorrang in `Install-Linux Updates.settings.json`:
+
+```json
+"LinuxSettings": {
+  "Hosts": [
+    { "Host": "srv-oc", "User": "oc-ubuntu-administrator" },
+    { "Host": "srvfog", "User": "srvfog-administrator" }
+  ],
+  "ConnectTimeoutSeconds": 15,
+  "LockWaitMinutes": 5
+}
+```
+
+Ein leerer Host-Eintrag bedeutet: Linux wird ohne Fehler übersprungen. Beim ersten Kontakt wird der SSH-Schlüssel mit genau einer SSH-Passworteingabe eingerichtet. Danach richtet das Skript NOPASSWD für die eng begrenzten Update- und Reboot-Befehle mit genau einer sudo-Passworteingabe ein. Das Passwort wird dabei weder in einen Befehl eingebettet noch zum Server kopiert; Sonderzeichen funktionieren daher unverändert.
+
+Während der Paketinstallation wird die SSH-Ausgabe sofort angezeigt und protokolliert. SSH nutzt einen konfigurierbaren Verbindungs-Timeout, zwei Verbindungsversuche sowie Keepalive-Prüfungen; interaktive Passwort-Einrichtung wird bewusst nicht automatisch wiederholt. Erfordert ein installiertes Paket einen Neustart, gelten dieselben Einstellungen aus `UpdateSettings` wie für Windows (`PhysicalRebootTime`, `VMRebootStartTime`, `VMRebootImmediately`, `VMRebootIntervalMinutes`). Ein manueller Neustart beendet einen eventuell geplanten Linux-Neustart.
+
+### `Install-HomeAssistant Updates.ps1`
+
+Führt die konfigurierten Home-Assistant-Updates aus und schreibt die Ergebnisse für den Gesamtbericht.
+
+Die SSH-Verbindung kann optional in der `settings.json` oder mit Vorrang in `Install-HomeAssistant Updates.settings.json` hinterlegt werden:
+
+```json
+"HomeAssistantSettings": {
+  "Host": "SrvHome",
+  "User": "root",
+  "Port": 22
+}
+```
+
+Das Skript verwendet automatisch den SSH-Schlüssel des ausführenden Benutzers und ein im System gefundenes `ssh.exe`; falls noch kein Schlüssel existiert, wird er angelegt. Ein abweichender Schlüssel- oder SSH-Pfad kann bei Bedarf weiterhin direkt als Skriptparameter übergeben werden. `default_settings.json` ist die Basis, danach überschreibt die allgemeine `settings.json` und zuletzt die skriptspezifische JSON einzelne Werte.
+
+Auch Home Assistant folgt den gemeinsamen Neustartzeiten aus `UpdateSettings`. Erfordert ein HA-OS-Update einen sofortigen Neustart, löst das Skript ihn aus, wartet auf die Rückkehr von SSH und Supervisor und installiert anschließend die Add-ons. Bei einem zeitlich geplanten oder deaktivierten Neustart endet der Lauf regulär; die Add-ons folgen erst nach diesem Neustart im nächsten Installationslauf. Einzelne HA-CLI-Aufrufe werden nach 300 Sekunden beendet; der Wert ist über `HomeAssistantSettings.CommandTimeoutSeconds` anpassbar. `RebootWaitSeconds` (Standard: 300) begrenzt die Wartezeit nach einem sofortigen Neustart.
+
+Beide Skripte werden bei einem normalen Aufruf von `Install-ServersUpdates.ps1` mit ausgeführt. Mit `-TargetComputer` werden sie ausdrücklich übersprungen.
+
+`Install-Linux Updates.ps1 -DryRun` prüft zusätzlich die verfügbaren Linux-Paketupdates, ohne eine Installation, Paketlisten-Aktualisierung oder einen Neustart auszuführen.
+
+## Protokolle und Berichte
+
+Unter `Logs` werden – abhängig von den Einstellungen – Protokolle und HTML-Berichte gespeichert. Die Anzahl aufbewahrter Dateien wird über `KeepLogFiles` und `KeepReportFiles` gesteuert. Die Windows-Hauptskripte verwenden dafür dieselbe zentrale Aufbewahrungslogik. Linux und Home Assistant schreiben ausführliche eigene `.log`-Dateien ausschließlich bei der Installation; bei Check und Download werden nur die für den Gesamtbericht benötigten Statusdateien erzeugt. Auch die Ausgabe in Konsole und Logdatei sowie der SMTP-Versand sind für die drei Windows-Hauptskripte zentral im Modul umgesetzt.
+
+Die selbstlöschende Nachinstallationsaufgabe protokolliert zusätzlich direkt auf dem jeweiligen Zielsystem in `C:\ProgramData\WindowsUpdateAdm\DeferredUpdates.log`. Dort stehen die erkannte Neustartzeit, die Nachinstallationsauswahl sowie jeder Mailversuch oder SMTP-Fehler.
+
+## Test einer verzögerten Nachinstallation
+
+Nur für eine Test-VM kann die Wartezeit vorübergehend verkürzt werden:
+
+```json
+"DeferredUpdateKBs": ["KB5122871"],
+"InstallDeferredUpdates": true,
+"DeferredUpdateDelayMinutes": 5,
+"VMRebootImmediately": true,
+"PhysicalRebootTime": ""
+```
+
+Danach den gezielten Lauf ausführen. Nach erfolgreichem Test die Werte wieder auf die normalen Kategorien und `1440` Minuten zurückstellen.
