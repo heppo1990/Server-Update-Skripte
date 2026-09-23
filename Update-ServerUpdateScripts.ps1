@@ -108,6 +108,7 @@ function Invoke-ServerUpdateScripts {
     )
 
     $scriptRoot = Split-Path -Parent $ScriptPath
+    $scriptName = [IO.Path]::GetFileName($ScriptPath)
     $repoOwner = 'heppo1990'
     $repoName = 'Server-Update-Skripte'
     $branch = 'main'
@@ -265,5 +266,102 @@ function Invoke-ServerUpdateScripts {
         $scriptExitCode = 0
         if (Test-Path variable:global:LASTEXITCODE) { $scriptExitCode = [int]$global:LASTEXITCODE }
         exit $scriptExitCode
+    }
+
+    # Nur das Installationsskript prüft PS7 über Windows PowerShell 5.1.
+    # Das schützt den laufenden Updateprozess vor einem Austausch der PS7-Dateien.
+    if ($scriptName -eq 'Install-ServersUpdates.ps1' -and
+        $PSVersionTable.PSEdition -eq 'Core' -and
+        $env:SERVER_UPDATE_POWERSHELL7_CHECKED -ne '1') {
+        $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) {
+            $restartArguments = [System.Collections.Generic.List[string]]::new()
+            if ($BoundParameters.Contains('DebugMode') -and [bool]$BoundParameters['DebugMode']) { $restartArguments.Add('-DebugMode') }
+            if ($BoundParameters.Contains('TargetComputer')) {
+                $restartArguments.Add('-TargetComputer')
+                foreach ($target in @($BoundParameters['TargetComputer'])) { $restartArguments.Add([string]$target) }
+            }
+            if ($BoundParameters.Contains('TestDeferredMail') -and [bool]$BoundParameters['TestDeferredMail']) { $restartArguments.Add('-TestDeferredMail') }
+
+            $statusPath = Join-Path ([IO.Path]::GetTempPath()) ('ServerUpdate-PowerShell7-' + [guid]::NewGuid().ToString('N') + '.json')
+            $environmentNames = @(
+                'SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH',
+                'SERVER_UPDATE_BOOTSTRAP_STATUS_PATH',
+                'SERVER_UPDATE_BOOTSTRAP_ARGUMENTS_JSON'
+            )
+            $previousEnvironment = @{}
+            foreach ($name in $environmentNames) { $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+            try {
+                $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH = $ScriptPath
+                $env:SERVER_UPDATE_BOOTSTRAP_STATUS_PATH = $statusPath
+                $env:SERVER_UPDATE_BOOTSTRAP_ARGUMENTS_JSON = ConvertTo-Json -InputObject @($restartArguments.ToArray()) -Compress
+
+                # Der Vorlauf läuft direkt in Windows PowerShell 5.1 und liegt nicht als zusätzliche Datei im Repository.
+                $bootstrapSource = @'
+$ErrorActionPreference = 'Stop'
+$statusPath = $env:SERVER_UPDATE_BOOTSTRAP_STATUS_PATH
+$noUpdateExitCodes = @(-1978335188, -1978335189, -1978335192)
+$wingetCommand = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
+$chocoPath = 'C:\ProgramData\chocolatey\bin\choco.exe'
+try {
+    if ($wingetCommand) {
+        Write-Host 'Prüfe mit Windows PowerShell 5.1, ob Winget ein PowerShell-7-Update anbietet ...'
+        $packageOutput = & $wingetCommand.Source upgrade --id Microsoft.PowerShell --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1
+        $packageExitCode = $LASTEXITCODE
+        if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
+        if ($packageExitCode -ne 0) {
+            Write-Warning "PowerShell-7-Update mit Winget fehlgeschlagen (Exitcode $packageExitCode). Der Installationslauf wird fortgesetzt. $($packageOutput | Out-String)"
+            exit 0
+        }
+    }
+    elseif (Test-Path -LiteralPath $chocoPath -PathType Leaf) {
+        Write-Host 'Winget ist nicht installiert; prüfe mit Windows PowerShell 5.1 Chocolatey auf ein PowerShell-7-Update ...'
+        $outdatedOutput = & $chocoPath outdated --limit-output 2>&1
+        $chocoExitCode = $LASTEXITCODE
+        if ($chocoExitCode -ne 0) {
+            Write-Warning "Chocolatey konnte nicht auf veraltete Pakete prüfen (Exitcode $chocoExitCode). Der Installationslauf wird fortgesetzt. $($outdatedOutput | Out-String)"
+            exit 0
+        }
+        $powerShellUpdateAvailable = @($outdatedOutput | Where-Object { ([string]$_).Trim() -match '^powershell-core\|' }).Count -gt 0
+        if (-not $powerShellUpdateAvailable) { exit 0 }
+        $packageOutput = & $chocoPath upgrade powershell-core --yes --no-progress 2>&1
+        $packageExitCode = $LASTEXITCODE
+        if ($packageExitCode -ne 0) {
+            Write-Warning "PowerShell-7-Update mit Chocolatey fehlgeschlagen (Exitcode $packageExitCode). Der Installationslauf wird fortgesetzt. $($packageOutput | Out-String)"
+            exit 0
+        }
+    }
+    else {
+        exit 0
+    }
+
+    $pwshCommand = Get-Command -Name 'pwsh.exe' -ErrorAction SilentlyContinue
+    if (-not $pwshCommand) { throw 'Nach dem Paketupdate wurde pwsh.exe nicht gefunden.' }
+    $scriptArguments = @(ConvertFrom-Json -InputObject $env:SERVER_UPDATE_BOOTSTRAP_ARGUMENTS_JSON -ErrorAction Stop)
+    $env:SERVER_UPDATE_POWERSHELL7_CHECKED = '1'
+    Write-Host 'PowerShell 7 wurde aktualisiert; starte Install-ServersUpdates.ps1 mit der aktualisierten Version neu.'
+    & $pwshCommand.Source -NoLogo -NoProfile -ExecutionPolicy Bypass -File $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH @scriptArguments
+    $scriptExitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+    Set-Content -LiteralPath $statusPath -Value (@{ Restarted = $true; ExitCode = $scriptExitCode } | ConvertTo-Json -Compress) -Encoding UTF8 -Force
+}
+catch {
+    Write-Warning "PS7-Aktualisierung vor dem Installationslauf fehlgeschlagen; vorhandener Lauf wird fortgesetzt. Ursache: $($_.Exception.Message)"
+}
+'@
+                $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrapSource))
+                & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedBootstrap
+                if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+                    $restartStatus = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+                    if ($restartStatus.Restarted) { exit ([int]$restartStatus.ExitCode) }
+                }
+            }
+            catch {
+                Write-Warning "PS7-Aktualisierungsprüfung mit Windows PowerShell 5.1 fehlgeschlagen; Installationslauf wird fortgesetzt. Ursache: $($_.Exception.Message)"
+            }
+            finally {
+                foreach ($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }
+                Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
