@@ -1,0 +1,60 @@
+﻿{
+	"UpdateSettings": {
+		"SucheOnline": false,
+		"WriteReport": true,
+		"KeepReportFiles": 5,
+		"WriteLogFile": true,
+		"KeepLogFiles": 5,
+		"DetectNowWaitSeconds": 60,
+		"ClearUpdateCacheBeforeCheck": true,
+		"EnableWingetUpdates": true,
+		"EnableChocolateyUpdates": true,
+		"TargetComputers": "Server",
+		"AdditionalComputers": [],
+		"HypervisorComputers": [],
+		"ClientCertThumbprint": "",
+		"DeferredUpdateCategories": ["Exchange", "SQL"],
+		"DeferredUpdateKBs": [],
+		"InstallDeferredUpdates": false,
+		"PhysicalRebootTime": "03:00",
+		"VMRebootStartTime": "19:00",
+		"VMRebootImmediately": false,
+		"VMRebootIntervalMinutes": 30,
+		"DeferredUpdateDelayMinutes": 1440
+	},
+	"LinuxSettings": {
+		"Hosts": [],
+		"ConnectTimeoutSeconds": 15,
+		"LockWaitMinutes": 5
+	},
+	"HomeAssistantSettings": {
+		"Host": "",
+		"User": "",
+		"Port": 22
+	},
+	"MailSettings": {
+		"CompanyName": "Test Firma",
+		"Host": "",
+		"Port": 587,
+		"UseSSL": true,
+		"Auth": true,
+		"AuthUser": "",
+		"AuthPass": "",
+		"Sender": "",
+		"MailTo": "",
+		"MailCC": "",
+		"MailBCC": "",
+		"Check": {
+			"SendMail": true,
+			"Subject": "Server Update-Check"
+		},
+		"Download": {
+			"SendMail": false,
+			"Subject": "Server Updates heruntergeladen"
+		},
+		"Install": {
+			"SendMail": true,
+			"Subject": "Server Updates installiert"
+		}
+	}
+}
