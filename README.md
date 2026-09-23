@@ -2,6 +2,18 @@
 
 Diese Sammlung verwaltet Windows-, Linux- und Home-Assistant-Updates zentral. Alle Skripte erwarten, dass sie gemeinsam in einem Verzeichnis liegen. Pfade werden jeweils relativ zum Skriptverzeichnis bestimmt.
 
+## Automatische Skriptaktualisierung
+
+Alle direkt ausführbaren PowerShell-Skripte prüfen beim Start den öffentlichen Branch `main` von [heppo1990/Server-Update-Skripte](https://github.com/heppo1990/Server-Update-Skripte). Dafür ist weder Git noch ein GitHub-Konto auf dem ausführenden System erforderlich; der Rechner benötigt lediglich HTTPS-Zugriff auf GitHub.
+
+Der Updater lädt keine ZIP-Datei und keinen vollständigen Repository-Klon. Er ermittelt anhand des gestarteten Skripts, welche Dateien benötigt werden. Bei einem neuen Commit lädt er nur diese Abhängigkeiten; danach vergleicht er die Dateien und ersetzt ausschließlich tatsächlich veränderte Dateien. `WindowsUpdate.Common.psm1` wird nur für Skripte geladen, die das gemeinsame Modul verwenden. Die Linux- und Home-Assistant-Skripte werden bei Check, Download, Installation und Verteilung nur geladen, wenn sie in den lokal wirksamen Einstellungen konfiguriert sind. Bei einem auf Windows begrenzten Lauf werden sie übersprungen.
+
+Die lokale `settings.json`, skriptspezifische `*.settings.json`, Zertifikate, Protokolle, Berichte und Laufzeitdateien werden nicht aus GitHub geladen oder ersetzt. `default_settings.json` wird nur ergänzt, wenn sie lokal fehlt. Der Update-Metadatencache liegt unter `%ProgramData%\ServerUpdateSkripte\UpdateCache.json` und enthält nur Commit-IDs, keine Konfiguration.
+
+Wenn sich benötigte Skriptdateien geändert haben, speichert der Updater zunächst alle Downloads zwischen, übernimmt die Dateien und startet das aufgerufene Skript mit denselben Parametern erneut. Schlägt die Verbindung oder der Download fehl, wird mit dem vorhandenen lokalen Stand fortgefahren. Der Code auf `main` wird beim nächsten Skriptstart wirksam; Änderungen an diesem Branch sollten deshalb nur von berechtigten Maintainerinnen und Maintainer eingepflegt werden.
+
+**Einmalige Aktivierung auf bestehenden Installationen:** Bereits installierte ältere Skriptkopien kennen den Updater noch nicht. Sie müssen zunächst einmal durch die aktualisierten Skripte aus diesem Repository ersetzt werden. Ab diesem ersten Austausch aktualisieren sie sich bei jedem Start selbst.
+
 `WindowsUpdate.Common.psm1` ist ein internes Modul und muss im selben Verzeichnis bleiben. Check, Download, Installation und die Verteilung verwenden daraus dieselbe Zielermittlung für AD-Computer, zusätzliche Geräte und Hypervisoren. Check und Installation verwenden zusätzlich die zentrale Ermittlung von Winget- und Chocolatey-Paketupdates. Check, Download und Installation verwenden dieselbe Logik für das Laden der Settings-Dateien, die Nicht-AD-Remoting-Vorbereitung (TrustedHosts und Client-Zertifikat), WinRM/JEA-Aufrufe mit einheitlichen Open-/Operation-Timeouts, Protokollierung, Konsolen-Zusammenfassungen, Dateiaufbewahrung und den technischen SMTP-Versand. Wiederholbare WinRM-Operationen und Remote-Aufgaben verwenden eine zentrale Retry-Logik. Linux und Home Assistant verwenden gemeinsame SSH-Optionen mit Verbindungs- und Keepalive-Timeout. Es wird nicht direkt ausgeführt. Die HTML-Inhalte und Farben der drei Berichte bleiben bewusst in den jeweiligen Skripten.
 
 `default_settings.json` ist optional. Liegt sie nicht im Skriptordner, wird eine vollständige `settings.json` direkt verwendet; skriptspezifische `*.settings.json`-Dateien bleiben weiterhin möglich und haben Vorrang.

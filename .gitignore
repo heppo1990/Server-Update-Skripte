@@ -1,0 +1,20 @@
+# Kunden- und laufzeitspezifische Einstellungen niemals veröffentlichen.
+/settings.json
+/*.settings.json
+
+# Lokal erzeugte Protokolle, Berichte und Ergebnisdaten.
+/Logs/
+/Reports/
+/*_stats.json
+/*_check_stats.json
+/*.html
+
+# Lokale Zertifikate und Schlüsselmaterial.
+/*.cer
+/*.pfx
+/*.p12
+/*.key
+
+# Lokaler Update-Cache und temporäre Downloads.
+/.server-update-cache.json
+/*.download
