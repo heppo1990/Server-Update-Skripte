@@ -23,7 +23,10 @@
 param(
     # Beschränkt die Verteilung auf genau ein Windows-Ziel. Linux und Home
     # Assistant werden in diesem Modus bewusst nicht zusätzlich eingerichtet.
-    [string]$TargetComputer
+    [string]$TargetComputer,
+    # Bereinigt ausschließlich alte, eindeutig markierte Temp-Ablagen auf den
+    # Remote-Zielen und überspringt die erneute WindowsUpdateAdm-Einrichtung.
+    [switch]$CleanupLegacyTempOnly
 )
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
 $scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
@@ -179,7 +182,8 @@ function Invoke-WinRMDeployment {
         [string]$Servername,
         [string]$PSSCfgSkriptFile,
         [string]$RootDirectory,
-        [string]$DeployType
+        [string]$DeployType,
+        [switch]$CleanupLegacyTempOnly
     )
 
     $session = $null
@@ -348,6 +352,12 @@ function Invoke-WinRMDeployment {
         foreach ($removedPath in @($removedLegacyPaths)) {
             Write-Host "  +- Veraltete, eindeutig markierte Temp-Ablage bereinigt: $removedPath" -ForegroundColor DarkYellow
         }
+        if ($CleanupLegacyTempOnly) {
+            return [PSCustomObject]@{
+                Status = 'Success'
+                Message = 'Temp-Altlasten geprüft; WindowsUpdateAdm-Setup wurde auf Wunsch nicht erneut ausgeführt.'
+            }
+        }
 
         $remoteTemp = Invoke-Command -Session $session -ScriptBlock {
             param($folderName)
@@ -502,7 +512,8 @@ function Invoke-ServerDeployment {
         [string]$Servername,
         [string]$PSSCfgSkriptFile,
         [string]$RootDirectory,
-        [string]$DeployType = "AD"
+        [string]$DeployType = "AD",
+        [switch]$CleanupLegacyTempOnly
     )
 
     $result = [PSCustomObject]@{
@@ -517,7 +528,8 @@ function Invoke-ServerDeployment {
                 -Servername $Servername `
                 -PSSCfgSkriptFile $PSSCfgSkriptFile `
                 -RootDirectory $RootDirectory `
-                -DeployType $DeployType
+                -DeployType $DeployType `
+                -CleanupLegacyTempOnly:$CleanupLegacyTempOnly
         }
         catch {
             $result.Status  = 'Failed'
@@ -531,6 +543,12 @@ function Invoke-ServerDeployment {
             }
             return $result
         }
+    }
+
+    if ($CleanupLegacyTempOnly) {
+        $result.Status = 'Skipped'
+        $result.Message = 'Lokales Ziel im Bereinigungslauf übersprungen; nur Remote-Ziele werden bereinigt.'
+        return $result
     }
 
     # Lokales Setup direkt aus dem gemeinsamen Skriptordner ausführen.
@@ -573,7 +591,8 @@ ForEach ($Server in $Serverlist) {
         -Servername                $Servername `
         -PSSCfgSkriptFile          $PSSCfgSkriptFile `
         -RootDirectory             $PSScriptRoot `
-        -DeployType                $deployTypeLabel
+        -DeployType                $deployTypeLabel `
+        -CleanupLegacyTempOnly:$CleanupLegacyTempOnly
 
     $ServerResult = [PSCustomObject]@{
         ServerName = $Servername
@@ -596,7 +615,7 @@ ForEach ($Server in $Serverlist) {
 # Beim regulären Gesamtlauf werden SSH-Schlüssel, Schlüssel-Login und die
 # begrenzten sudo-/HA-Voraussetzungen vorbereitet. Die beiden Skripte behalten
 # dieselbe Ersteinrichtung zusätzlich für Check, Download und Installation.
-if ([string]::IsNullOrWhiteSpace($TargetComputer)) {
+if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOnly) {
     $hostPowerShell = Join-Path $PSHOME 'pwsh.exe'
     if (-not (Test-Path -LiteralPath $hostPowerShell)) { $hostPowerShell = (Get-Process -Id $PID).Path }
     $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings.LinuxSettings } else { $null }

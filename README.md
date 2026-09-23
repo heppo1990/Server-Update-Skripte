@@ -76,6 +76,14 @@ Der GitHub-Updater läuft nur auf dem Verwaltungsrechner, auf dem die Skriptsamm
 
 Bei jeder Verteilung werden außerdem alte Ordner mit dem eindeutigen Namen `WindowsUpdateAdmSetup_*` in `%WINDIR%\Temp` und unter `C:\Users\*\AppData\Local\Temp` bereinigt, sofern sie älter als 24 Stunden sind. Unregistrierte, danach vollständig leere Profil-Gerüste werden entfernt. Registrierte Benutzerprofile, Verknüpfungen und Ordner mit anderen Inhalten bleiben unangetastet.
 
+Für eine einmalige Bereinigung ohne erneute WindowsUpdateAdm-Einrichtung:
+
+```powershell
+.\Verteilung_WindowsUpdateAdmConfig.ps1 -CleanupLegacyTempOnly
+```
+
+Mit `-TargetComputer SRV01` lässt sich die Bereinigung auf ein einzelnes Remote-Ziel begrenzen. Ein lokaler Verwaltungsserver in der Zielliste wird im reinen Bereinigungslauf übersprungen.
+
 Windows-Update-Prüfungen und -Installationen führen Befehle direkt per PowerShell-Remoting aus. Für bestimmte Nicht-AD-Systeme wird ein kurzlebiger Worker unter `C:\ProgramData\WindowsUpdateAdm` als SYSTEM-Aufgabe ausgeführt; Worker-Skript und Aufgabe löschen sich nach Abschluss. Geplante Neustart- und Nachinstallationsaufgaben speichern ihren kleinen Befehlsinhalt in der Windows-Aufgabenplanung statt als Repository-Skriptdatei. Das Installationsprotokoll `C:\ProgramData\WindowsUpdateAdm\DeferredUpdates.log` bleibt für die Nachvollziehbarkeit erhalten.
 
 Linux-Updates laden jeweils ein eigens erzeugtes Shell-Skript nach `/tmp`; es entfernt sich nach Ausführung selbst, ebenso das kurze Skript zur Einrichtung der begrenzten sudo-Regeln. Home Assistant erhält keine Skriptdateien; die Befehle laufen direkt über SSH. Dauerhafte SSH-Schlüssel, sudo-Regeln, PSWindowsUpdate-/JEA-Konfiguration und Protokolle sind Betriebszustand, keine Kopien der Repository-Skripte.
