@@ -63,7 +63,7 @@ function Get-ServerUpdateRequiredFiles {
     $requiredFiles = [System.Collections.Generic.List[object]]::new()
     $windowsOnlyRun = $false
     if ($scriptName -eq 'Install-ServersUpdates.ps1' -or $scriptName -eq 'Verteilung_WindowsUpdateAdmConfig.ps1') {
-        $windowsOnlyRun = $BoundParameters.Contains('TargetComputer') -and @($BoundParameters['TargetComputer'] | Where-Object { $_ }).Count -gt 0
+        $windowsOnlyRun = (@($BoundParameters.Keys) -contains 'TargetComputer') -and @($BoundParameters['TargetComputer'] | Where-Object { $_ }).Count -gt 0
     }
 
     $configuration = @{ LinuxHosts = @(); HomeAssistantHost = '' }
