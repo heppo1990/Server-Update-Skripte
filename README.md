@@ -132,6 +132,8 @@ Erstellt oder prüft das Client-Zertifikat auf dem Verwaltungsrechner und synchr
 
 Prüft verfügbare Windows-, Winget-, Chocolatey-, Linux- und Home-Assistant-Updates und erzeugt optional einen HTML-Bericht mit E-Mail. Standardmäßig wird der Windows-Update-Cache vor der Suche bereinigt und danach eine neue Erkennung angestoßen. Mit `ClearUpdateCacheBeforeCheck: false` kann dies je Konfiguration übersprungen werden. Linux und Home Assistant werden ohne Update, Backup oder Neustart geprüft; fehlt die SSH-Einrichtung, wird sie beim ersten Aufruf einmalig durchgeführt.
 
+Die Konsolenausgabe bezeichnet jedes Windows-Ziel passend als AD-Ziel, Zusatzcomputer oder Hypervisor. Leere Windows-Update-Ergebnisse werden ausdrücklich als „keine Windows-Updates verfügbar“ gemeldet und erzeugen keinen leeren Tabellenkopf.
+
 Aufruf:
 
 ```powershell

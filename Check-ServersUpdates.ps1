@@ -446,7 +446,7 @@ $RepBody = @"
 
 # Server verarbeiten
 if ($ServerADList -ne $null) {
-  Write-ScriptLog "Verarbeite AD-Serverliste..."
+  Write-ScriptLog "Verarbeite Windows-Zielliste..."
 
   # -----------------------------------------------------------------------
   # ÄNDERUNG: ScriptBlocks verwenden jetzt immer -Online
@@ -529,11 +529,12 @@ if ($ServerADList -ne $null) {
 
     if (!([String]::IsNullOrWhiteSpace($Servername))) {
       if ($Anzahl -ne 0) { $PercCompl = $index * 100 / $Anzahl } else { $PercCompl = 100 }
-      Write-Progress -Activity "Verarbeite AD-Serverliste" -Status "Verarbeite Server [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
+      Write-Progress -Activity "Verarbeite Windows-Ziele" -Status "Verarbeite Ziel [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
 
       Try {
-        Write-ScriptLog "Starte Update-Check auf AD-Server $Servername..."
-        $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
+        $targetTypeLabel = if ($Server.IsHypervisor) { 'Hypervisor' } elseif ($Server.IsAdditional) { 'Zusatzcomputer' } else { 'AD-Ziel' }
+        Write-ScriptLog "Starte Update-Check auf $targetTypeLabel $Servername..."
+        $RepBody += "<div class='server-title'>Windows-Ziel: ${Servername}</div>"
 
         # Nicht-AD-Ziele erhalten TrustedHosts und Zertifikatsauthentifizierung
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.
@@ -655,16 +656,19 @@ if ($ServerADList -ne $null) {
 
         Write-ScriptLog "Ergebnis der Update-Suche:"
 
-        if ($UpdResult) {
-          ($UpdResult | Select-Object ComputerName, Status, KB, Size, Title | Format-Table -AutoSize | Out-String) `
+        # Leere Update-Ergebnisse sollen keinen irreführenden Tabellenkopf
+        # ohne Datenzeilen erzeugen.
+        $updateRows = @($UpdResult | Where-Object { $null -ne $_ })
+        if ($updateRows.Count -gt 0) {
+          ($updateRows | Select-Object ComputerName, Status, KB, Size, Title | Format-Table -AutoSize | Out-String) `
             -split "\r?\n" | ForEach-Object { if ($_) { Write-ScriptLog $_ } }
 
-          $UpdResultFull += @($UpdResult)
+          $UpdResultFull += $updateRows
           
           $RepBody += "<table>`n"
           $RepBody += "<tr><th>ComputerName</th><th>Status</th><th>KB</th><th>Size</th><th>Title</th></tr>`n"
           
-          foreach ($upd in $UpdResult) {
+          foreach ($upd in $updateRows) {
             $RepBody += "<tr>"
             $RepBody += "<td>$($upd.ComputerName)</td>"
             $RepBody += "<td>$($upd.Status)</td>"
@@ -676,9 +680,9 @@ if ($ServerADList -ne $null) {
           
           $RepBody += "</table>"
 
-          $UpdCount += @($UpdResult).Count
+          $UpdCount += $updateRows.Count
         } else {
-          Write-ScriptLog "... es sind keine Updates notwendig."
+          Write-ScriptLog "... es sind keine Windows-Updates verfügbar."
           $RepBody += "<div class='no-updates'>Es sind keine Updates zu installieren.</div>"
         }
 
