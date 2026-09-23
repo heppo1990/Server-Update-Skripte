@@ -210,9 +210,26 @@ try {
                          Where-Object { $_.Name -like "*NuGet*" } |
                          Select-Object -First 1
                 if ($found) {
-                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-                    Copy-Item $found.FullName "$destDir\Microsoft.PackageManagement.NuGetProvider.dll" -Force
-                    return $true
+                    try {
+                        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                        $destinationFile = Join-Path $destDir 'Microsoft.PackageManagement.NuGetProvider.dll'
+                        $sourceFullPath = [IO.Path]::GetFullPath($found.FullName)
+                        $destinationFullPath = [IO.Path]::GetFullPath($destinationFile)
+                        if (-not [string]::Equals($sourceFullPath, $destinationFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+                            Copy-Item -LiteralPath $sourceFullPath -Destination $destinationFullPath -Force -ErrorAction Stop
+                        } else {
+                            Write-SetupLog 'NuGet-DLL liegt bereits im vorgesehenen Zielordner; Kopie wird übersprungen.' 'INFO'
+                        }
+
+                        $availableProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Version -ge $MinNuGetVersion } |
+                            Sort-Object Version -Descending |
+                            Select-Object -First 1
+                        if ($availableProvider) { return $true }
+                    }
+                    catch {
+                        Write-SetupLog "Lokale NuGet-Datei konnte nicht eingerichtet werden: $($_.Exception.Message)" 'WARN'
+                    }
                 }
             }
         }
@@ -221,8 +238,17 @@ try {
         $offlineNuGet = Join-Path $PSScriptRoot "NuGet.exe"
         if (Test-Path $offlineNuGet) {
             New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-            Copy-Item $offlineNuGet "$destDir\Microsoft.PackageManagement.NuGetProvider.exe" -Force
-            return $true
+            $offlineDestination = Join-Path $destDir 'Microsoft.PackageManagement.NuGetProvider.exe'
+            $offlineSourceFullPath = [IO.Path]::GetFullPath($offlineNuGet)
+            $offlineDestinationFullPath = [IO.Path]::GetFullPath($offlineDestination)
+            if (-not [string]::Equals($offlineSourceFullPath, $offlineDestinationFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+                Copy-Item -LiteralPath $offlineSourceFullPath -Destination $offlineDestinationFullPath -Force -ErrorAction Stop
+            }
+            $availableProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+                Where-Object { $_.Version -ge $MinNuGetVersion } |
+                Sort-Object Version -Descending |
+                Select-Object -First 1
+            return [bool]$availableProvider
         }
         return $false
     }

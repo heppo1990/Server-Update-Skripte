@@ -72,13 +72,13 @@ Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 
 ## Dateien auf Zielsystemen
 
-Der GitHub-Updater läuft nur auf dem Verwaltungsrechner, auf dem die Skriptsammlung liegt. `New-WindowsUpdateAdmConfig.ps1` lädt auf Zielservern keine Repository-Dateien nach. Die Verteilung überträgt dieses eine Setup-Skript vorübergehend nach `%WINDIR%\Temp\WindowsUpdateAdmSetup_<Kennung>`; sie verwendet ausdrücklich nicht den benutzerspezifischen Temp-Pfad unter `C:\Users`. Bei Nicht-AD-Zielen kommt das Client-Zertifikat dazu. Nach dem Lauf wird genau dieser Ordner entfernt. Falls die JEA-Aktivierung die bestehende WinRM-Sitzung trennt, versucht die Verteilung die Bereinigung über eine neue Verbindung bis zu fünfmal; wenn auch das nicht gelingt, meldet sie den Zielpfad als Warnung.
+Der GitHub-Updater läuft nur auf dem Verwaltungsrechner, auf dem die Skriptsammlung liegt. `New-WindowsUpdateAdmConfig.ps1` lädt auf Zielservern keine Repository-Dateien nach. Die Verteilung überträgt dieses eine Setup-Skript vorübergehend nach `%WINDIR%\Temp\WindowsUpdateAdmSetup_<Kennung>`; sie verwendet ausdrücklich nicht den benutzerspezifischen Temp-Pfad unter `C:\Users`. Für genau diesen Setup-Aufruf setzt die Verteilung `ExecutionPolicy Bypass` ausschließlich im Prozess der kurzlebigen WinRM-Sitzung; die Richtlinie des Zielsystems wird nicht dauerhaft geändert. Bei Nicht-AD-Zielen kommt das Client-Zertifikat dazu. Nach dem Lauf wird genau dieser Ordner entfernt. Falls die JEA-Aktivierung die bestehende WinRM-Sitzung trennt, versucht die Verteilung die Bereinigung über eine neue Verbindung bis zu fünfmal; wenn auch das nicht gelingt, meldet sie den Zielpfad als Warnung.
 
 Die vorsorglichen Warnungen von `Register-PSSessionConfiguration` und `Set-PSSessionConfiguration` über mögliche WinRM-Neustarts werden bei der Registrierung ausgeblendet. Die Registrierung erfolgt mit `-NoServiceRestart`; der erforderliche WinRM-Neustart wird vom Setup anschließend gezielt gesteuert. Registrierungsfehler bleiben sichtbar und brechen das Setup ab.
 
 Bei jeder Verteilung werden außerdem alte Ordner mit dem eindeutigen Namen `WindowsUpdateAdmSetup_*` in `%WINDIR%\Temp` und unter `C:\Users\*\AppData\Local\Temp` bereinigt, sofern sie älter als 30 Minuten sind. Die Schonfrist schützt parallel laufende Setups. Unregistrierte, danach vollständig leere Profil-Gerüste werden entfernt. Registrierte Benutzerprofile, Verknüpfungen und Ordner mit anderen Inhalten bleiben unangetastet.
 
-Der NuGet-Paketprovider wird bei Bedarf ohne interaktive Rückfrage maschinenweit installiert. So steht er auch dann für weitere Verteilungen bereit, wenn diese von einem anderen Administratorkonto gestartet werden.
+Der NuGet-Paketprovider wird bei Bedarf ohne interaktive Rückfrage maschinenweit installiert. So steht er auch dann für weitere Verteilungen bereit, wenn diese von einem anderen Administratorkonto gestartet werden. Der lokale Fallback überspringt eine Kopie, wenn die gefundene DLL bereits im Zielordner liegt, und meldet Erfolg erst nach erfolgreicher Provider-Erkennung.
 
 Für eine einmalige Bereinigung ohne erneute WindowsUpdateAdm-Einrichtung:
 

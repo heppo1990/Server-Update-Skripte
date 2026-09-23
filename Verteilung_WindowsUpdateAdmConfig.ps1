@@ -401,6 +401,10 @@ function Invoke-WinRMDeployment {
         Write-Host "  +- Fuehre Setup aus ($DeployType)..." -ForegroundColor Gray
         $null = Invoke-Command -Session $session -ScriptBlock {
             param($path, $scriptName, $parameters)
+            # Die zentrale Richtlinie des Zielsystems bleibt unverändert:
+            # Bypass gilt nur für diesen kurzlebigen WinRM-Prozess, damit das
+            # vertrauenswürdige Setup aus dem temporären Ablageordner starten kann.
+            Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
             & (Join-Path $path $scriptName) @parameters
         } -ArgumentList $remoteTemp, $PSSCfgSkriptFile, $setupParameters -ErrorAction Stop
 
