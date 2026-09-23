@@ -184,8 +184,15 @@ try {
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== NuGet Provider Check ===" "INFO"
     
-    $CurrentNuGet    = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
     $MinNuGetVersion = [Version]"2.8.5.201"
+    $machineNuGetRoot = Join-Path $env:ProgramFiles 'PackageManagement\ProviderAssemblies\nuget'
+    $CurrentNuGet = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Version -ge $MinNuGetVersion -and
+            $_.ProviderPath -like "$machineNuGetRoot\*"
+        } |
+        Sort-Object Version -Descending |
+        Select-Object -First 1
 
     # Hilfsfunktion: NuGet vom lokalen Server kopieren
     function Install-NuGetFromLocalServer {
@@ -220,31 +227,27 @@ try {
         return $false
     }
     
-    if ($CurrentNuGet) {
-        Write-SetupLog "NuGet Provider installiert - Version: $($CurrentNuGet.Version)" "INFO"
-        if ($CurrentNuGet.Version -lt $MinNuGetVersion -or $ForceUpdate) {
-            Write-SetupLog "Aktualisiere NuGet Provider..." "UPDATE"
-            try {
-                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction Stop | Out-Null
-                Write-SetupLog "NuGet Provider aktualisiert auf Version: $((Get-PackageProvider -Name NuGet).Version)" "SUCCESS"
-            }
-            catch {
-                Write-SetupLog "Online-Update fehlgeschlagen - versuche lokale Installation..." "WARN"
-                if (Install-NuGetFromLocalServer) {
-                    Write-SetupLog "NuGet vom lokalen Server installiert." "SUCCESS"
-                } else {
-                    Write-SetupLog "NuGet Update nicht möglich - fahre mit vorhandener Version fort." "WARN"
-                }
-            }
+    if (-not $CurrentNuGet -or $ForceUpdate) {
+        if ($CurrentNuGet) {
+            Write-SetupLog "Aktualisiere maschinenweit verfügbaren NuGet Provider..." "UPDATE"
         } else {
-            Write-SetupLog "NuGet Provider ist aktuell" "SUCCESS"
+            Write-SetupLog "NuGet Provider fehlt maschinenweit oder ist zu alt - installiere ohne Rückfrage..." "UPDATE"
         }
-    } else {
-        Write-SetupLog "NuGet Provider nicht gefunden - installiere..." "UPDATE"
         $nugetInstalled = $false
         try {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction Stop | Out-Null
-            Write-SetupLog "NuGet Provider installiert - Version: $((Get-PackageProvider -Name NuGet).Version)" "SUCCESS"
+            # AllUsers verhindert eine erneute Installation bei abweichenden
+            # Administratorkonten; ForceBootstrap bestätigt die NuGet-Abfrage
+            # automatisch, wenn PackageManagement den Provider erst laden muss.
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 `
+                -Scope AllUsers -Force -ForceBootstrap -ErrorAction Stop | Out-Null
+            $installedNuGet = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction Stop |
+                Where-Object { $_.ProviderPath -like "$machineNuGetRoot\*" } |
+                Sort-Object Version -Descending |
+                Select-Object -First 1
+            if (-not $installedNuGet -or $installedNuGet.Version -lt $MinNuGetVersion) {
+                throw 'Der NuGet Provider wurde nicht in den maschinenweiten Providerpfad installiert.'
+            }
+            Write-SetupLog "NuGet Provider installiert - Version: $($installedNuGet.Version)" "SUCCESS"
             $nugetInstalled = $true
         }
         catch {
@@ -257,6 +260,8 @@ try {
                 Write-SetupLog "PSWindowsUpdate-Installation wird möglicherweise fehlschlagen." "WARN"
             }
         }
+    } else {
+        Write-SetupLog "NuGet Provider ist maschinenweit installiert (Version: $($CurrentNuGet.Version))" "SUCCESS"
     }
     
     # =========================================================
@@ -945,6 +950,10 @@ RoleDefinitions = @{
     # Register-PSSessionConfiguration einen eigenen, geschützten SessionConfig-
     # Pfad. JEA/WinRM-Konfigurationen müssen deshalb auch bei einem lokalen
     # Start aus PowerShell 7 über Windows PowerShell 5.1 registriert werden.
+    # Die Cmdlets geben dabei pauschale Neustart-/Trennungswarnungen aus,
+    # obwohl -NoServiceRestart gesetzt ist und der Neustart unten gezielt
+    # gesteuert wird. Nur diese vorsorglichen Warnungen werden unterdrückt;
+    # Fehler bleiben durch -ErrorAction Stop sichtbar.
     if ($PSVersionTable.PSEdition -eq 'Core') {
         $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         if (-not (Test-Path -LiteralPath $windowsPowerShell)) {
@@ -952,7 +961,7 @@ RoleDefinitions = @{
         }
         $registrationScript = @"
 `$ErrorActionPreference = 'Stop'
-Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC.Replace("'", "''"))' -NoServiceRestart -Confirm:`$false -ErrorAction Stop
+Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC.Replace("'", "''"))' -NoServiceRestart -Confirm:`$false -WarningAction SilentlyContinue -ErrorAction Stop
 "@
         $registrationEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($registrationScript))
         $registrationProcess = Start-Process -FilePath $windowsPowerShell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$registrationEncoded) -Wait -PassThru -WindowStyle Hidden
@@ -966,6 +975,7 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
                                         -Path $PermanentPSSC `
                                         -NoServiceRestart `
                                         -Confirm:$false `
+                                        -WarningAction SilentlyContinue `
                                         -ErrorAction Stop
     }
     Write-SetupLog "Configuration registriert" "SUCCESS"

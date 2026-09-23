@@ -274,7 +274,9 @@ function Invoke-WinRMDeployment {
         # nach dem Löschen der eindeutig benannten Setup-Reste vollständig leer sind.
         $removedLegacyPaths = Invoke-Command -Session $session -ScriptBlock {
             $removed = [System.Collections.Generic.List[string]]::new()
-            $cutoff = (Get-Date).AddHours(-24)
+            # Verbliebene markierte Setup-Ordner werden beim nächsten Lauf
+            # nach 30 Minuten entfernt; die Schonfrist schützt parallele Setups.
+            $cutoff = (Get-Date).AddMinutes(-30)
             $windowsTemp = Join-Path $env:WINDIR 'Temp'
             $usersRoot = Join-Path $env:SystemDrive 'Users'
             $registeredProfiles = @{}
@@ -486,19 +488,79 @@ function Invoke-WinRMDeployment {
         if ($session) {
             if ($remoteTemp) {
                 try {
-                    $remoteTempRemoved = Invoke-Command -Session $session -ScriptBlock {
-                        param($path)
-                        if (Test-Path -LiteralPath $path) {
-                            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                    # Das Setup kann WinRM neu starten. Dadurch wird die zuvor
+                    # verwendete Sitzung Broken, selbst wenn der Endpunkttest
+                    # über eine neue Verbindung bereits erfolgreich war.
+                    $cleanupSession = $session
+                    try {
+                        $remoteTempRemoved = Invoke-Command -Session $cleanupSession -ScriptBlock {
+                            param($path)
+                            if (Test-Path -LiteralPath $path) {
+                                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                            }
+                            return (-not (Test-Path -LiteralPath $path))
+                        } -ArgumentList $remoteTemp -ErrorAction Stop
+                    }
+                    catch {
+                        $initialCleanupError = $_
+                        if ($cleanupSession.State -eq 'Opened') {
+                            Remove-PSSession -Session $cleanupSession -ErrorAction SilentlyContinue
                         }
-                        return (-not (Test-Path -LiteralPath $path))
-                    } -ArgumentList $remoteTemp -ErrorAction Stop
+                        $cleanupSession = $null
+
+                        # Bei einer abgebrochenen Sitzung für die Bereinigung
+                        # eine frische WinRM-Verbindung mit denselben
+                        # Anmeldedaten bzw. demselben Client-Zertifikat öffnen.
+                        for ($attempt = 1; $attempt -le 5 -and -not $cleanupSession; $attempt++) {
+                            try {
+                                if ($DeployType -eq 'AD') {
+                                    $cleanupSession = New-PSSession -ComputerName $Servername -ErrorAction Stop
+                                } elseif ($usedCertificate -and $clientCert) {
+                                    try {
+                                        $cleanupSession = New-PSSession -ComputerName $Servername -UseSSL `
+                                            -CertificateThumbprint $clientCert.Thumbprint -ErrorAction Stop
+                                    } catch {
+                                        $cleanupSession = New-PSSession -ComputerName $Servername -UseSSL `
+                                            -CertificateThumbprint $clientCert.Thumbprint `
+                                            -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
+                                    }
+                                } elseif ($bootstrapCredential) {
+                                    try {
+                                        $cleanupSession = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential `
+                                            -Authentication Negotiate -UseSSL `
+                                            -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
+                                    } catch {
+                                        $cleanupSession = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential `
+                                            -Authentication Negotiate -ErrorAction Stop
+                                    }
+                                } else {
+                                    throw 'Für die erneute WinRM-Verbindung stehen keine Anmeldedaten zur Verfügung.'
+                                }
+                            } catch {
+                                if ($attempt -lt 5) { Start-Sleep -Seconds 5 }
+                            }
+                        }
+
+                        if (-not $cleanupSession) { throw $initialCleanupError }
+                        $remoteTempRemoved = Invoke-Command -Session $cleanupSession -ScriptBlock {
+                            param($path)
+                            if (Test-Path -LiteralPath $path) {
+                                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                            }
+                            return (-not (Test-Path -LiteralPath $path))
+                        } -ArgumentList $remoteTemp -ErrorAction Stop
+                    }
                     if (-not $remoteTempRemoved) {
                         Write-Warning "Temporärer Setup-Ordner auf $Servername konnte nicht bestätigt entfernt werden: $remoteTemp"
                     }
                 }
                 catch {
                     Write-Warning "Temporärer Setup-Ordner auf $Servername konnte nicht entfernt werden: $remoteTemp. Ursache: $($_.Exception.Message)"
+                }
+                finally {
+                    if ($cleanupSession -and $cleanupSession -ne $session) {
+                        Remove-PSSession -Session $cleanupSession -ErrorAction SilentlyContinue
+                    }
                 }
             }
             Remove-PSSession -Session $session -ErrorAction SilentlyContinue
