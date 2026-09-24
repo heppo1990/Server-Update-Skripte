@@ -496,19 +496,21 @@ function Register-StartupRemoteTask {
     [Parameter(Mandatory)][string]$Servername,
     [Parameter(Mandatory)][string]$TaskName,
     [Parameter(Mandatory)][string]$Script,
-    $AuthInfo = $null
+    $AuthInfo = $null,
+    [datetime]$At = [datetime]::MinValue
   )
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
   $sb = {
-    param($Name, $Encoded)
+    param($Name, $Encoded, $RunAt)
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
-    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $triggers = @((New-ScheduledTaskTrigger -AtStartup))
+    if ($RunAt -gt [datetime]::MinValue) { $triggers += New-ScheduledTaskTrigger -Once -At $RunAt }
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $encoded; return }
+  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $encoded $At; return }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $encoded)
+  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $encoded, $At)
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
@@ -572,7 +574,7 @@ function Register-DeferredLocalRebootTask {
 }
 
 function Register-DeferredUpdateTask {
-  param([string]$Servername, [string[]]$DeferredCategories, [string[]]$DeferredKBs = @(), [int]$DelayMinutes = 1440, [bool]$SucheOnline, $AuthInfo = $null)
+  param([string]$Servername, [string[]]$DeferredCategories, [string[]]$DeferredKBs = @(), [int]$DelayMinutes = 1440, [bool]$SucheOnline, $AuthInfo = $null, [datetime]$ScheduledAt = [datetime]::MinValue)
   # Die Aufgabe wird ausschließlich beim nächsten Boot gestartet.
   # Erst dessen LastBootUpTime ist der Startpunkt der Nachinstallationsfrist.
   $taskName = 'WindowsUpdateAdm-DeferredUpdates'
@@ -596,6 +598,7 @@ function Register-DeferredUpdateTask {
   }
   $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($deferredMailSettings | ConvertTo-Json -Depth 5 -Compress)))
   $registeredAt = [DateTime]::UtcNow.ToFileTimeUtc()
+  $scheduledAtFileTime = if ($ScheduledAt -gt [datetime]::MinValue) { $ScheduledAt.ToUniversalTime().ToFileTimeUtc() } else { 0 }
   $script = @"
 `$taskName = '$taskName'
 try {
@@ -606,21 +609,28 @@ try {
     "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  `$Message" | Add-Content -LiteralPath `$logFile -Encoding UTF8
   }
   `$waitForReboot = `$false
+  `$scheduledAt = if ($scheduledAtFileTime -gt 0) { [DateTime]::FromFileTimeUtc($scheduledAtFileTime) } else { [DateTime]::MinValue }
   Write-DeferredLog 'Nachinstallationsaufgabe gestartet.'
   `$registeredAt = [DateTime]::FromFileTimeUtc($registeredAt)
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
-  if (`$lastBoot -le `$registeredAt) {
+  `$rebootDueAt = [DateTime]::MinValue
+  if (`$lastBoot -gt `$registeredAt) { `$rebootDueAt = `$lastBoot.AddMinutes($DelayMinutes) }
+  if ((`$scheduledAt -gt [DateTime]::MinValue -and [DateTime]::UtcNow -ge `$scheduledAt) -or
+      (`$rebootDueAt -gt [DateTime]::MinValue -and [DateTime]::UtcNow -ge `$rebootDueAt)) {
+    Write-DeferredLog "Geplanter Wartungszeitpunkt erreicht. Nachinstallation wird jetzt ausgeführt."
+  } elseif (`$lastBoot -le `$registeredAt) {
     # Schutz gegen einen manuell gestarteten Task ohne vorherigen Neustart.
-    Set-ScheduledTask -TaskName `$taskName -Trigger (New-ScheduledTaskTrigger -AtStartup) -ErrorAction Stop | Out-Null
     `$waitForReboot = `$true
-    Write-DeferredLog 'Kein Neustart nach der Hauptinstallation erkannt. Aufgabe bleibt auf Systemstart eingestellt.'
+    Write-DeferredLog 'Kein Neustart nach der Hauptinstallation erkannt. Aufgabe wartet auf Neustart oder das konfigurierte Wartungsfenster.'
   } else {
-    `$dueAt = `$lastBoot.AddMinutes($DelayMinutes)
-    if (`$dueAt -gt [DateTime]::UtcNow) {
-      # Ein manueller Neustart ist genauso gültig wie der geplante: ab seinem Zeitpunkt zählen.
-      Set-ScheduledTask -TaskName `$taskName -Trigger (New-ScheduledTaskTrigger -Once -At `$dueAt.ToLocalTime()) -ErrorAction Stop | Out-Null
+    if (`$rebootDueAt -gt [DateTime]::UtcNow) {
+      # Behalte Systemstart und Wartungsfenster bei und ergänze den Ablauf
+      # nach der konfigurierten Wartezeit ab dem tatsächlichen Neustart.
+      `$triggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At `$rebootDueAt.ToLocalTime()))
+      if (`$scheduledAt -gt [DateTime]::UtcNow) { `$triggers += New-ScheduledTaskTrigger -Once -At `$scheduledAt.ToLocalTime() }
+      Set-ScheduledTask -TaskName `$taskName -Trigger `$triggers -ErrorAction Stop | Out-Null
       `$waitForReboot = `$true
-      Write-DeferredLog "Neustart erkannt. Nachinstallation geplant für `$(`$dueAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss'))."
+      Write-DeferredLog "Neustart erkannt. Nachinstallation spätestens für `$(`$rebootDueAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')) geplant; das Wartungsfenster bleibt zusätzlich aktiv."
     }
   }
   if (-not `$waitForReboot) {
@@ -693,9 +703,13 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     } else {
       Write-DeferredLog 'Abschluss-E-Mail übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
     }
-    if (@(`$results).Count -gt 0) {
+    `$rebootStatus = Get-WURebootStatus -Silent -ErrorAction Stop
+    `$rebootRequired = if (`$rebootStatus -is [bool]) { `$rebootStatus } elseif (`$null -ne `$rebootStatus -and `$null -ne `$rebootStatus.PSObject.Properties['RebootRequired']) { [bool]`$rebootStatus.RebootRequired } else { `$false }
+    Write-DeferredLog "Get-WURebootStatus meldet RebootRequired = `$rebootRequired."
+    if (`$rebootRequired) {
+      Write-DeferredLog 'Nachinstallationsmail abgeschlossen. Erforderlicher Neustart wird jetzt sofort ausgelöst.'
       Unregister-ScheduledTask -TaskName `$taskName -Confirm:`$false -ErrorAction SilentlyContinue
-      shutdown.exe /r /t 15 /f | Out-Null
+      shutdown.exe /r /t 0 /f | Out-Null
     }
   }
 } catch {
@@ -722,12 +736,13 @@ tr:nth-child(even) { background-color: #f9f9f9; }
 }
 
 "@
-  Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo
+  Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo -At $ScheduledAt
   $selectionText = @(
     if ($DeferredKBs.Count -gt 0) { "KBs: $($DeferredKBs -join ', ')" }
     if ($DeferredCategories.Count -gt 0) { "Kategorien: $($DeferredCategories -join ', ')" }
   ) -join '; '
-  Write-ScriptLog "Nachinstallation auf $Servername wird erst beim nächsten Neustart aktiviert und startet danach nach $DelayMinutes Minute(n) ($selectionText; selbstlöschend)."
+  $activationText = if ($ScheduledAt -gt [datetime]::MinValue) { "im Wartungsfenster $($ScheduledAt.ToString('dd.MM.yyyy HH:mm'))" } else { 'beim nächsten Neustart' }
+  Write-ScriptLog "Nachinstallation auf $Servername wird $activationText aktiviert und startet danach nach $DelayMinutes Minute(n) ($selectionText; selbstlöschend)."
 }
 
 function Register-DeferredMailTestTask {
@@ -1205,13 +1220,22 @@ if ($ServerADList -ne $null) {
           $deferredCheck = Get-DeferredWindowsUpdates -Servername $Servername -SucheOnline $SucheOnline -AuthInfo $svcCredential -DeferredCategories $deferredCategories -DeferredKBs $deferredKBs
           if ($deferredCheck.Success -and @($deferredCheck.Updates).Count -gt 0) {
             Write-ScriptLog "Zurückgestellte Updates auf $Servername verfügbar: $(@($deferredCheck.Updates).Count)."
+            $isVirtualForDeferred = Test-ServerIsVirtual -Servername $Servername -AuthInfo $svcCredential
+            $deferredMaintenanceTime = if ($isVirtualForDeferred) { $vmRebootStartTime } else { $physicalRebootTime }
+            $deferredScheduledAt = if (-not [string]::IsNullOrWhiteSpace($deferredMaintenanceTime)) { Get-NextScheduledTime $deferredMaintenanceTime } else { [datetime]::MinValue }
+            if ($deferredScheduledAt -gt [datetime]::MinValue) {
+              Write-ScriptLog "Nachinstallation auf $Servername für das Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) geplant ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' })))."
+            } else {
+              Write-ScriptLog "WARNUNG: Für $Servername ist kein Wartungszeitpunkt konfiguriert; Nachinstallation wartet auf den nächsten Neustart."
+            }
             Register-DeferredUpdateTask `
               -Servername          $Servername `
               -DeferredCategories  $deferredCategories `
               -DeferredKBs         $deferredKBs `
               -DelayMinutes        $deferredDelayMinutes `
               -SucheOnline         $SucheOnline `
-              -AuthInfo            $svcCredential
+              -AuthInfo            $svcCredential `
+              -ScheduledAt         $deferredScheduledAt
           }
           elseif ($deferredCheck.Success) {
             Remove-DeferredUpdateTask -Servername $Servername -AuthInfo $svcCredential
