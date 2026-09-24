@@ -235,6 +235,37 @@ function Invoke-WindowsUpdateSystemTask {
 $worker = @'
 $ErrorActionPreference = 'Stop'
 $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__CONFIG__')) | ConvertFrom-Json
+function Get-WorkerUpdateField {
+    param([object]$Update, [string[]]$Names)
+    foreach ($name in $Names) {
+        $property = $Update.PSObject.Properties[$name]
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+        $value = $property.Value
+        if ($value -is [array]) { $value = @($value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join ', ' }
+        if (-not [string]::IsNullOrWhiteSpace([string]$value)) { return $value }
+    }
+    return $null
+}
+function ConvertTo-WorkerUpdateRows {
+    param([object[]]$Items)
+    foreach ($item in $Items) {
+        if ($null -eq $item) { continue }
+        $computerName = Get-WorkerUpdateField -Update $item -Names @('ComputerName', 'PSComputerName')
+        $status = Get-WorkerUpdateField -Update $item -Names @('Status', 'Result', 'UpdateStatus')
+        $kb = Get-WorkerUpdateField -Update $item -Names @('KB', 'KBArticleID', 'KBArticleIDs')
+        $size = Get-WorkerUpdateField -Update $item -Names @('Size', 'MaxDownloadSize')
+        $title = Get-WorkerUpdateField -Update $item -Names @('Title', 'UpdateTitle', 'Name')
+        if ([string]::IsNullOrWhiteSpace([string]$status) -and
+            [string]::IsNullOrWhiteSpace([string]$kb) -and
+            [string]::IsNullOrWhiteSpace([string]$size) -and
+            [string]::IsNullOrWhiteSpace([string]$title)) { continue }
+        if (-not [string]::IsNullOrWhiteSpace([string]$kb)) {
+            $kb = (@(([string]$kb -split ',\s*') | ForEach-Object { if ($_ -match '^KB') { $_ } else { "KB$_" } }) -join ', ')
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$computerName)) { $computerName = $env:COMPUTERNAME }
+        [PSCustomObject]@{ ComputerName = $computerName; Status = $status; KB = $kb; Size = $size; Title = $title }
+    }
+}
 try {
     Import-Module PSWindowsUpdate -ErrorAction Stop
     if ($config.Mode -eq 'RemoveDeferredTask') {
@@ -267,17 +298,18 @@ try {
             # KBs und Kategorien werden gemeinsam geprüft. Eine konfigurierte
             # Kategorie darf nicht durch eine zusätzlich eingetragene KB-Liste
             # unterdrückt werden.
-            $updates = @()
-            foreach ($kb in $kbs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
-            foreach ($category in $categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
-            $updates = @($updates | Select-Object ComputerName, Status, KB, Size, Title)
+            $rawUpdates = @()
+            foreach ($kb in $kbs) { $rawUpdates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+            foreach ($category in $categories) { $rawUpdates += @(Get-WindowsUpdate @wuParams -Category $category) }
+            $updates = @(ConvertTo-WorkerUpdateRows -Items $rawUpdates)
         }
         else {
             if ($config.Mode -eq 'Install') {
                 if ($categories.Count -gt 0) { $wuParams.NotCategory = $categories }
                 if ($kbs.Count -gt 0) { $wuParams.NotKBArticleID = $kbs }
             }
-            $updates = @(Get-WindowsUpdate @wuParams | Select-Object ComputerName, Status, KB, Size, Title)
+            $rawUpdates = @(Get-WindowsUpdate @wuParams)
+            $updates = @(ConvertTo-WorkerUpdateRows -Items $rawUpdates)
         }
     }
     $result = [ordered]@{ Success = $true; Error = ''; Updates = @($updates) }
