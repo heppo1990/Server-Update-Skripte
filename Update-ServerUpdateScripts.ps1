@@ -187,6 +187,19 @@ function Update-ServerUpdateSettingsDefaults {
             }
         }
     }
+
+    # Es bleiben höchstens drei automatisch erzeugte Sicherungen im Skriptordner liegen.
+    try {
+        $backupFiles = @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.json.bak.*' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(?:settings|.+\.settings)\.json\.bak\.\d{8}_\d{6}_\d{3}$' } |
+            Sort-Object -Property LastWriteTimeUtc, Name -Descending)
+        foreach ($oldBackup in @($backupFiles | Select-Object -Skip 3)) {
+            Remove-Item -LiteralPath $oldBackup.FullName -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Warning "Alte Sicherungen der Einstellungen konnten nicht vollständig bereinigt werden. Ursache: $($_.Exception.Message)"
+    }
 }
 
 function Invoke-ServerUpdateScripts {
