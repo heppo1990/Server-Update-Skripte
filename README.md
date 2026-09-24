@@ -59,8 +59,8 @@ Wichtige Werte in `UpdateSettings`:
 | `PhysicalRebootWindowEndTime` | Spätester Beginn eines physischen Neustarts und Ende des Wartungsfensters, z. B. `05:00`. Leer lässt das Fensterende unbeschränkt.                                                                      |
 | `VMRebootStartTime`           | Startzeit des VM-Wartungsfensters und Uhrzeit für die erste VM, z. B. `19:00`. Leer bedeutet: kein zeitgesteuerter VM-Neustart.                                                                         |
 | `VMRebootWindowEndTime`       | Spätester Beginn eines VM-Neustarts und Ende des VM-Wartungsfensters. Leer lässt das Fensterende unbeschränkt.                                                                                           |
-| `VMRebootIntervalMinutes`     | Zeitversatz jeder weiteren VM, normalerweise `30`.                                                                                                                                                       |
-| `VMRebootImmediately`         | `true` startet VMs nach einer erfolgreichen, neustartpflichtigen Installation zeitnah neu. Dieser Wert hat Vorrang vor `VMRebootStartTime`.                                                              |
+| `VMRebootIntervalMinutes`     | Zeitversatz jeder weiteren VM; `0` erlaubt gleichzeitige VM-Neustarts, ein positiver Wert staffelt sie.                                                                                                  |
+| `VMRebootImmediately`         | `true` plant VM-Neustarts zeitnah; ein positives Intervall staffelt sie auch dann. Ein konfiguriertes Fensterende begrenzt den zulässigen Start.                                                          |
 
 Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 
@@ -79,6 +79,8 @@ Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 "VMRebootImmediately": false,
 "VMRebootIntervalMinutes": 30
 ```
+
+Die Windows-Neustarts werden nach der VM-Klassifizierung koordiniert. Physische Windows-Systeme starten frühestens eine Stunde nach dem spätesten geplanten VM-Neustart. Passt dieser Abstand nicht mehr in das geplante physische Wartungsfenster, wird der Neustart auf den nächsten Tag zum konfigurierten physischen Start verschoben. Bei `VMRebootIntervalMinutes: 0` werden VMs für die Kapazitätsplanung als gleichzeitig angesetzt.
 
 ## Dateien auf Zielsystemen
 

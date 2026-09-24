@@ -96,11 +96,38 @@ function Get-LinuxSshArguments {
 }
 
 function Get-NextLinuxScheduledTime {
-    param([Parameter(Mandatory)][string]$Time)
+    param([Parameter(Mandatory)][string]$Time, [string]$LatestTime = '', [int]$DelayMinutes = 0, [switch]$PreferImmediate)
+    if ($PreferImmediate) {
+        $now = Get-Date
+        $immediateAt = $now.AddMinutes(1 + $DelayMinutes)
+        if ([string]::IsNullOrWhiteSpace($LatestTime) -or [string]::IsNullOrWhiteSpace($Time)) { return $immediateAt }
+        $startParsed = [datetime]::MinValue
+        $latestParsed = [datetime]::MinValue
+        if (-not [datetime]::TryParse($Time, [ref]$startParsed) -or -not [datetime]::TryParse($LatestTime, [ref]$latestParsed)) { throw 'Ungültige VM-Wartungsfenster-Uhrzeit.' }
+        $windowStart = $now.Date.Add($startParsed.TimeOfDay)
+        if ($now -lt $windowStart) { $windowStart = $windowStart.AddDays(-1) }
+        $windowEnd = $windowStart.Date.Add($latestParsed.TimeOfDay)
+        if ($windowEnd -le $windowStart) { $windowEnd = $windowEnd.AddDays(1) }
+        if ($now -ge $windowStart -and $immediateAt -le $windowEnd) { return $immediateAt }
+    }
     $parsed = [datetime]::MinValue
     if (-not [datetime]::TryParse($Time, [ref]$parsed)) { throw "Ungültige Neustartzeit: $Time" }
     $scheduled = (Get-Date).Date.Add($parsed.TimeOfDay)
     if ($scheduled -le (Get-Date)) { $scheduled = $scheduled.AddDays(1) }
+    $windowStart = $scheduled
+    $scheduled = $scheduled.AddMinutes($DelayMinutes)
+    if (-not [string]::IsNullOrWhiteSpace($LatestTime)) {
+        $latestParsed = [datetime]::MinValue
+        if (-not [datetime]::TryParse($LatestTime, [ref]$latestParsed)) { throw "Ungültige späteste Neustartzeit: $LatestTime" }
+        $latest = $windowStart.Date.Add($latestParsed.TimeOfDay)
+        if ($latest -lt $windowStart) { $latest = $latest.AddDays(1) }
+        if ($scheduled -gt $latest) {
+            $windowStart = $windowStart.AddDays(1)
+            $scheduled = $windowStart.AddMinutes($DelayMinutes)
+            $latest = $latest.AddDays(1)
+        }
+        if ($scheduled -gt $latest) { throw "VM-Neustartversatz von $DelayMinutes Minute(n) liegt außerhalb des Wartungsfensters." }
+    }
     return $scheduled
 }
 
@@ -123,11 +150,15 @@ function Register-LinuxReboot {
     $physicalTime = [string]$settings.UpdateSettings.PhysicalRebootTime
     $vmStartTime = [string]$settings.UpdateSettings.VMRebootStartTime
     $vmImmediately = [bool]$settings.UpdateSettings.VMRebootImmediately
-    $interval = if ([int]$settings.UpdateSettings.VMRebootIntervalMinutes -gt 0) { [int]$settings.UpdateSettings.VMRebootIntervalMinutes } else { 30 }
+    $interval = [Math]::Max(0, [int]$settings.UpdateSettings.VMRebootIntervalMinutes)
+    $vmOffset = if ($IsVirtual) { $script:VMRebootIndex * $interval } else { 0 }
     $scheduled = $null
-    if ($IsVirtual -and $vmImmediately) { $scheduled = (Get-Date).AddMinutes(1) }
-    elseif ($IsVirtual -and -not [string]::IsNullOrWhiteSpace($vmStartTime)) { $scheduled = (Get-NextLinuxScheduledTime $vmStartTime).AddMinutes($script:VMRebootIndex * $interval); $script:VMRebootIndex++ }
-    elseif (-not $IsVirtual -and -not [string]::IsNullOrWhiteSpace($physicalTime)) { $scheduled = Get-NextLinuxScheduledTime $physicalTime }
+    if ($IsVirtual -and $vmImmediately) {
+        $scheduled = if (-not [string]::IsNullOrWhiteSpace($vmStartTime)) { Get-NextLinuxScheduledTime $vmStartTime ([string]$settings.UpdateSettings.VMRebootWindowEndTime) $vmOffset -PreferImmediate } else { (Get-Date).AddMinutes(1 + $vmOffset) }
+        $script:VMRebootIndex++
+    }
+    elseif ($IsVirtual -and -not [string]::IsNullOrWhiteSpace($vmStartTime)) { $scheduled = Get-NextLinuxScheduledTime $vmStartTime ([string]$settings.UpdateSettings.VMRebootWindowEndTime) $vmOffset; $script:VMRebootIndex++ }
+    elseif (-not $IsVirtual -and -not [string]::IsNullOrWhiteSpace($physicalTime)) { $scheduled = Get-NextLinuxScheduledTime $physicalTime ([string]$settings.UpdateSettings.PhysicalRebootWindowEndTime) }
     if ($null -eq $scheduled) { Write-LinuxLog -Message "Kein automatischer Neustart für $RemoteHost konfiguriert." -LogFile $LogFile; return $false }
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($scheduled - (Get-Date)).TotalMinutes))
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
