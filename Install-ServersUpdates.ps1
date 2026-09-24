@@ -1370,6 +1370,24 @@ if ($ServerADList -ne $null) {
               -AuthInfo            $svcCredential `
               -ScheduledAt         $deferredScheduledAt `
               -MaintenanceEndTime  $deferredMaintenanceEndTime
+
+            # Der Report nennt den Aktivierungszeitpunkt und die Mindestwartezeit
+            # direkt beim betroffenen Server. Die tatsächliche Installation kann
+            # später beginnen, falls erst ein Neustart oder das nächste
+            # Wartungsfenster abgewartet werden muss.
+            $deferredSelection = @(
+              if ($deferredKBs.Count -gt 0) { "KBs: $($deferredKBs -join ', ')" }
+              if ($deferredCategories.Count -gt 0) { "Kategorien: $($deferredCategories -join ', ')" }
+            ) -join '; '
+            $deferredSelectionHtml = [System.Net.WebUtility]::HtmlEncode($deferredSelection)
+            $deferredDelayText = "Die Installation startet nach einem erkannten Neustart frühestens nach $deferredDelayMinutes Minute(n)."
+            if ($deferredScheduledAt -gt [datetime]::MinValue) {
+              $deferredPlanText = "Nachinstallation eingeplant: ab Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' }))). $deferredDelayText"
+            } else {
+              $deferredPlanText = "Nachinstallation eingeplant: beim nächsten Neustart. $deferredDelayText"
+            }
+            $deferredPlanHtml = [System.Net.WebUtility]::HtmlEncode($deferredPlanText)
+            $RepBody += "<div class='warning-box'><strong>$deferredPlanHtml</strong><br>Zurückgestellt: $deferredSelectionHtml</div>"
           }
           elseif ($deferredCheck.Success) {
             Remove-DeferredUpdateTask -Servername $Servername -AuthInfo $svcCredential
