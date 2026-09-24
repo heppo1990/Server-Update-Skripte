@@ -120,9 +120,14 @@ function Copy-ServerUpdateJsonValue {
 
 function Add-ServerUpdateMissingJsonProperties {
     param(
-        [Parameter(Mandatory)][System.Management.Automation.PSCustomObject]$Destination,
-        [Parameter(Mandatory)][System.Management.Automation.PSCustomObject]$Defaults
+        [Parameter(Mandatory)][object]$Destination,
+        [Parameter(Mandatory)][object]$Defaults
     )
+    # JSON-Objekte werden auf Windows PowerShell 5 und PowerShell 7 als PSCustomObject geliefert.
+    # Die konkrete Parametertypbindung auf PSCustomObject kann bei PS7 trotz passendem Laufzeittyp scheitern.
+    if ($Destination -isnot [System.Management.Automation.PSCustomObject] -or
+        $Defaults -isnot [System.Management.Automation.PSCustomObject]) { return 0 }
+
     $added = 0
     foreach ($defaultProperty in $Defaults.PSObject.Properties) {
         $destinationProperty = $Destination.PSObject.Properties[$defaultProperty.Name]
