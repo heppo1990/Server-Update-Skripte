@@ -530,10 +530,11 @@ function Register-StartupRemoteTask {
   $sb = {
     param($Name, $Encoded, $RunAt)
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
-    # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit geprüft.
-    # So kann ein noch laufender Mindestabstand bis zum nächsten Fenster warten.
+    # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit und zusätzlich
+    # direkt nach dem Systemstart geprüft. So kann die Nachinstallation nach
+    # Ablauf der Mindestwartezeit noch im selben offenen Fenster beginnen.
     $triggers = if ($RunAt -gt [datetime]::MinValue) {
-      @((New-ScheduledTaskTrigger -Daily -At $RunAt))
+      @((New-ScheduledTaskTrigger -Daily -At $RunAt), (New-ScheduledTaskTrigger -AtStartup))
     } else {
       @((New-ScheduledTaskTrigger -AtStartup))
     }
@@ -671,6 +672,7 @@ try {
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
   `$rebootDetected = `$lastBoot -gt `$registeredAt
   `$rebootDueAt = if (`$rebootDetected) { `$lastBoot.AddMinutes($DelayMinutes) } else { [DateTime]::MinValue }
+  `$windowEnd = [DateTime]::MaxValue
   if (`$scheduledAt -gt [DateTime]::MinValue) {
     `$windowOpen = `$true
     if (-not [string]::IsNullOrWhiteSpace(`$maintenanceEndTime)) {
@@ -689,21 +691,41 @@ try {
       `$waitForReboot = `$true
       Write-DeferredLog "Wartungsfenster ist geschlossen. Die Aufgabe wartet auf das nächste tägliche Wartungsfenster."
     } elseif (`$rebootDetected -and [DateTime]::UtcNow -lt `$rebootDueAt) {
-      `$waitForReboot = `$true
-      Write-DeferredLog "Mindestwartezeit nach Neustart läuft noch bis `$(`$rebootDueAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')); die Aufgabe wartet auf das nächste Wartungsfenster danach."
+      `$dueLocal = `$rebootDueAt.ToLocalTime()
+      `$canWaitInsideWindow = `$scheduledAt -le [DateTime]::MinValue -or (`$windowOpen -and `$dueLocal -lt `$windowEnd)
+      if (`$canWaitInsideWindow) {
+        `$secondsUntilDue = [int][Math]::Ceiling((`$dueLocal - (Get-Date)).TotalSeconds)
+        if (`$secondsUntilDue -gt 0) {
+          Write-DeferredLog "Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss')); die Nachinstallation startet danach im aktuellen Wartungsfenster."
+          Start-Sleep -Seconds `$secondsUntilDue
+        }
+        `$afterWait = Get-Date
+        if (`$scheduledAt -gt [DateTime]::MinValue -and -not [string]::IsNullOrWhiteSpace(`$maintenanceEndTime) -and `$afterWait -ge `$windowEnd) {
+          `$waitForReboot = `$true
+          Write-DeferredLog 'Die Mindestwartezeit endet erst nach dem Wartungsfenster. Nachinstallation wird bis zum nächsten Wartungsfenster verschoben.'
+        } else {
+          Write-DeferredLog 'Mindestwartezeit erfüllt. Nachinstallation beginnt jetzt im laufenden Wartungsfenster.'
+        }
+      } else {
+        `$waitForReboot = `$true
+        Write-DeferredLog "Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss)) und passt nicht mehr in das offene Wartungsfenster. Nachinstallation wartet auf das nächste Fenster."
+      }
     } else {
       Write-DeferredLog 'Wartungsfenster erreicht und Mindestwartezeit erfüllt (oder seit Aufgabenanlage kein Neustart erfolgt). Nachinstallation wird jetzt ausgeführt.'
     }
   } elseif (-not `$rebootDetected) {
     # Ohne Wartungszeit bleibt die Aufgabe bis zum Neustart aktiv.
-    Set-ScheduledTask -TaskName `$taskName -Trigger (New-ScheduledTaskTrigger -AtStartup) -ErrorAction Stop | Out-Null
     `$waitForReboot = `$true
     Write-DeferredLog 'Kein Wartungsfenster konfiguriert und noch kein Neustart erkannt. Aufgabe wartet auf Systemstart.'
   } elseif ([DateTime]::UtcNow -lt `$rebootDueAt) {
-    # Ohne Wartungszeit wird genau zum Ende des Mindestabstands gestartet.
-    Set-ScheduledTask -TaskName `$taskName -Trigger (New-ScheduledTaskTrigger -Once -At `$rebootDueAt.ToLocalTime()) -ErrorAction Stop | Out-Null
-    `$waitForReboot = `$true
-    Write-DeferredLog "Mindestwartezeit nach Neustart läuft noch bis `$(`$rebootDueAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss'))."
+    # Ohne Wartungszeit wartet der laufende Task direkt bis zum Ende des Mindestabstands.
+    `$dueLocal = `$rebootDueAt.ToLocalTime()
+    `$secondsUntilDue = [int][Math]::Ceiling((`$dueLocal - (Get-Date)).TotalSeconds)
+    if (`$secondsUntilDue -gt 0) {
+      Write-DeferredLog "Kein Wartungsfenster konfiguriert. Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss'))."
+      Start-Sleep -Seconds `$secondsUntilDue
+    }
+    Write-DeferredLog 'Mindestwartezeit erfüllt. Nachinstallation beginnt jetzt.'
   }
   if (-not `$waitForReboot) {
     Import-Module PSWindowsUpdate -ErrorAction Stop
