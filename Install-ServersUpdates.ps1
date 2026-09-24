@@ -103,6 +103,8 @@ $LinuxUpdateDetails = @()
 $script:VMRebootIndex = 0
 $script:VMRebootLatestAt = $null
 $script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new()
+$script:PendingLinuxPhysicalReboots = [System.Collections.Generic.List[object]]::new()
+$script:PendingHAPhysicalReboots = [System.Collections.Generic.List[object]]::new()
 $script:DeferredLocalReboot = $null
 $UpdResultFull = $null
 $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
@@ -970,11 +972,14 @@ if ($IsWindowsOnlyRun) {
   $LinuxScriptExecuted = $true
   Write-ScriptLog "Führe Linux-Updates Skript aus: $LinuxUpdateScript"
   try {
-    & $LinuxUpdateScript -VMRebootIndexStart $script:VMRebootIndex
+    & $LinuxUpdateScript -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
     Write-ScriptLog "Linux-Updates Skript erfolgreich ausgeführt."
     
     if (Test-Path $LinuxStatsFile) {
-      $LinuxStats = Get-Content $LinuxStatsFile | ConvertFrom-Json
+        $LinuxStats = Get-Content $LinuxStatsFile | ConvertFrom-Json
+      if ($LinuxStats.PSObject.Properties.Name -contains 'PendingPhysicalReboots') {
+        foreach ($pendingLinuxReboot in @($LinuxStats.PendingPhysicalReboots)) { $script:PendingLinuxPhysicalReboots.Add($pendingLinuxReboot) }
+      }
       $LinuxServerCount = $LinuxStats.TotalHosts
       
       if ($LinuxStats.PSObject.Properties.Name -contains 'UpdatesInstalled') {
@@ -1026,11 +1031,14 @@ if ($IsWindowsOnlyRun) {
   $HAScriptExecuted = $true
   Write-ScriptLog "Führe Home Assistant-Updates Skript aus: $HAUpdateScript"
   try {
-    & $HAUpdateScript -VMRebootIndexStart $script:VMRebootIndex
+    & $HAUpdateScript -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
     Write-ScriptLog "Home Assistant-Updates Skript erfolgreich ausgeführt."
     
     if (Test-Path $HAStatsFile) {
       $HAStats = Get-Content $HAStatsFile | ConvertFrom-Json
+      if ($HAStats.PSObject.Properties.Name -contains 'PendingPhysicalReboot' -and $null -ne $HAStats.PendingPhysicalReboot) {
+        $script:PendingHAPhysicalReboots.Add($HAStats.PendingPhysicalReboot)
+      }
       $HAServerCount = $HAStats.TotalHosts
       
       if ($HAStats.PSObject.Properties.Name -contains 'SuccessfulUpdates') {
@@ -1453,6 +1461,38 @@ if ($ServerADList -ne $null) {
 # Physische Windows-Systeme starten erst nach dem VM-Neustartblock. Für jeden
 # VM-Neustart wird vorsorglich bis zu einer Stunde Ausfallzeit eingeplant.
 $physicalRebootNotBefore = if ($null -ne $script:VMRebootLatestAt) { $script:VMRebootLatestAt.AddHours(1) } else { [datetime]::MinValue }
+
+# Linux- und Home-Assistant-Hosts verwenden dieselbe Physisch-nach-VM-Regel.
+# Ihre Neustarts werden von den Einzelskripten gemeldet und erst jetzt gemeinsam eingeplant.
+foreach ($pendingLinuxReboot in $script:PendingLinuxPhysicalReboots) {
+  try {
+    $plannedAt = Get-NextRebootTimeInWindow -StartTime ([string]$pendingLinuxReboot.RebootTime) -LatestTime ([string]$pendingLinuxReboot.LatestRebootTime) -NotBefore $physicalRebootNotBefore
+    $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($plannedAt - (Get-Date)).TotalMinutes))
+    $sshPath = [string]$pendingLinuxReboot.SSHPath
+    $sshArgs = @(Get-WindowsUpdateSshArguments -KeyPath ([string]$pendingLinuxReboot.KeyPath) -BatchMode -AcceptNewHostKey)
+    $sshArgs += ('{0}@{1}' -f [string]$pendingLinuxReboot.User, [string]$pendingLinuxReboot.Host), "sudo /sbin/shutdown -r +$delayMinutes"
+    & $sshPath @sshArgs 2>&1 | ForEach-Object { if ($_){ Write-ScriptLog "[$($pendingLinuxReboot.Host)] $_" } }
+    if ($LASTEXITCODE -ne 0) { throw "SSH lieferte Exit-Code $LASTEXITCODE." }
+    Write-ScriptLog "Physischer Linux-Neustart auf $($pendingLinuxReboot.Host) für $($plannedAt.ToString('dd.MM.yyyy HH:mm')) eingeplant."
+  }
+  catch { Write-ScriptLog "Physischer Linux-Neustart auf $($pendingLinuxReboot.Host) konnte nicht eingeplant werden: $($_.Exception.Message)" }
+}
+foreach ($pendingHAReboot in $script:PendingHAPhysicalReboots) {
+  try {
+    $plannedAt = Get-NextRebootTimeInWindow -StartTime ([string]$pendingHAReboot.RebootTime) -LatestTime ([string]$pendingHAReboot.LatestRebootTime) -NotBefore $physicalRebootNotBefore
+    $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($plannedAt - (Get-Date)).TotalMinutes))
+    $sshPath = [string]$pendingHAReboot.SSHPath
+    $sshArgs = @(Get-WindowsUpdateSshArguments -KeyPath ([string]$pendingHAReboot.KeyPath) -Port ([int]$pendingHAReboot.Port) -BatchMode -AcceptNewHostKey)
+    $sshArgs += ('{0}@{1}' -f [string]$pendingHAReboot.User, [string]$pendingHAReboot.Host)
+    $haCommand = if ($delayMinutes -le 1) { 'ha host reboot' } else { "nohup sh -c 'sleep $($delayMinutes * 60); ha host reboot' >/dev/null 2>&1 &" }
+    $sshArgs += $haCommand
+    & $sshPath @sshArgs 2>&1 | ForEach-Object { if ($_){ Write-ScriptLog "[Home Assistant $($pendingHAReboot.Host)] $_" } }
+    if ($LASTEXITCODE -ne 0) { throw "SSH lieferte Exit-Code $LASTEXITCODE." }
+    Write-ScriptLog "Physischer Home-Assistant-Neustart auf $($pendingHAReboot.Host) für $($plannedAt.ToString('dd.MM.yyyy HH:mm')) eingeplant."
+  }
+  catch { Write-ScriptLog "Physischer Home-Assistant-Neustart auf $($pendingHAReboot.Host) konnte nicht eingeplant werden: $($_.Exception.Message)" }
+}
+
 foreach ($pendingReboot in $script:PendingPhysicalReboots) {
   if ($physicalRebootNotBefore -gt [datetime]::MinValue) {
     $plannedPhysicalAt = Get-NextRebootTimeInWindow -StartTime $pendingReboot.RebootTime -LatestTime $pendingReboot.LatestRebootTime

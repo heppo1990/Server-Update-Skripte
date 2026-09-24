@@ -1,5 +1,6 @@
 ﻿param(
     [switch]$CheckOnly,
+    [switch]$DeferPhysicalReboots,
     [string]$HAHost,
     [string]$User,
     [ValidateRange(1, 65535)]
@@ -104,6 +105,7 @@ $Script:UpdateStats = @{
     RebootStartsImmediately = $false
     IsVirtual = $false
     ErrorCount = 0
+    PendingPhysicalReboot = $null
 }
 
 function Write-HostLog {
@@ -194,7 +196,17 @@ function Register-HAReboot {
         $scheduled = if (-not [string]::IsNullOrWhiteSpace($vmStartTime)) { Get-NextHARebootTime $vmStartTime ([string]$settings.UpdateSettings.VMRebootWindowEndTime) $vmOffset -PreferImmediate } else { (Get-Date).AddMinutes(1 + $vmOffset) }
     }
     elseif ($IsVirtual -and -not [string]::IsNullOrWhiteSpace($vmStartTime)) { $scheduled = Get-NextHARebootTime $vmStartTime ([string]$settings.UpdateSettings.VMRebootWindowEndTime) $vmOffset }
-    elseif (-not $IsVirtual -and -not [string]::IsNullOrWhiteSpace($physicalTime)) { $scheduled = Get-NextHARebootTime $physicalTime ([string]$settings.UpdateSettings.PhysicalRebootWindowEndTime) }
+    elseif (-not $IsVirtual -and -not [string]::IsNullOrWhiteSpace($physicalTime)) {
+        if ($DeferPhysicalReboots) {
+            $Script:UpdateStats.PendingPhysicalReboot = [PSCustomObject]@{
+                Host = $HAHost; User = $User; Port = $Port; KeyPath = $KeyPath; SSHPath = $SSHPath
+                RebootTime = $physicalTime; LatestRebootTime = [string]$settings.UpdateSettings.PhysicalRebootWindowEndTime
+            }
+            Write-HostLog -Message 'Physischer Home-Assistant-Neustart wird bis nach dem gemeinsamen VM-Neustartblock zurückgestellt.' -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+            return $true
+        }
+        $scheduled = Get-NextHARebootTime $physicalTime ([string]$settings.UpdateSettings.PhysicalRebootWindowEndTime)
+    }
     if ($null -eq $scheduled) { Write-HostLog -Message 'Kein automatischer Neustart für Home Assistant konfiguriert.' -RemoteHost $HAHost -LogFile $LogFile; return $false }
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($scheduled - (Get-Date)).TotalMinutes))
     $Script:UpdateStats.RebootStartsImmediately = ($delayMinutes -le 1)
@@ -749,6 +761,7 @@ $HAStats = @{
     RebootPerformed = $Script:UpdateStats.RebootPerformed
     RebootScheduled = $Script:UpdateStats.RebootScheduled
     VMRebootsScheduled = if ($Script:UpdateStats.RebootScheduled -and $Script:UpdateStats.IsVirtual) { 1 } else { 0 }
+    PendingPhysicalReboot = $Script:UpdateStats.PendingPhysicalReboot
     ErrorCount = $Script:UpdateStats.ErrorCount
     HostStatus = @($HostStatus)  # Array für Konsistenz mit Linux-Skript
 }

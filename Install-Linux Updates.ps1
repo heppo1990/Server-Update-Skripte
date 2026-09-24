@@ -2,6 +2,7 @@
 param(
     [switch]$DryRun,
     [switch]$CheckOnly,
+    [switch]$DeferPhysicalReboots,
     [string]$KeyPath,
     [string]$SSHPath,
     [ValidateRange(0, 1000)]
@@ -67,6 +68,7 @@ $script:LockWaitIntervals = if ([int]$linuxSettings.LockWaitMinutes -gt 0) { [in
 $script:LogDirectory = Join-Path $PSScriptRoot 'Logs'
 $script:WriteExecutionLog = -not $CheckOnly
 $script:VMRebootIndex = $VMRebootIndexStart
+$script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new()
 
 function Write-LinuxLog {
     param([Parameter(Mandatory)][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info')
@@ -158,7 +160,17 @@ function Register-LinuxReboot {
         $script:VMRebootIndex++
     }
     elseif ($IsVirtual -and -not [string]::IsNullOrWhiteSpace($vmStartTime)) { $scheduled = Get-NextLinuxScheduledTime $vmStartTime ([string]$settings.UpdateSettings.VMRebootWindowEndTime) $vmOffset; $script:VMRebootIndex++ }
-    elseif (-not $IsVirtual -and -not [string]::IsNullOrWhiteSpace($physicalTime)) { $scheduled = Get-NextLinuxScheduledTime $physicalTime ([string]$settings.UpdateSettings.PhysicalRebootWindowEndTime) }
+    elseif (-not $IsVirtual -and -not [string]::IsNullOrWhiteSpace($physicalTime)) {
+        if ($DeferPhysicalReboots) {
+            $script:PendingPhysicalReboots.Add([PSCustomObject]@{
+                Host = $RemoteHost; User = $RemoteUser; KeyPath = $KeyPath; SSHPath = $script:SSHPath
+                RebootTime = $physicalTime; LatestRebootTime = [string]$settings.UpdateSettings.PhysicalRebootWindowEndTime
+            })
+            Write-LinuxLog -Message "Physischer Neustart auf $RemoteHost wird bis nach dem gemeinsamen VM-Neustartblock zurückgestellt." -LogFile $LogFile -Level Warning
+            return $true
+        }
+        $scheduled = Get-NextLinuxScheduledTime $physicalTime ([string]$settings.UpdateSettings.PhysicalRebootWindowEndTime)
+    }
     if ($null -eq $scheduled) { Write-LinuxLog -Message "Kein automatischer Neustart für $RemoteHost konfiguriert." -LogFile $LogFile; return $false }
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($scheduled - (Get-Date)).TotalMinutes))
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
@@ -458,7 +470,7 @@ foreach ($entry in $hostEntries) {
         Invoke-LinuxLogRetention -RemoteHost $remoteHost
     }
 }
-$linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; VMRebootsScheduled=$vmRebootsScheduled; UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
+$linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; VMRebootsScheduled=$vmRebootsScheduled; PendingPhysicalReboots=@($script:PendingPhysicalReboots); UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
 $statsFile = Join-Path $PSScriptRoot $(if ($CheckOnly) { 'linux_update_check_stats.json' } else { 'linux_update_stats.json' })
 $linuxStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statsFile -Encoding utf8
 $summaryVerb = if ($DryRun) { 'verfügbar' } else { 'installiert' }
