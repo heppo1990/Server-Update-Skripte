@@ -264,16 +264,21 @@ try {
         $categories = @($config.DeferredCategories | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         $kbs = @($config.DeferredKBs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         if ([bool]$config.DeferredOnly) {
-            # Die Nachinstallation priorisiert – genau wie die Hauptlogik –
-            # explizite KBs vor Kategorien. Das gilt auch für reine Prüfungen.
-            if ($kbs.Count -gt 0) { $wuParams.KBArticleID = $kbs }
-            elseif ($categories.Count -gt 0) { $wuParams.Category = $categories }
+            # KBs und Kategorien werden gemeinsam geprüft. Eine konfigurierte
+            # Kategorie darf nicht durch eine zusätzlich eingetragene KB-Liste
+            # unterdrückt werden.
+            $updates = @()
+            foreach ($kb in $kbs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+            foreach ($category in $categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
+            $updates = @($updates | Select-Object ComputerName, Status, KB, Size, Title)
         }
-        elseif ($config.Mode -eq 'Install') {
-            if ($categories.Count -gt 0) { $wuParams.NotCategory = $categories }
-            if ($kbs.Count -gt 0) { $wuParams.NotKBArticleID = $kbs }
+        else {
+            if ($config.Mode -eq 'Install') {
+                if ($categories.Count -gt 0) { $wuParams.NotCategory = $categories }
+                if ($kbs.Count -gt 0) { $wuParams.NotKBArticleID = $kbs }
+            }
+            $updates = @(Get-WindowsUpdate @wuParams | Select-Object ComputerName, Status, KB, Size, Title)
         }
-        $updates = @(Get-WindowsUpdate @wuParams | Select-Object ComputerName, Status, KB, Size, Title)
     }
     $result = [ordered]@{ Success = $true; Error = ''; Updates = @($updates) }
 }

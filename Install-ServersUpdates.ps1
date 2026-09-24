@@ -195,12 +195,15 @@ function Invoke-WindowsUpdates {
       if (-not (Get-Module -Name PSWindowsUpdate)) { Import-Module PSWindowsUpdate -ErrorAction Stop }
       $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
       if ($SucheOnline) { $wuParams.MicrosoftUpdate = $true }
-      if ($DeferredOnly -and $DeferredKBs.Count -gt 0) { $wuParams.KBArticleID = $DeferredKBs }
-      elseif (-not $DeferredOnly) {
-        if ($DeferredCategories.Count -gt 0) { $wuParams.NotCategory = $DeferredCategories }
-        if ($DeferredKBs.Count -gt 0) { $wuParams.NotKBArticleID = $DeferredKBs }
-      }
-      $UpdResult = Get-WindowsUpdate @wuParams
+            if (-not $DeferredOnly) {
+              if ($DeferredCategories.Count -gt 0) { $wuParams.NotCategory = $DeferredCategories }
+              if ($DeferredKBs.Count -gt 0) { $wuParams.NotKBArticleID = $DeferredKBs }
+            }
+      if ($DeferredOnly) {
+        $UpdResult = @()
+        foreach ($kb in $DeferredKBs) { $UpdResult += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+        foreach ($category in $DeferredCategories) { $UpdResult += @(Get-WindowsUpdate @wuParams -Category $category) }
+      } else { $UpdResult = Get-WindowsUpdate @wuParams }
     } else {
       $useJEA = $false
       $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-ScriptLog $message }
@@ -233,12 +236,16 @@ function Invoke-WindowsUpdates {
             param($Online, $Categories, $KBs, $OnlyDeferred)
             $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
             if ($Online) { $wuParams.MicrosoftUpdate = $true }
-            if ($OnlyDeferred -and $KBs.Count -gt 0) { $wuParams.KBArticleID = $KBs }
-            elseif (-not $OnlyDeferred) {
+            if (-not $OnlyDeferred) {
               if ($Categories.Count -gt 0) { $wuParams.NotCategory = $Categories }
               if ($KBs.Count -gt 0) { $wuParams.NotKBArticleID = $KBs }
             }
-            Get-WindowsUpdate @wuParams
+            if ($OnlyDeferred) {
+              $updates = @()
+              foreach ($kb in $KBs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+              foreach ($category in $Categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
+              $updates
+            } else { Get-WindowsUpdate @wuParams }
           }
         }
         if ($AuthInfo) {
@@ -265,12 +272,16 @@ function Invoke-WindowsUpdates {
               Import-Module PSWindowsUpdate -ErrorAction Stop
               $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
               if ($Online) { $wuParams.MicrosoftUpdate = $true }
-              if ($OnlyDeferred -and $KBs.Count -gt 0) { $wuParams.KBArticleID = $KBs }
-              elseif (-not $OnlyDeferred) {
+              if (-not $OnlyDeferred) {
                 if ($Categories.Count -gt 0) { $wuParams.NotCategory = $Categories }
                 if ($KBs.Count -gt 0) { $wuParams.NotKBArticleID = $KBs }
               }
-              Get-WindowsUpdate @wuParams
+              if ($OnlyDeferred) {
+                $updates = @()
+                foreach ($kb in $KBs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+                foreach ($category in $Categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
+                $updates
+              } else { Get-WindowsUpdate @wuParams }
             } }
             $success = $true
             Write-ScriptLog "Verbindung mit Client-Zertifikat via HTTPS erfolgreich." -IsDebug
@@ -338,9 +349,10 @@ function Get-DeferredWindowsUpdates {
       param($Online, $Categories, $KBs)
       $wuParams = @{ AcceptAll = $true; IgnoreReboot = $true }
       if ($Online) { $wuParams.MicrosoftUpdate = $true }
-      if (@($KBs).Count -gt 0) { $wuParams.KBArticleID = @($KBs) }
-      elseif (@($Categories).Count -gt 0) { $wuParams.Category = @($Categories) }
-      Get-WindowsUpdate @wuParams
+      $updates = @()
+      foreach ($kb in @($KBs)) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+      foreach ($category in @($Categories)) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
+      $updates
     }
 
     if ($isLocal) {
@@ -564,9 +576,25 @@ function Register-DeferredUpdateTask {
   # Die Aufgabe wird ausschließlich beim nächsten Boot gestartet.
   # Erst dessen LastBootUpTime ist der Startpunkt der Nachinstallationsfrist.
   $taskName = 'WindowsUpdateAdm-DeferredUpdates'
-  $categories = $DeferredCategories | ConvertTo-Json -Compress
-  $deferredKBsJson = $DeferredKBs | ConvertTo-Json -Compress
-  $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($MailSettings | ConvertTo-Json -Depth 5 -Compress)))
+  # InputObject verhindert, dass ein leeres Array zu JSON-null wird und später
+  # als ein einzelnes leeres KB-Element interpretiert wird.
+  $categories = ConvertTo-Json -InputObject @($DeferredCategories) -Compress
+  $deferredKBsJson = ConvertTo-Json -InputObject @($DeferredKBs) -Compress
+  # Die Aufgabe wird vor dem normalen Mail-Report registriert. Deshalb werden
+  # Sender und Betreff hier bereits mit den Installationswerten ergänzt.
+  $deferredMailSettings = $MailSettings | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+  if (-not $deferredMailSettings.Install) {
+    Add-Member -InputObject $deferredMailSettings -NotePropertyName 'Install' -NotePropertyValue ([PSCustomObject]@{}) -Force
+  }
+  $deferredCompanyName = [string]$deferredMailSettings.CompanyName
+  if ([string]::IsNullOrWhiteSpace([string]$deferredMailSettings.Sender) -and -not [string]::IsNullOrWhiteSpace($deferredCompanyName)) {
+    $deferredMailSafeName = ConvertTo-WindowsUpdateMailSafeString -Text $deferredCompanyName
+    Add-Member -InputObject $deferredMailSettings -NotePropertyName 'Sender' -NotePropertyValue "Updates@$deferredMailSafeName.de" -Force
+  }
+  if ([string]::IsNullOrWhiteSpace([string]$deferredMailSettings.Install.Subject)) {
+    Add-Member -InputObject $deferredMailSettings.Install -NotePropertyName 'Subject' -NotePropertyValue 'Server Updates installiert' -Force
+  }
+  $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($deferredMailSettings | ConvertTo-Json -Depth 5 -Compress)))
   $registeredAt = [DateTime]::UtcNow.ToFileTimeUtc()
   $script = @"
 `$taskName = '$taskName'
@@ -597,17 +625,21 @@ try {
   }
   if (-not `$waitForReboot) {
     Import-Module PSWindowsUpdate -ErrorAction Stop
-    `$categories = @('$categories' | ConvertFrom-Json)
-    `$deferredKBs = @('$deferredKBsJson' | ConvertFrom-Json)
+    `$categories = @('$categories' | ConvertFrom-Json | Where-Object { -not [string]::IsNullOrWhiteSpace([string]`$_) })
+    `$deferredKBs = @('$deferredKBsJson' | ConvertFrom-Json | Where-Object { -not [string]::IsNullOrWhiteSpace([string]`$_) })
+    `$results = @()
+    `$selectionParts = @()
     if (`$deferredKBs.Count -gt 0) {
       Write-DeferredLog "Installiere zurückgestellte KBs: `$(`$deferredKBs -join ', ')."
-      `$results = foreach (`$kb in `$deferredKBs) { Get-WindowsUpdate -KBArticleID `$kb -AcceptAll -Install -IgnoreReboot }
-      `$selection = "KBs: `$(`$deferredKBs -join ', ')"
-    } else {
-      Write-DeferredLog "Installiere zurückgestellte Kategorien: `$(`$categories -join ', ')."
-      `$results = foreach (`$category in `$categories) { Get-WindowsUpdate -Category `$category -AcceptAll -Install -IgnoreReboot }
-      `$selection = "Kategorien: `$(`$categories -join ', ')"
+      `$selectionParts += "KBs: `$(`$deferredKBs -join ', ')"
+      foreach (`$kb in `$deferredKBs) { `$results += @(Get-WindowsUpdate -KBArticleID `$kb -AcceptAll -Install -IgnoreReboot) }
     }
+    if (`$categories.Count -gt 0) {
+      Write-DeferredLog "Installiere zurückgestellte Kategorien: `$(`$categories -join ', ')."
+      `$selectionParts += "Kategorien: `$(`$categories -join ', ')"
+      foreach (`$category in `$categories) { `$results += @(Get-WindowsUpdate -Category `$category -AcceptAll -Install -IgnoreReboot) }
+    }
+    `$selection = `$selectionParts -join '; '
     `$rows = foreach (`$result in @(`$results)) {
       `$kb = [System.Net.WebUtility]::HtmlEncode([string]`$result.KB)
       `$title = [System.Net.WebUtility]::HtmlEncode([string]`$result.Title)
@@ -691,7 +723,10 @@ tr:nth-child(even) { background-color: #f9f9f9; }
 
 "@
   Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo
-  $selectionText = if ($DeferredKBs.Count -gt 0) { "KBs: $($DeferredKBs -join ', ')" } else { "Kategorien: $($DeferredCategories -join ', ')" }
+  $selectionText = @(
+    if ($DeferredKBs.Count -gt 0) { "KBs: $($DeferredKBs -join ', ')" }
+    if ($DeferredCategories.Count -gt 0) { "Kategorien: $($DeferredCategories -join ', ')" }
+  ) -join '; '
   Write-ScriptLog "Nachinstallation auf $Servername wird erst beim nächsten Neustart aktiviert und startet danach nach $DelayMinutes Minute(n) ($selectionText; selbstlöschend)."
 }
 
