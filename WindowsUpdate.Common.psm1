@@ -285,9 +285,9 @@ try {
     else {
         $wuParams = @{}
         switch ($config.Mode) {
-            # Auch reine Abfragen dürfen bei einem bereits ausstehenden
-            # Neustart niemals interaktiv nach "Do it now?" fragen.
-            'Check'    { $wuParams.AcceptAll = $true; $wuParams.IgnoreReboot = $true }
+            # Der reine Check fragt nur ab; AcceptAll und IgnoreReboot
+            # gehören in die Download-/Installationspfade, nicht in die Suche.
+            'Check'    { }
             'Download' { $wuParams.AcceptAll = $true; $wuParams.Download = $true }
             'Install'  { $wuParams.AcceptAll = $true; $wuParams.Install = $true; $wuParams.IgnoreReboot = $true }
         }
