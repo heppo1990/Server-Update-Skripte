@@ -144,6 +144,25 @@ function Add-ServerUpdateMissingJsonProperties {
     return $added
 }
 
+function Merge-ServerUpdateJsonProperties {
+    param([object]$Destination, [object]$Overrides)
+    if ($Destination -isnot [System.Management.Automation.PSCustomObject] -or
+        $Overrides -isnot [System.Management.Automation.PSCustomObject]) { return }
+
+    foreach ($overrideProperty in $Overrides.PSObject.Properties) {
+        $destinationProperty = $Destination.PSObject.Properties[$overrideProperty.Name]
+        if ($null -ne $destinationProperty -and
+            $destinationProperty.Value -is [System.Management.Automation.PSCustomObject] -and
+            $overrideProperty.Value -is [System.Management.Automation.PSCustomObject]) {
+            Merge-ServerUpdateJsonProperties -Destination $destinationProperty.Value -Overrides $overrideProperty.Value
+        }
+        else {
+            $overrideValue = Copy-ServerUpdateJsonValue -Value $overrideProperty.Value
+            Add-Member -InputObject $Destination -NotePropertyName $overrideProperty.Name -NotePropertyValue $overrideValue -Force
+        }
+    }
+}
+
 function Update-ServerUpdateSettingsDefaults {
     param([Parameter(Mandatory)][string]$ScriptRoot)
 
@@ -158,10 +177,10 @@ function Update-ServerUpdateSettingsDefaults {
     }
 
     $generalSettingsPath = Join-Path $ScriptRoot 'settings.json'
-    $settingsPaths = if (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) {
-        @($generalSettingsPath)
-    } else {
-        @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.settings.json' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    $settingsPaths = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) { $settingsPaths.Add($generalSettingsPath) }
+    foreach ($scriptSettingsFile in @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.settings.json' -File -ErrorAction SilentlyContinue)) {
+        $settingsPaths.Add($scriptSettingsFile.FullName)
     }
 
     foreach ($settingsPath in $settingsPaths) {
@@ -171,7 +190,16 @@ function Update-ServerUpdateSettingsDefaults {
             if ($settings -isnot [System.Management.Automation.PSCustomObject] -or
                 $defaults -isnot [System.Management.Automation.PSCustomObject]) { continue }
 
-            $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $defaults
+            # Skriptspezifische Dateien erhalten fehlende Werte aus der effektiven
+            # gemeinsamen Konfiguration; ihre bereits gesetzten Werte bleiben maßgeblich.
+            $fileDefaults = $defaults
+            if ($settingsPath -ine $generalSettingsPath -and (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf)) {
+                $fileDefaults = Copy-ServerUpdateJsonValue -Value $defaults
+                $generalSettings = Get-Content -LiteralPath $generalSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+                Merge-ServerUpdateJsonProperties -Destination $fileDefaults -Overrides $generalSettings
+            }
+
+            $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $fileDefaults
             if ($addedCount -eq 0) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
