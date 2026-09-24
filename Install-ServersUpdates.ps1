@@ -424,6 +424,33 @@ function Get-NextScheduledTime {
   return $when
 }
 
+function Get-NextRebootTimeInWindow {
+  param(
+    [Parameter(Mandatory)][string]$StartTime,
+    [string]$LatestTime,
+    [int]$DelayMinutes = 0
+  )
+  $start = Get-NextScheduledTime $StartTime
+  if ([string]::IsNullOrWhiteSpace($LatestTime)) { return $start.AddMinutes($DelayMinutes) }
+
+  $latestParsed = [datetime]::MinValue
+  if (-not [datetime]::TryParse($LatestTime, [ref]$latestParsed)) {
+    throw "Ungültige späteste Neustartzeit '$LatestTime'. Erwartet wird z. B. 23:00."
+  }
+  $latest = $start.Date.Add($latestParsed.TimeOfDay)
+  if ($latest -lt $start) { $latest = $latest.AddDays(1) }
+  $scheduled = $start.AddMinutes($DelayMinutes)
+  if ($scheduled -gt $latest) {
+    $start = $start.AddDays(1)
+    $latest = $latest.AddDays(1)
+    $scheduled = $start.AddMinutes($DelayMinutes)
+  }
+  if ($scheduled -gt $latest) {
+    throw "Der Neustartversatz von $DelayMinutes Minute(n) liegt außerhalb des konfigurierten Wartungsfensters."
+  }
+  return $scheduled
+}
+
 function Test-ServerIsVirtual {
   param([string]$Servername, $AuthInfo = $null)
   $sb = {
@@ -520,10 +547,30 @@ function Register-StartupRemoteTask {
 }
 
 function Register-RebootTask {
-  param([string]$Servername, [string]$RebootTime, [int]$DelayMinutes = 0, [switch]$Immediately, $AuthInfo = $null)
+  param([string]$Servername, [string]$RebootTime, [string]$LatestRebootTime, [int]$DelayMinutes = 0, [switch]$Immediately, $AuthInfo = $null)
   if (-not $Immediately -and [string]::IsNullOrWhiteSpace($RebootTime)) { return }
   # Eine Minute Abstand verhindert, dass die Verbindung des Installationslaufs abgeschnitten wird.
-  $at = if ($Immediately) { (Get-Date).AddMinutes(1) } else { (Get-NextScheduledTime $RebootTime).AddMinutes($DelayMinutes) }
+  if ($Immediately -and -not [string]::IsNullOrWhiteSpace($RebootTime) -and -not [string]::IsNullOrWhiteSpace($LatestRebootTime)) {
+    $startParsed = [datetime]::MinValue
+    $endParsed = [datetime]::MinValue
+    if (-not [datetime]::TryParse($RebootTime, [ref]$startParsed) -or -not [datetime]::TryParse($LatestRebootTime, [ref]$endParsed)) {
+      throw 'Ungültige VM-Wartungsfenster-Uhrzeit für einen sofortigen Neustart.'
+    }
+    $now = Get-Date
+    $windowStart = $now.Date.Add($startParsed.TimeOfDay)
+    if ($now -lt $windowStart) { $windowStart = $windowStart.AddDays(-1) }
+    $windowEnd = $windowStart.Date.Add($endParsed.TimeOfDay)
+    if ($windowEnd -le $windowStart) { $windowEnd = $windowEnd.AddDays(1) }
+    $at = if ($now -ge $windowStart -and $now.AddMinutes(1) -le $windowEnd) {
+      $now.AddMinutes(1)
+    } else {
+      Get-NextRebootTimeInWindow -StartTime $RebootTime -LatestTime $LatestRebootTime
+    }
+  } elseif ($Immediately) {
+    $at = (Get-Date).AddMinutes(1)
+  } else {
+    $at = Get-NextRebootTimeInWindow -StartTime $RebootTime -LatestTime $LatestRebootTime -DelayMinutes $DelayMinutes
+  }
   $taskName = 'WindowsUpdateAdm-Reboot'
   $registeredAt = [DateTime]::UtcNow.ToFileTimeUtc()
   $script = @"
@@ -549,6 +596,7 @@ function Request-RebootTask {
   param(
     [string]$Servername,
     [string]$RebootTime,
+    [string]$LatestRebootTime,
     [int]$DelayMinutes = 0,
     [switch]$Immediately,
     $AuthInfo = $null
@@ -560,6 +608,7 @@ function Request-RebootTask {
     $script:DeferredLocalReboot = [PSCustomObject]@{
       Servername   = $Servername
       RebootTime   = $RebootTime
+      LatestRebootTime = $LatestRebootTime
       DelayMinutes = $DelayMinutes
       Immediately  = [bool]$Immediately
       AuthInfo     = $AuthInfo
@@ -567,19 +616,19 @@ function Request-RebootTask {
     Write-ScriptLog "Neustart für den Verwaltungsserver $Servername wird erst nach Abschluss aller Zielserver geplant."
     return
   }
-  Register-RebootTask -Servername $Servername -RebootTime $RebootTime -DelayMinutes $DelayMinutes -Immediately:$Immediately -AuthInfo $AuthInfo
+  Register-RebootTask -Servername $Servername -RebootTime $RebootTime -LatestRebootTime $LatestRebootTime -DelayMinutes $DelayMinutes -Immediately:$Immediately -AuthInfo $AuthInfo
 }
 
 function Register-DeferredLocalRebootTask {
   if ($null -eq $script:DeferredLocalReboot) { return }
   $request = $script:DeferredLocalReboot
   Write-ScriptLog "Alle Zielserver sind verarbeitet – plane nun den Neustart des Verwaltungsservers $($request.Servername)."
-  Register-RebootTask -Servername $request.Servername -RebootTime $request.RebootTime -DelayMinutes $request.DelayMinutes -Immediately:$request.Immediately -AuthInfo $request.AuthInfo
+  Register-RebootTask -Servername $request.Servername -RebootTime $request.RebootTime -LatestRebootTime $request.LatestRebootTime -DelayMinutes $request.DelayMinutes -Immediately:$request.Immediately -AuthInfo $request.AuthInfo
   $script:DeferredLocalReboot = $null
 }
 
 function Register-DeferredUpdateTask {
-  param([string]$Servername, [string[]]$DeferredCategories, [string[]]$DeferredKBs = @(), [int]$DelayMinutes = 1440, [bool]$SucheOnline, $AuthInfo = $null, [datetime]$ScheduledAt = [datetime]::MinValue)
+  param([string]$Servername, [string[]]$DeferredCategories, [string[]]$DeferredKBs = @(), [int]$DelayMinutes = 1440, [bool]$SucheOnline, $AuthInfo = $null, [datetime]$ScheduledAt = [datetime]::MinValue, [string]$MaintenanceEndTime = '')
   # Die Aufgabe wird ausschließlich beim nächsten Boot gestartet.
   # Erst dessen LastBootUpTime ist der Startpunkt der Nachinstallationsfrist.
   $taskName = 'WindowsUpdateAdm-DeferredUpdates'
@@ -604,6 +653,7 @@ function Register-DeferredUpdateTask {
   $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($deferredMailSettings | ConvertTo-Json -Depth 5 -Compress)))
   $registeredAt = [DateTime]::UtcNow.ToFileTimeUtc()
   $scheduledAtFileTime = if ($ScheduledAt -gt [datetime]::MinValue) { $ScheduledAt.ToUniversalTime().ToFileTimeUtc() } else { 0 }
+  $maintenanceEndBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($MaintenanceEndTime))
   $script = @"
 `$taskName = '$taskName'
 try {
@@ -615,15 +665,30 @@ try {
   }
   `$waitForReboot = `$false
   `$scheduledAt = if ($scheduledAtFileTime -gt 0) { [DateTime]::FromFileTimeUtc($scheduledAtFileTime) } else { [DateTime]::MinValue }
+  `$maintenanceEndTime = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$maintenanceEndBase64'))
   Write-DeferredLog 'Nachinstallationsaufgabe gestartet.'
   `$registeredAt = [DateTime]::FromFileTimeUtc($registeredAt)
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
   `$rebootDetected = `$lastBoot -gt `$registeredAt
   `$rebootDueAt = if (`$rebootDetected) { `$lastBoot.AddMinutes($DelayMinutes) } else { [DateTime]::MinValue }
   if (`$scheduledAt -gt [DateTime]::MinValue) {
+    `$windowOpen = `$true
+    if (-not [string]::IsNullOrWhiteSpace(`$maintenanceEndTime)) {
+      `$endParsed = [DateTime]::MinValue
+      if (-not [DateTime]::TryParse(`$maintenanceEndTime, [ref]`$endParsed)) { throw "Ungültiges Wartungsfenster-Ende: `$maintenanceEndTime" }
+      `$nowLocal = Get-Date
+      `$windowStart = `$nowLocal.Date.Add(`$scheduledAt.ToLocalTime().TimeOfDay)
+      if (`$nowLocal -lt `$windowStart) { `$windowStart = `$windowStart.AddDays(-1) }
+      `$windowEnd = `$windowStart.Date.Add(`$endParsed.TimeOfDay)
+      if (`$windowEnd -le `$windowStart) { `$windowEnd = `$windowEnd.AddDays(1) }
+      `$windowOpen = `$nowLocal -ge `$windowStart -and `$nowLocal -lt `$windowEnd
+    }
     # Die Aufgabe wird täglich im Wartungsfenster gestartet. Nach einem
     # Neustart darf dessen Wartezeit das Fenster nicht unterschreiten.
-    if (`$rebootDetected -and [DateTime]::UtcNow -lt `$rebootDueAt) {
+    if (-not `$windowOpen) {
+      `$waitForReboot = `$true
+      Write-DeferredLog "Wartungsfenster ist geschlossen. Die Aufgabe wartet auf das nächste tägliche Wartungsfenster."
+    } elseif (`$rebootDetected -and [DateTime]::UtcNow -lt `$rebootDueAt) {
       `$waitForReboot = `$true
       Write-DeferredLog "Mindestwartezeit nach Neustart läuft noch bis `$(`$rebootDueAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')); die Aufgabe wartet auf das nächste Wartungsfenster danach."
     } else {
@@ -1175,7 +1240,9 @@ if ($ServerADList -ne $null) {
         $deferredCategories  = @()
         $deferredKBs         = @()
         $physicalRebootTime  = [string]$UpdateSettings.PhysicalRebootTime
+        $physicalRebootWindowEndTime = [string]$UpdateSettings.PhysicalRebootWindowEndTime
         $vmRebootStartTime   = [string]$UpdateSettings.VMRebootStartTime
+        $vmRebootWindowEndTime = [string]$UpdateSettings.VMRebootWindowEndTime
         $vmRebootImmediately = [bool]$UpdateSettings.VMRebootImmediately
         # 1.440 Minuten entsprechen 24 Stunden. Minuten erlauben auch einen schnellen, sicheren Funktionstest.
         $deferredDelayMinutes = [int]$UpdateSettings.DeferredUpdateDelayMinutes
@@ -1208,13 +1275,13 @@ if ($ServerADList -ne $null) {
         if ($rebootRequired) {
           $isVirtual = Test-ServerIsVirtual -Servername $Servername -AuthInfo $svcCredential
           if ($isVirtual -and $vmRebootImmediately) {
-            Request-RebootTask -Servername $Servername -Immediately -AuthInfo $svcCredential
+            Request-RebootTask -Servername $Servername -Immediately -RebootTime $vmRebootStartTime -LatestRebootTime $vmRebootWindowEndTime -AuthInfo $svcCredential
           } elseif ($isVirtual -and -not [string]::IsNullOrWhiteSpace($vmRebootStartTime)) {
             $interval = if ($UpdateSettings.VMRebootIntervalMinutes) { [int]$UpdateSettings.VMRebootIntervalMinutes } else { 30 }
-            Request-RebootTask -Servername $Servername -RebootTime $vmRebootStartTime -DelayMinutes ($script:VMRebootIndex * $interval) -AuthInfo $svcCredential
+            Request-RebootTask -Servername $Servername -RebootTime $vmRebootStartTime -LatestRebootTime $vmRebootWindowEndTime -DelayMinutes ($script:VMRebootIndex * $interval) -AuthInfo $svcCredential
             $script:VMRebootIndex++
           } elseif (-not $isVirtual -and -not [string]::IsNullOrWhiteSpace($physicalRebootTime)) {
-            Request-RebootTask -Servername $Servername -RebootTime $physicalRebootTime -AuthInfo $svcCredential
+            Request-RebootTask -Servername $Servername -RebootTime $physicalRebootTime -LatestRebootTime $physicalRebootWindowEndTime -AuthInfo $svcCredential
           }
         } else {
           Write-ScriptLog "Kein automatischer Neustart für $($Servername): Get-WURebootStatus meldet keinen ausstehenden Neustart."
@@ -1229,6 +1296,7 @@ if ($ServerADList -ne $null) {
             Write-ScriptLog "Zurückgestellte Updates auf $Servername verfügbar: $(@($deferredCheck.Updates).Count)."
             $isVirtualForDeferred = Test-ServerIsVirtual -Servername $Servername -AuthInfo $svcCredential
             $deferredMaintenanceTime = if ($isVirtualForDeferred) { $vmRebootStartTime } else { $physicalRebootTime }
+            $deferredMaintenanceEndTime = if ($isVirtualForDeferred) { [string]$UpdateSettings.VMRebootWindowEndTime } else { [string]$UpdateSettings.PhysicalRebootWindowEndTime }
             $deferredScheduledAt = if (-not [string]::IsNullOrWhiteSpace($deferredMaintenanceTime)) { Get-NextScheduledTime $deferredMaintenanceTime } else { [datetime]::MinValue }
             if ($deferredScheduledAt -gt [datetime]::MinValue) {
               Write-ScriptLog "Nachinstallation auf $Servername für das Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) geplant ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' })))."
@@ -1242,7 +1310,8 @@ if ($ServerADList -ne $null) {
               -DelayMinutes        $deferredDelayMinutes `
               -SucheOnline         $SucheOnline `
               -AuthInfo            $svcCredential `
-              -ScheduledAt         $deferredScheduledAt
+              -ScheduledAt         $deferredScheduledAt `
+              -MaintenanceEndTime  $deferredMaintenanceEndTime
           }
           elseif ($deferredCheck.Success) {
             Remove-DeferredUpdateTask -Servername $Servername -AuthInfo $svcCredential

@@ -17,7 +17,9 @@
 		"DeferredUpdateKBs": [],
 		"InstallDeferredUpdates": false,
 		"PhysicalRebootTime": "03:00",
+		"PhysicalRebootWindowEndTime": "",
 		"VMRebootStartTime": "19:00",
+		"VMRebootWindowEndTime": "",
 		"VMRebootImmediately": false,
 		"VMRebootIntervalMinutes": 30,
 		"DeferredUpdateDelayMinutes": 1440

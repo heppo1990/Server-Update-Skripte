@@ -55,8 +55,10 @@ Wichtige Werte in `UpdateSettings`:
 | `DeferredUpdateKBs`           | Einzelne KBs, die zunächst ausgelassen werden sollen, z. B. `KB5122871`.                                                                                                                                 |
 | `InstallDeferredUpdates`      | `true`: zurückgestellte Updates werden nur dann nach dem nächsten Neustart nachinstalliert, wenn die Auswahl auf dem jeweiligen Ziel tatsächlich noch Updates enthält. `false`: sie bleiben ausgelassen. |
 | `DeferredUpdateDelayMinutes`  | Wartezeit ab dem tatsächlichen Neustart bis zur Nachinstallation. `1440` entspricht 24 Stunden.                                                                                                          |
-| `PhysicalRebootTime`          | Uhrzeit für physische Rechner, z. B. `03:00`. Leer bedeutet: kein automatischer Neustart.                                                                                                                |
-| `VMRebootStartTime`           | Uhrzeit für die erste VM, z. B. `19:00`. Leer bedeutet: kein zeitgesteuerter VM-Neustart.                                                                                                                |
+| `PhysicalRebootTime`          | Startzeit des Wartungsfensters für physische Rechner, z. B. `03:00`. Leer bedeutet: kein automatischer Neustart.                                                                                        |
+| `PhysicalRebootWindowEndTime` | Spätester Beginn eines physischen Neustarts und Ende des Wartungsfensters, z. B. `05:00`. Leer lässt das Fensterende unbeschränkt.                                                                      |
+| `VMRebootStartTime`           | Startzeit des VM-Wartungsfensters und Uhrzeit für die erste VM, z. B. `19:00`. Leer bedeutet: kein zeitgesteuerter VM-Neustart.                                                                         |
+| `VMRebootWindowEndTime`       | Spätester Beginn eines VM-Neustarts und Ende des VM-Wartungsfensters. Leer lässt das Fensterende unbeschränkt.                                                                                           |
 | `VMRebootIntervalMinutes`     | Zeitversatz jeder weiteren VM, normalerweise `30`.                                                                                                                                                       |
 | `VMRebootImmediately`         | `true` startet VMs nach einer erfolgreichen, neustartpflichtigen Installation zeitnah neu. Dieser Wert hat Vorrang vor `VMRebootStartTime`.                                                              |
 
@@ -71,7 +73,9 @@ Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 "InstallDeferredUpdates": true,
 "DeferredUpdateDelayMinutes": 1440,
 "PhysicalRebootTime": "03:00",
+"PhysicalRebootWindowEndTime": "05:00",
 "VMRebootStartTime": "19:00",
+"VMRebootWindowEndTime": "23:00",
 "VMRebootImmediately": false,
 "VMRebootIntervalMinutes": 30
 ```
