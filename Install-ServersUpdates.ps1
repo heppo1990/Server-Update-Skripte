@@ -503,8 +503,13 @@ function Register-StartupRemoteTask {
   $sb = {
     param($Name, $Encoded, $RunAt)
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
-    $triggers = @((New-ScheduledTaskTrigger -AtStartup))
-    if ($RunAt -gt [datetime]::MinValue) { $triggers += New-ScheduledTaskTrigger -Once -At $RunAt }
+    # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit geprüft.
+    # So kann ein noch laufender Mindestabstand bis zum nächsten Fenster warten.
+    $triggers = if ($RunAt -gt [datetime]::MinValue) {
+      @((New-ScheduledTaskTrigger -Daily -At $RunAt))
+    } else {
+      @((New-ScheduledTaskTrigger -AtStartup))
+    }
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
   }
@@ -613,25 +618,27 @@ try {
   Write-DeferredLog 'Nachinstallationsaufgabe gestartet.'
   `$registeredAt = [DateTime]::FromFileTimeUtc($registeredAt)
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
-  `$rebootDueAt = [DateTime]::MinValue
-  if (`$lastBoot -gt `$registeredAt) { `$rebootDueAt = `$lastBoot.AddMinutes($DelayMinutes) }
-  if ((`$scheduledAt -gt [DateTime]::MinValue -and [DateTime]::UtcNow -ge `$scheduledAt) -or
-      (`$rebootDueAt -gt [DateTime]::MinValue -and [DateTime]::UtcNow -ge `$rebootDueAt)) {
-    Write-DeferredLog "Geplanter Wartungszeitpunkt erreicht. Nachinstallation wird jetzt ausgeführt."
-  } elseif (`$lastBoot -le `$registeredAt) {
-    # Schutz gegen einen manuell gestarteten Task ohne vorherigen Neustart.
-    `$waitForReboot = `$true
-    Write-DeferredLog 'Kein Neustart nach der Hauptinstallation erkannt. Aufgabe wartet auf Neustart oder das konfigurierte Wartungsfenster.'
-  } else {
-    if (`$rebootDueAt -gt [DateTime]::UtcNow) {
-      # Behalte Systemstart und Wartungsfenster bei und ergänze den Ablauf
-      # nach der konfigurierten Wartezeit ab dem tatsächlichen Neustart.
-      `$triggers = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -Once -At `$rebootDueAt.ToLocalTime()))
-      if (`$scheduledAt -gt [DateTime]::UtcNow) { `$triggers += New-ScheduledTaskTrigger -Once -At `$scheduledAt.ToLocalTime() }
-      Set-ScheduledTask -TaskName `$taskName -Trigger `$triggers -ErrorAction Stop | Out-Null
+  `$rebootDetected = `$lastBoot -gt `$registeredAt
+  `$rebootDueAt = if (`$rebootDetected) { `$lastBoot.AddMinutes($DelayMinutes) } else { [DateTime]::MinValue }
+  if (`$scheduledAt -gt [DateTime]::MinValue) {
+    # Die Aufgabe wird täglich im Wartungsfenster gestartet. Nach einem
+    # Neustart darf dessen Wartezeit das Fenster nicht unterschreiten.
+    if (`$rebootDetected -and [DateTime]::UtcNow -lt `$rebootDueAt) {
       `$waitForReboot = `$true
-      Write-DeferredLog "Neustart erkannt. Nachinstallation spätestens für `$(`$rebootDueAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')) geplant; das Wartungsfenster bleibt zusätzlich aktiv."
+      Write-DeferredLog "Mindestwartezeit nach Neustart läuft noch bis `$(`$rebootDueAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')); die Aufgabe wartet auf das nächste Wartungsfenster danach."
+    } else {
+      Write-DeferredLog 'Wartungsfenster erreicht und Mindestwartezeit erfüllt (oder seit Aufgabenanlage kein Neustart erfolgt). Nachinstallation wird jetzt ausgeführt.'
     }
+  } elseif (-not `$rebootDetected) {
+    # Ohne Wartungszeit bleibt die Aufgabe bis zum Neustart aktiv.
+    Set-ScheduledTask -TaskName `$taskName -Trigger (New-ScheduledTaskTrigger -AtStartup) -ErrorAction Stop | Out-Null
+    `$waitForReboot = `$true
+    Write-DeferredLog 'Kein Wartungsfenster konfiguriert und noch kein Neustart erkannt. Aufgabe wartet auf Systemstart.'
+  } elseif ([DateTime]::UtcNow -lt `$rebootDueAt) {
+    # Ohne Wartungszeit wird genau zum Ende des Mindestabstands gestartet.
+    Set-ScheduledTask -TaskName `$taskName -Trigger (New-ScheduledTaskTrigger -Once -At `$rebootDueAt.ToLocalTime()) -ErrorAction Stop | Out-Null
+    `$waitForReboot = `$true
+    Write-DeferredLog "Mindestwartezeit nach Neustart läuft noch bis `$(`$rebootDueAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss'))."
   }
   if (-not `$waitForReboot) {
     Import-Module PSWindowsUpdate -ErrorAction Stop
