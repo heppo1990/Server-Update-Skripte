@@ -169,13 +169,17 @@ function Update-ServerUpdateSettingsDefaults {
             $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $defaults
             if ($addedCount -eq 0) { continue }
 
-            $backupPath = '{0}.bak.{1}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff')
-            Copy-Item -LiteralPath $settingsPath -Destination $backupPath -ErrorAction Stop
+            # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
+            $backupPath = '{0}.bak.{1}_{2}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $temporaryPath = '{0}.{1}.tmp' -f $settingsPath, [guid]::NewGuid().ToString('N')
             $updatedJson = ConvertTo-Json -InputObject $settings -Depth 100
             [System.IO.File]::WriteAllText($temporaryPath, $updatedJson, ([System.Text.UTF8Encoding]::new($false)))
-            [System.IO.File]::Replace($temporaryPath, $settingsPath, $null)
+            # Replace erstellt die Sicherung als Teil des atomaren Dateiaustauschs.
+            [System.IO.File]::Replace($temporaryPath, $settingsPath, $backupPath)
             $temporaryPath = $null
+            if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+                throw 'Einstellungsdatei oder Sicherung fehlt nach dem atomaren Austausch.'
+            }
             Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt; Sicherung: {1}" -f $addedCount, $backupPath) -ForegroundColor Cyan
         }
         catch {
@@ -191,7 +195,7 @@ function Update-ServerUpdateSettingsDefaults {
     # Es bleiben höchstens drei automatisch erzeugte Sicherungen im Skriptordner liegen.
     try {
         $backupFiles = @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.json.bak.*' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^(?:settings|.+\.settings)\.json\.bak\.\d{8}_\d{6}_\d{3}$' } |
+            Where-Object { $_.Name -match '^(?:settings|.+\.settings)\.json\.bak\.\d{8}_\d{6}_\d{3}(?:_[a-f0-9]{8})?$' } |
             Sort-Object -Property LastWriteTimeUtc, Name -Descending)
         foreach ($oldBackup in @($backupFiles | Select-Object -Skip 3)) {
             Remove-Item -LiteralPath $oldBackup.FullName -Force -ErrorAction Stop
