@@ -91,12 +91,102 @@ function Get-ServerUpdateRequiredFiles {
         $isHomeAssistantFile = $leafName -match '^(Install-HomeAssistant|HomeAssistant[._-]|HA[._-])' -or $relativePath -match '(^|/)(HomeAssistant|HA)/'
         if ($isLinuxFile -and -not $linuxRequired) { continue }
         if ($isHomeAssistantFile -and -not $homeAssistantRequired) { continue }
-        if ($leafName -ieq 'default_settings.json' -and (Test-Path -LiteralPath (Join-Path $ScriptRoot $relativePath) -PathType Leaf)) { continue }
-
         $requiredFiles.Add([PSCustomObject]@{ Path = [string]$relativePath; Sha = [string]$RepositoryBlobs[$relativePath] })
     }
 
     return @($requiredFiles | Sort-Object Path -Unique)
+}
+
+# Ergänzt beim Skriptupdate nur fehlende Standardwerte; vorhandene Kundenwerte bleiben erhalten.
+function Copy-ServerUpdateJsonValue {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $copy = [PSCustomObject]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $propertyCopy = Copy-ServerUpdateJsonValue -Value $property.Value
+            Add-Member -InputObject $copy -NotePropertyName $property.Name -NotePropertyValue $propertyCopy
+        }
+        return $copy
+    }
+    if ($Value -is [array]) {
+        $copy = @(
+            foreach ($item in $Value) { Copy-ServerUpdateJsonValue -Value $item }
+        )
+        return ,$copy
+    }
+    return $Value
+}
+
+function Add-ServerUpdateMissingJsonProperties {
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.PSCustomObject]$Destination,
+        [Parameter(Mandatory)][System.Management.Automation.PSCustomObject]$Defaults
+    )
+    $added = 0
+    foreach ($defaultProperty in $Defaults.PSObject.Properties) {
+        $destinationProperty = $Destination.PSObject.Properties[$defaultProperty.Name]
+        if ($null -eq $destinationProperty) {
+            $defaultValue = Copy-ServerUpdateJsonValue -Value $defaultProperty.Value
+            Add-Member -InputObject $Destination -NotePropertyName $defaultProperty.Name -NotePropertyValue $defaultValue
+            $added++
+        }
+        elseif ($destinationProperty.Value -is [System.Management.Automation.PSCustomObject] -and
+                $defaultProperty.Value -is [System.Management.Automation.PSCustomObject]) {
+            $added += Add-ServerUpdateMissingJsonProperties -Destination $destinationProperty.Value -Defaults $defaultProperty.Value
+        }
+    }
+    return $added
+}
+
+function Update-ServerUpdateSettingsDefaults {
+    param([Parameter(Mandatory)][string]$ScriptRoot)
+
+    $defaultsPath = Join-Path $ScriptRoot 'default_settings.json'
+    if (-not (Test-Path -LiteralPath $defaultsPath -PathType Leaf)) { return }
+    try {
+        $defaults = Get-Content -LiteralPath $defaultsPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Standard-Einstellungen konnten nicht eingelesen werden; Kundeneinstellungen bleiben unverändert. Ursache: $($_.Exception.Message)"
+        return
+    }
+
+    $generalSettingsPath = Join-Path $ScriptRoot 'settings.json'
+    $settingsPaths = if (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) {
+        @($generalSettingsPath)
+    } else {
+        @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.settings.json' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    }
+
+    foreach ($settingsPath in $settingsPaths) {
+        $temporaryPath = $null
+        try {
+            $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            if ($settings -isnot [System.Management.Automation.PSCustomObject] -or
+                $defaults -isnot [System.Management.Automation.PSCustomObject]) { continue }
+
+            $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $defaults
+            if ($addedCount -eq 0) { continue }
+
+            $backupPath = '{0}.bak.{1}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff')
+            Copy-Item -LiteralPath $settingsPath -Destination $backupPath -ErrorAction Stop
+            $temporaryPath = '{0}.{1}.tmp' -f $settingsPath, [guid]::NewGuid().ToString('N')
+            $updatedJson = ConvertTo-Json -InputObject $settings -Depth 100
+            [System.IO.File]::WriteAllText($temporaryPath, $updatedJson, ([System.Text.UTF8Encoding]::new($false)))
+            [System.IO.File]::Replace($temporaryPath, $settingsPath, $null)
+            $temporaryPath = $null
+            Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt; Sicherung: {1}" -f $addedCount, $backupPath) -ForegroundColor Cyan
+        }
+        catch {
+            Write-Warning "Standardwerte konnten in '$([IO.Path]::GetFileName($settingsPath))' nicht ergänzt werden. Vorhandene Einstellungen bleiben erhalten. Ursache: $($_.Exception.Message)"
+        }
+        finally {
+            if ($temporaryPath -and (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 function Invoke-ServerUpdateScripts {
@@ -162,6 +252,7 @@ function Invoke-ServerUpdateScripts {
             (Get-ServerUpdateGitBlobSha1 -Path $localPath) -ne $_.Sha
         })
         if ($filesToFetch.Count -eq 0) {
+            Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot
             try {
                 New-Item -Path $cacheDirectory -ItemType Directory -Force | Out-Null
                 [PSCustomObject]@{ ManifestCommit = $manifestCommit; RepositoryBlobs = $repositoryBlobs } |
@@ -223,6 +314,7 @@ function Invoke-ServerUpdateScripts {
                     }
                     Copy-Item -LiteralPath (Join-Path $stageDirectory $relativePath) -Destination $localPath -Force -ErrorAction Stop
                 }
+                Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot
             }
             catch {
                 foreach ($relativePath in $changedFiles) {
