@@ -571,6 +571,8 @@ function Register-StartupRemoteTask {
     [datetime]$At = [datetime]::MinValue,
     [AllowEmptyString()][string]$MailPassword = ''
   )
+  # Der Worker wird von powershell.exe (Windows PowerShell 5.1) ausgeführt;
+  # seine Syntax muss daher auch mit dem Windows-PowerShell-Parser gültig sein.
   # Der vollständige Worker ist für -EncodedCommand zu groß (Windows begrenzt
   # die Prozessbefehlszeile). Er wird geschützt als temporäre Datei abgelegt;
   # der Task-Aufruf selbst enthält nur noch den kurzen -File-Pfad.
@@ -810,7 +812,7 @@ try {
         }
       } else {
         `$waitForReboot = `$true
-        Write-DeferredLog "Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss)) und passt nicht mehr in das offene Wartungsfenster. Nachinstallation wartet auf das nächste Fenster."
+        Write-DeferredLog "Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss')) und passt nicht mehr in das offene Wartungsfenster. Nachinstallation wartet auf das nächste Fenster."
       }
     } else {
       Write-DeferredLog 'Wartungsfenster erreicht und Mindestwartezeit erfüllt (oder seit Aufgabenanlage kein Neustart erfolgt). Nachinstallation wird jetzt ausgeführt.'
