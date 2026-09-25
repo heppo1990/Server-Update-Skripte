@@ -855,10 +855,10 @@ try {
         Write-DeferredLog "Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss')) und passt nicht mehr in das offene Wartungsfenster. Nachinstallation wartet auf das nächste Fenster."
       }
     } elseif (-not `$rebootDetected) {
-      # Ein täglicher Wartungsfenster-Trigger darf ohne erkannten Neustart
-      # keine zurückgestellten Updates installieren.
-      `$waitForReboot = `$true
-      Write-DeferredLog 'Wartungsfenster ist offen, aber seit Aufgabenanlage wurde kein Neustart erkannt. Aufgabe wartet auf Systemstart.'
+      # Ist das Wartungsfenster offen, dürfen zurückgestellte Updates auch
+      # ohne vorherigen Neustart installiert werden. Die Mindestwartezeit
+      # gilt ausschließlich ab einem tatsächlich erkannten Neustart.
+      Write-DeferredLog 'Wartungsfenster ist offen und seit Aufgabenanlage wurde kein Neustart erkannt. Nachinstallation startet ohne Neustartwartezeit.'
     } else {
       Write-DeferredLog 'Wartungsfenster erreicht und Mindestwartezeit nach Neustart erfüllt. Nachinstallation wird jetzt ausgeführt.'
     }
