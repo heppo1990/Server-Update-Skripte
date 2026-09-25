@@ -1520,7 +1520,10 @@ if ($ServerADList -ne $null) {
                   $updateKB
                 }
               }
-            ) | Sort-Object -Unique
+            )
+            # Sort-Object gibt bei genau einem Treffer einen Skalar zurück;
+            # die erneute Array-Klammerung hält Count auch unter StrictMode verfügbar.
+            $deferredUpdateDescriptions = @($deferredUpdateDescriptions | Sort-Object -Unique)
             $deferredUpdatesHtml = if ($deferredUpdateDescriptions.Count -gt 0) {
               '<br><strong>Konkrete Updates:</strong><ul>' + (($deferredUpdateDescriptions | ForEach-Object { '<li>' + [System.Net.WebUtility]::HtmlEncode($_) + '</li>' }) -join '') + '</ul>'
             } else {
