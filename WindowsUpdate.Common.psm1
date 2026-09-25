@@ -316,7 +316,8 @@ function Test-WindowsUpdateJeaSupported {
         $build = [int](Invoke-Command @parameters)
         # 14393 = Server 2016, 17763 = Server 2019.
         if ($build -le 17763) {
-            Write-CommonLog $WriteLog "INFO: '$TargetComputer' ist Windows Server 2016/2019 außerhalb der AD – nutze Zertifikats-Standardremoting plus SYSTEM-Aufgabe statt JEA für Windows Update."
+            # Die aufrufenden Skripte protokollieren bereits die konkrete
+            # SYSTEM-Aufgabe; diese reine Verfahrensinfo würde doppelt erscheinen.
             return $false
         }
     }
@@ -495,7 +496,11 @@ finally {
     $params = New-WindowsUpdateInvokeCommandParams -ComputerName $TargetComputer -AuthInfo $AuthInfo -OperationTimeoutSeconds $TimeoutSeconds
     $params.ScriptBlock = $register
     $params.ArgumentList = @($taskName, $workerPath, $resultPath, $worker)
-    Write-CommonLog $WriteLog "Windows Update auf $TargetComputer läuft als temporäre SYSTEM-Aufgabe ($Mode)."
+    # Check, Download und Installation werden vom jeweiligen Einstiegsskript
+    # angekündigt. Die generische Meldung wäre dort eine redundante Dopplung.
+    if ($Mode -notin @('Check', 'Download', 'Install')) {
+        Write-CommonLog $WriteLog "Windows Update auf $TargetComputer läuft als temporäre SYSTEM-Aufgabe ($Mode)."
+    }
     Invoke-WindowsUpdateWithRetry -OperationName "SYSTEM-Update-Aufgabe auf $TargetComputer" -WriteLog $WriteLog -ScriptBlock { Invoke-Command @params | Out-Null }
 
     $reader = { param($Path) if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw -Encoding UTF8 } }
