@@ -613,10 +613,31 @@ if ($ServerADList -ne $null) {
             }
             $hasUpdateData
           }).Count -gt 0
-          if ($systemTaskRows.Count -gt 0 -and -not $systemTaskHasUpdateData) {
-            Write-ScriptLog "WARNUNG: Leeres Ergebnis von $Servername erhalten; wiederhole die Windows-Update-Suche einmal nach 20 Sekunden."
+          # Bei älteren Nicht-AD-Servern kann die erste SYSTEM-Suche leer
+          # zurückkommen, obwohl Download und Installation Updates finden.
+          # Auch eine vollständig leere Ergebnisliste wird deshalb einmal
+          # mit einer frischen SYSTEM-Aufgabe erneut geprüft.
+          if (-not $systemTaskHasUpdateData) {
+            $emptyResultReason = if ($systemTaskRows.Count -eq 0) { 'keine Ergebniszeilen' } else { 'nur leere Ergebniszeilen' }
+            Write-ScriptLog "WARNUNG: SYSTEM-Update-Suche auf $Servername lieferte $emptyResultReason; wiederhole die Suche einmal nach 20 Sekunden."
             Start-Sleep -Seconds 20
             $UpdResult = Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $svcCredential -Mode Check -SearchOnline $SucheOnline -WriteLog { param($message) Write-ScriptLog $message }
+            $retryRows = @($UpdResult | Where-Object { $null -ne $_ })
+            $retryHasUpdateData = @($retryRows | Where-Object {
+              $row = $_
+              $hasRowData = $false
+              foreach ($fieldName in @('Status', 'KB', 'Title')) {
+                $property = $row.PSObject.Properties[$fieldName]
+                if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                  $hasRowData = $true
+                  break
+                }
+              }
+              $hasRowData
+            }).Count -gt 0
+            if (-not $retryHasUpdateData) {
+              Write-ScriptLog "WARNUNG: Auch die wiederholte SYSTEM-Update-Suche auf $Servername lieferte keine auswertbaren Update-Daten."
+            }
           }
         } else {
           Write-ScriptLog "Remote Update-Check via Standard-Remoting auf $Servername..."
