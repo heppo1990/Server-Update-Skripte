@@ -385,7 +385,13 @@ function Get-WorkerUpdateField {
 }
 function ConvertTo-WorkerUpdateRows {
     param([object[]]$Items)
-    foreach ($item in $Items) {
+    $pendingItems = [System.Collections.Generic.Queue[object]]::new()
+    foreach ($inputItem in $Items) {
+        if ($null -ne $inputItem) { $pendingItems.Enqueue($inputItem) }
+    }
+
+    while ($pendingItems.Count -gt 0) {
+        $item = $pendingItems.Dequeue()
         if ($null -eq $item) { continue }
         $computerName = Get-WorkerUpdateField -Update $item -Names @('ComputerName', 'PSComputerName')
         $status = Get-WorkerUpdateField -Update $item -Names @('Status', 'Result', 'UpdateStatus')
@@ -395,7 +401,17 @@ function ConvertTo-WorkerUpdateRows {
         if ([string]::IsNullOrWhiteSpace([string]$status) -and
             [string]::IsNullOrWhiteSpace([string]$kb) -and
             [string]::IsNullOrWhiteSpace([string]$size) -and
-            [string]::IsNullOrWhiteSpace([string]$title)) { continue }
+            [string]::IsNullOrWhiteSpace([string]$title)) {
+            # PSWindowsUpdate kann unter SYSTEM mehrere Updates als ein
+            # verschachteltes Collection-Objekt zurückgeben. Dessen einzelne
+            # Einträge müssen vor der Zeilenumwandlung aufgefächert werden.
+            if ($item -is [System.Collections.IEnumerable] -and $item -isnot [string]) {
+                foreach ($nestedItem in $item) {
+                    if ($null -ne $nestedItem) { $pendingItems.Enqueue($nestedItem) }
+                }
+            }
+            continue
+        }
         if (-not [string]::IsNullOrWhiteSpace([string]$kb)) {
             $kb = (@(([string]$kb -split ',\s*') | ForEach-Object { if ($_ -match '^KB') { $_ } else { "KB$_" } }) -join ', ')
         }
