@@ -9,6 +9,100 @@ function Write-CommonLog {
     if ($WriteLog) { & $WriteLog $Message }
 }
 
+function Initialize-WindowsUpdateDpapi {
+    if ('System.Security.Cryptography.ProtectedData' -as [type]) { return }
+    try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
+    catch { Add-Type -AssemblyName System.Security -ErrorAction Stop }
+}
+
+function Protect-WindowsUpdateMailPassword {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Password)
+    Initialize-WindowsUpdateDpapi
+    $plainBytes = [Text.Encoding]::UTF8.GetBytes($Password)
+    try {
+        $protectedBytes = [Security.Cryptography.ProtectedData]::Protect(
+            $plainBytes, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return 'DPAPI:' + [Convert]::ToBase64String($protectedBytes)
+    }
+    finally { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
+}
+
+function Unprotect-WindowsUpdateMailPassword {
+    param([Parameter(Mandatory)][string]$ProtectedPassword)
+    if (-not $ProtectedPassword.StartsWith('DPAPI:', [StringComparison]::Ordinal)) {
+        throw 'Das Mailpasswort liegt noch unverschlüsselt vor und konnte nicht migriert werden.'
+    }
+    Initialize-WindowsUpdateDpapi
+    $cipherBytes = [Convert]::FromBase64String($ProtectedPassword.Substring(6))
+    $plainBytes = [Security.Cryptography.ProtectedData]::Unprotect(
+        $cipherBytes, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+    try { return [Text.Encoding]::UTF8.GetString($plainBytes) }
+    finally { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
+}
+
+function Write-WindowsUpdateJsonAtomically {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Value)
+    $temporaryPath = '{0}.{1}.tmp' -f $Path, [guid]::NewGuid().ToString('N')
+    try {
+        $json = ConvertTo-Json -InputObject $Value -Depth 100
+        [IO.File]::WriteAllText($temporaryPath, $json, [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $Path -PathType Leaf) { [IO.File]::Replace($temporaryPath, $Path, $null) }
+        else { [IO.File]::Move($temporaryPath, $Path) }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Protect-WindowsUpdateSettingsFilePassword {
+    param([Parameter(Mandatory)][string]$Path, [scriptblock]$WriteLog)
+    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    $document = $raw | ConvertFrom-Json -ErrorAction Stop
+    $mailProperty = $document.PSObject.Properties['MailSettings']
+    $passwordProperty = if ($mailProperty -and $mailProperty.Value) { $mailProperty.Value.PSObject.Properties['AuthPass'] } else { $null }
+    if ($passwordProperty -and -not [string]::IsNullOrEmpty([string]$passwordProperty.Value) -and
+        -not ([string]$passwordProperty.Value).StartsWith('DPAPI:', [StringComparison]::Ordinal)) {
+        $protectedPassword = Protect-WindowsUpdateMailPassword -Password ([string]$passwordProperty.Value)
+        Add-Member -InputObject $mailProperty.Value -NotePropertyName AuthPass -NotePropertyValue $protectedPassword -Force
+
+        # Sicherungen bleiben gültige JSON-Dateien, enthalten aber ebenfalls nur
+        # das maschinengebundene DPAPI-Geheimnis und keinen Klartext des Passworts.
+        $backupPath = '{0}.bak.{1}_{2}' -f $Path, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        Write-WindowsUpdateJsonAtomically -Path $backupPath -Value $document
+        Write-WindowsUpdateJsonAtomically -Path $Path -Value $document
+        Write-CommonLog $WriteLog "Mailpasswort in '$([IO.Path]::GetFileName($Path))' automatisch mit DPAPI geschützt."
+    }
+
+    # Ältere automatisch erzeugte Sicherungen derselben Datei ebenfalls
+    # schützen, damit nach der Migration keine Klartextkopie liegen bleibt.
+    $directory = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    foreach ($oldBackup in @(Get-ChildItem -LiteralPath $directory -Filter ($leaf + '.bak.*') -File -ErrorAction SilentlyContinue)) {
+        try {
+            $oldDocument = Get-Content -LiteralPath $oldBackup.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            $oldMail = $oldDocument.PSObject.Properties['MailSettings']
+            $oldPassword = if ($oldMail -and $oldMail.Value) { $oldMail.Value.PSObject.Properties['AuthPass'] } else { $null }
+            if ($oldPassword -and -not [string]::IsNullOrEmpty([string]$oldPassword.Value) -and
+                -not ([string]$oldPassword.Value).StartsWith('DPAPI:', [StringComparison]::Ordinal)) {
+                $oldCipher = Protect-WindowsUpdateMailPassword -Password ([string]$oldPassword.Value)
+                Add-Member -InputObject $oldMail.Value -NotePropertyName AuthPass -NotePropertyValue $oldCipher -Force
+                Write-WindowsUpdateJsonAtomically -Path $oldBackup.FullName -Value $oldDocument
+            }
+        }
+        catch { throw "Eine ältere Settings-Sicherung konnte nicht geschützt werden ('$($oldBackup.Name)'). Der Lauf wird abgebrochen, damit kein Klartextpasswort zurückbleibt." }
+    }
+
+    # Die bestehende Aufbewahrungsregel gilt auch für die Migrationssicherung.
+    $allBackups = @(Get-ChildItem -LiteralPath $directory -Filter '*.json.bak.*' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^(?:settings|.+\.settings)\.json\.bak\.\d{8}_\d{6}_\d{3}(?:_[a-f0-9]{8})?$' } |
+        Sort-Object -Property LastWriteTimeUtc, Name -Descending)
+    foreach ($oldBackup in @($allBackups | Select-Object -Skip 3)) {
+        Remove-Item -LiteralPath $oldBackup.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-WindowsUpdateSettings {
     param(
         [Parameter(Mandatory)][string]$ScriptRoot,
@@ -35,6 +129,19 @@ function Get-WindowsUpdateSettings {
     $scriptSettingsPath = Join-Path $ScriptRoot "$ScriptName.settings.json"
     $generalSettingsPath = Join-Path $ScriptRoot 'settings.json'
     $settingsFromFiles = @()
+
+    # Alle allgemeinen und skriptspezifischen Kundendateien migrieren, nicht nur
+    # die gerade verwendete Datei. Versionierte Standarddateien bleiben unberührt.
+    $localSettingsPaths = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) { $localSettingsPaths.Add($generalSettingsPath) }
+    foreach ($settingsFile in @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.settings.json' -File -ErrorAction SilentlyContinue)) {
+        if (-not $localSettingsPaths.Contains($settingsFile.FullName)) { $localSettingsPaths.Add($settingsFile.FullName) }
+    }
+    foreach ($localSettingsPath in $localSettingsPaths) {
+        if (Test-Path -LiteralPath $localSettingsPath -PathType Leaf) {
+            Protect-WindowsUpdateSettingsFilePassword -Path $localSettingsPath -WriteLog $WriteLog
+        }
+    }
 
     # Allgemeine Einstellungen bilden die Basis; eine gleichnamige Skript-JSON
     # überschreibt anschließend nur ihre angegebenen Werte.
@@ -76,6 +183,14 @@ function Get-WindowsUpdateSettings {
         elseif ([string]::IsNullOrEmpty($settings.MailSettings.MailCC)) { $settings.MailSettings.MailCC = $settings.MailSettings.MailTo }
         if ($mailSettingNames -notcontains 'MailBCC') { Add-Member -InputObject $settings.MailSettings -NotePropertyName MailBCC -NotePropertyValue $settings.MailSettings.MailTo }
         elseif ([string]::IsNullOrEmpty($settings.MailSettings.MailBCC)) { $settings.MailSettings.MailBCC = $settings.MailSettings.MailTo }
+        $mailPasswordProperty = $settings.MailSettings.PSObject.Properties['AuthPass']
+        $mailPassword = if ($mailPasswordProperty) { [string]$mailPasswordProperty.Value } else { '' }
+        if (-not [string]::IsNullOrEmpty($mailPassword)) {
+            if (-not $mailPassword.StartsWith('DPAPI:', [StringComparison]::Ordinal)) {
+                throw 'MailSettings.AuthPass ist unverschlüsselt in den Standard-Einstellungen hinterlegt. Lege das Passwort in settings.json ab.'
+            }
+            $settings.MailSettings.AuthPass = Unprotect-WindowsUpdateMailPassword -ProtectedPassword $mailPassword
+        }
     }
     return $settings
 }

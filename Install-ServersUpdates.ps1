@@ -529,21 +529,36 @@ function Register-OneTimeRemoteTask {
     [Parameter(Mandatory)][string]$TaskName,
     [Parameter(Mandatory)][datetime]$At,
     [Parameter(Mandatory)][string]$Script,
-    $AuthInfo = $null
+    $AuthInfo = $null,
+    [AllowEmptyString()][string]$MailPassword = ''
   )
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
   $sb = {
-    param($Name, $RunAt, $Encoded)
+    param($Name, $RunAt, $Encoded, $Password)
+    if (-not [string]::IsNullOrEmpty($Password)) {
+      if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
+        try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
+        catch { Add-Type -AssemblyName System.Security -ErrorAction Stop }
+      }
+      $passwordBytes = [Text.Encoding]::UTF8.GetBytes($Password)
+      try {
+        $protectedBytes = [Security.Cryptography.ProtectedData]::Protect($passwordBytes, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+        $protectedPassword = [Convert]::ToBase64String($protectedBytes)
+      }
+      finally { [Array]::Clear($passwordBytes, 0, $passwordBytes.Length) }
+    } else { $protectedPassword = '' }
+    $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(
+      [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Encoded)).Replace('__WINDOWSUPDATEADM_DPAPI_MAILPASS__', $protectedPassword)))
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
     $trigger = New-ScheduledTaskTrigger -Once -At $RunAt
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $At $encoded; return }
+  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $At $encoded $MailPassword; return }
   # Keine Erweiterung der JEA-Rechte: Aufgaben werden über die normale WinRM-Verbindung
   # des ohnehin administrativen Aufrufers angelegt.
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $At, $encoded)
+  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $At, $encoded, $MailPassword)
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Aufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
@@ -553,13 +568,27 @@ function Register-StartupRemoteTask {
     [Parameter(Mandatory)][string]$TaskName,
     [Parameter(Mandatory)][string]$Script,
     $AuthInfo = $null,
-    [datetime]$At = [datetime]::MinValue
+    [datetime]$At = [datetime]::MinValue,
+    [AllowEmptyString()][string]$MailPassword = ''
   )
   # Der vollständige Worker ist für -EncodedCommand zu groß (Windows begrenzt
   # die Prozessbefehlszeile). Er wird geschützt als temporäre Datei abgelegt;
   # der Task-Aufruf selbst enthält nur noch den kurzen -File-Pfad.
   $sb = {
-    param($Name, $WorkerScript, $RunAt)
+    param($Name, $WorkerScript, $Password, $RunAt)
+    if (-not [string]::IsNullOrEmpty($Password)) {
+      if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
+        try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
+        catch { Add-Type -AssemblyName System.Security -ErrorAction Stop }
+      }
+      $passwordBytes = [Text.Encoding]::UTF8.GetBytes($Password)
+      try {
+        $protectedBytes = [Security.Cryptography.ProtectedData]::Protect($passwordBytes, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+        $protectedPassword = [Convert]::ToBase64String($protectedBytes)
+      }
+      finally { [Array]::Clear($passwordBytes, 0, $passwordBytes.Length) }
+    } else { $protectedPassword = '' }
+    $WorkerScript = $WorkerScript.Replace('__WINDOWSUPDATEADM_DPAPI_MAILPASS__', $protectedPassword)
     $WorkerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
     New-Item -ItemType Directory -Path (Split-Path -Parent $WorkerPath) -Force | Out-Null
     New-Item -ItemType File -Path $WorkerPath -Force | Out-Null
@@ -607,9 +636,9 @@ try {
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $At; return }
+  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $MailPassword $At; return }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $At)
+  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At)
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
@@ -698,6 +727,10 @@ function Register-DeferredUpdateTask {
     Add-Member -InputObject $deferredMailSettings -NotePropertyName 'Install' -NotePropertyValue ([PSCustomObject]@{}) -Force
   }
   $deferredCompanyName = [string]$deferredMailSettings.CompanyName
+  $deferredMailPassword = [string]$deferredMailSettings.AuthPass
+  # Das Passwort wird separat über WinRM übertragen und auf dem Zielrechner
+  # maschinengebunden geschützt. Im Worker-JSON bleibt das Feld leer.
+  Add-Member -InputObject $deferredMailSettings -NotePropertyName AuthPass -NotePropertyValue '' -Force
   if ([string]::IsNullOrWhiteSpace([string]$deferredMailSettings.Sender) -and -not [string]::IsNullOrWhiteSpace($deferredCompanyName)) {
     $deferredMailSafeName = ConvertTo-WindowsUpdateMailSafeString -Text $deferredCompanyName
     Add-Member -InputObject $deferredMailSettings -NotePropertyName 'Sender' -NotePropertyValue "Updates@$deferredMailSafeName.de" -Force
@@ -717,6 +750,21 @@ try {
   New-Item -ItemType Directory -Path `$logDirectory -Force | Out-Null
   function Write-DeferredLog([string]`$Message) {
     "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  `$Message" | Add-Content -LiteralPath `$logFile -Encoding UTF8
+  }
+  function Get-DeferredMailSettings {
+    `$mail = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$mailJson')) | ConvertFrom-Json
+    `$protectedPassword = '__WINDOWSUPDATEADM_DPAPI_MAILPASS__'
+    if (-not [string]::IsNullOrEmpty(`$protectedPassword)) {
+      if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
+        try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
+        catch { Add-Type -AssemblyName System.Security -ErrorAction Stop }
+      }
+      `$cipherBytes = [Convert]::FromBase64String(`$protectedPassword)
+      `$plainBytes = [Security.Cryptography.ProtectedData]::Unprotect(`$cipherBytes, `$null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+      try { `$mail.AuthPass = [Text.Encoding]::UTF8.GetString(`$plainBytes) }
+      finally { [Array]::Clear(`$plainBytes, 0, `$plainBytes.Length) }
+    }
+    return `$mail
   }
   `$waitForReboot = `$false
   `$scheduledAt = if ($scheduledAtFileTime -gt 0) { [DateTime]::FromFileTimeUtc($scheduledAtFileTime) } else { [DateTime]::MinValue }
@@ -827,7 +875,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
 </body></html>
 '@
     `$body = `$body.Replace('{{computer}}', [System.Net.WebUtility]::HtmlEncode(`$env:COMPUTERNAME)).Replace('{{date}}', (Get-Date -Format 'dd.MM.yyyy HH:mm:ss')).Replace('{{selection}}', `$safeSelection).Replace('{{rows}}', (`$rows -join '')).Replace('{{count}}', [string]`$(@(`$results).Count))
-    `$mail = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$mailJson')) | ConvertFrom-Json
+    `$mail = Get-DeferredMailSettings
     if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
       `$mailSent = `$false
       for (`$attempt = 1; `$attempt -le 3 -and -not `$mailSent; `$attempt++) {
@@ -865,7 +913,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
   `$failureMessage = `$_.Exception.Message
   try { Write-DeferredLog "FEHLER: `$failureMessage" } catch { }
   try {
-    `$mail = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$mailJson')) | ConvertFrom-Json
+    `$mail = Get-DeferredMailSettings
     if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
       `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port); `$smtp.EnableSsl = [bool]`$mail.UseSSL
       if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
@@ -886,7 +934,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
 }
 
 "@
-  Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo -At $ScheduledAt
+  Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo -At $ScheduledAt -MailPassword $deferredMailPassword
   $selectionText = @(
     if ($DeferredKBs.Count -gt 0) { "KBs: $($DeferredKBs -join ', ')" }
     if ($DeferredCategories.Count -gt 0) { "Kategorien: $($DeferredCategories -join ', ')" }
@@ -899,7 +947,10 @@ function Register-DeferredMailTestTask {
   param([string]$Servername, $AuthInfo = $null)
 
   $taskName = 'WindowsUpdateAdm-TestDeferredMail'
-  $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($MailSettings | ConvertTo-Json -Depth 5 -Compress)))
+  $testMailPassword = [string]$MailSettings.AuthPass
+  $testMailSettings = $MailSettings | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+  Add-Member -InputObject $testMailSettings -NotePropertyName AuthPass -NotePropertyValue '' -Force
+  $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($testMailSettings | ConvertTo-Json -Depth 5 -Compress)))
   $script = @"
 `$taskName = '$taskName'
 `$logDirectory = Join-Path `$env:ProgramData 'WindowsUpdateAdm'
@@ -908,9 +959,24 @@ New-Item -ItemType Directory -Path `$logDirectory -Force | Out-Null
 function Write-TestMailLog([string]`$Message) {
   "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  TESTMAIL: `$Message" | Add-Content -LiteralPath `$logFile -Encoding UTF8
 }
+function Get-TestMailSettings {
+  `$mail = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$mailJson')) | ConvertFrom-Json
+  `$protectedPassword = '__WINDOWSUPDATEADM_DPAPI_MAILPASS__'
+  if (-not [string]::IsNullOrEmpty(`$protectedPassword)) {
+    if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
+      try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
+      catch { Add-Type -AssemblyName System.Security -ErrorAction Stop }
+    }
+    `$cipherBytes = [Convert]::FromBase64String(`$protectedPassword)
+    `$plainBytes = [Security.Cryptography.ProtectedData]::Unprotect(`$cipherBytes, `$null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+    try { `$mail.AuthPass = [Text.Encoding]::UTF8.GetString(`$plainBytes) }
+    finally { [Array]::Clear(`$plainBytes, 0, `$plainBytes.Length) }
+  }
+  return `$mail
+}
 try {
   Write-TestMailLog 'Testmail-Aufgabe gestartet.'
-  `$mail = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$mailJson')) | ConvertFrom-Json
+  `$mail = Get-TestMailSettings
   if (-not `$mail.Install.SendMail -or -not `$mail.Host -or -not `$mail.MailTo) {
     throw 'Mailversand ist nicht vollständig konfiguriert (SendMail, SMTP-Host oder Empfänger fehlen).'
   }
@@ -958,7 +1024,7 @@ h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
 }
 "@
   # Kurzer Abstand lässt den Aufruf sauber enden und prüft den echten SYSTEM-Kontext.
-  Register-OneTimeRemoteTask -Servername $Servername -TaskName $taskName -At (Get-Date).AddMinutes(1) -Script $script -AuthInfo $AuthInfo
+  Register-OneTimeRemoteTask -Servername $Servername -TaskName $taskName -At (Get-Date).AddMinutes(1) -Script $script -AuthInfo $AuthInfo -MailPassword $testMailPassword
   Write-ScriptLog "Testmail-Aufgabe auf $Servername geplant (Start in etwa einer Minute; selbstlöschend)."
 }
 
