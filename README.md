@@ -94,7 +94,14 @@ Häufige Windows-Update-Klassifizierungen sind:
 - `Updates`
 - `Upgrades`
 
-Daneben können Produktkategorien vorkommen, zum Beispiel `Windows Server 2019`, `SQL Server` oder `Exchange`. Welche Produktnamen tatsächlich greifen, hängt von den Update-Metadaten auf dem Zielsystem ab. Microsoft unterscheidet bei Updates zwischen Produkt und Klassifizierung; die obige Liste der Klassifizierungen ist daher nicht gleichbedeutend mit einer vollständigen Liste aller auswählbaren Kategorien. Siehe [Microsoft: Updates anzeigen und verwalten](https://learn.microsoft.com/en-us/windows-server/administration/windows-server-update-services/manage/viewing-and-managing-updates).
+Zusätzlich gibt es Produktkategorien. Häufige Microsoft-Serverprodukte sind:
+
+- `SQL Server` – passt auf versionsspezifische Produktnamen wie `Microsoft SQL Server 2019`.
+- `Exchange Server` – passt auf Produktnamen wie `Exchange Server Subscription Edition` und Exchange-Server-Versionen.
+- `SharePoint Server` – nur ergänzen, wenn SharePoint-Updates ebenfalls zurückgestellt werden sollen; Farm-Updates müssen separat geplant werden.
+- `Windows Server <Version>` – nur verwenden, wenn Windows-Betriebssystemupdates dieser Version zurückgestellt werden sollen.
+
+`Get-WindowsUpdate -Category` von PSWindowsUpdate sucht nach Kategoriebezeichnungen in den Update-Metadaten. Deshalb sind `SQL Server` und `Exchange Server` passendere und engere Werte als `SQL` oder `Exchange`. Den allgemeinen Wert `Server` vermeiden: Er kann gleichzeitig auf Windows Server, SQL Server und Exchange Server passen. Microsoft unterscheidet bei Updates zwischen Produkt und Klassifizierung; Produktnamen und Klassifizierungen sind also verschiedene Filterwerte. Beispiele aus dem Microsoft Update Catalog: [SQL Server 2019 – Produkt „Microsoft SQL Server 2019“, Klassifizierung „Security Updates“](https://www.catalog.update.microsoft.com/Search.aspx?q=Security+Update+for+SQL+Server+2019+RTM+CU) und [Exchange Server Subscription Edition – Produkt „Exchange Server Subscription Edition“, Klassifizierung „Security Updates“](https://www.catalog.update.microsoft.com/Search.aspx?q=exchange+server+subscription+edition). Grundlegende Erläuterungen zu Produktfamilien und Updatekategorien: [Microsoft: Updates anzeigen und verwalten](https://learn.microsoft.com/en-us/windows-server/administration/windows-server-update-services/manage/viewing-and-managing-updates).
 
 Ein Eintrag wie `Security Updates` stellt alle passenden Sicherheitsupdates zurück, nicht nur kumulative Windows-Updates. Für eine gezielte Auswahl kann stattdessen `DeferredUpdateKBs` verwendet werden. Vor einem breiten Einsatz sollte geprüft werden, welche Kategoriebezeichnungen das jeweilige Ziel für die betreffenden Updates tatsächlich liefert.
 
@@ -104,7 +111,7 @@ Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 "ClearUpdateCacheBeforeCheck": true,
 "EnableWingetUpdates": true,
 "EnableChocolateyUpdates": true,
-"DeferredUpdateCategories": ["Exchange", "SQL"],
+"DeferredUpdateCategories": ["Exchange Server", "SQL Server"],
 "DeferredUpdateKBs": [],
 "InstallDeferredUpdates": true,
 "PhysicalRebootTime": "03:00",

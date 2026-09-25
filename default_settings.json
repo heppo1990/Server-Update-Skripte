@@ -13,7 +13,7 @@
 		"AdditionalComputers": [],
 		"HypervisorComputers": ["SrvHV01"],
 		"ClientCertThumbprint": "",
-		"DeferredUpdateCategories": ["Exchange", "SQL"],
+		"DeferredUpdateCategories": ["Exchange Server", "SQL Server"],
 		"DeferredUpdateKBs": [],
 		"InstallDeferredUpdates": true,
 		"PhysicalRebootTime": "03:00",
