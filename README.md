@@ -201,6 +201,8 @@ Installiert Windows-Updates sowie verfügbare Chocolatey- und Winget-Updates. Di
 
 Der Installationsbericht trennt installierte Updates von für die Nachinstallation eingeplanten Updates. Die geplanten Updates werden je Server in einer Tabelle mit ComputerName, Status, KB, Size und Title aufgeführt. Ein geplanter Deferred-Update-Lauf wird nicht als „System auf dem neuesten Stand“ gemeldet.
 
+Winget-Quellenfehler im Check-Bericht erscheinen als Warnung und werden nicht als Paketupdate gezählt.
+
 Neustart-Ablauf:
 
 1. Nach Windows-Updates wird mit `Get-WURebootStatus -Silent` geprüft, ob ein Neustart erforderlich ist.

@@ -856,14 +856,18 @@ catch {
                 try {
                 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
                 $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
+                    $_ -match '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
+                })
                 # Winget liefert eine formatierte Tabelle. Echte Upgrade-Zeilen
                 # enden mit ihrer Paketquelle (winget oder msstore); Status- und
-                # Lizenztexte tun dies nicht. Das bleibt auch bei langen Namen
-                # stabil, welche die Spaltenausrichtung verschieben können.
+                # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
+                # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 $packageLines = @($availableOutput -split "`r?`n" | Where-Object {
                     $line = $_.Trim()
                     $line -match '\s(?:winget|msstore)\s*$' -and
-                    $line -notmatch '^Name\s+'
+                    $line -notmatch '^Name\s+' -and
+                    $line -notmatch '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
                 })
                 $actionOutput = ''
                 $exitCode = 0
@@ -872,7 +876,9 @@ catch {
                     $exitCode = $LASTEXITCODE
                 }
                 $noUpdateCodes = @(-1978335188, -1978335189, -1978335192)
-                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($exitCode -eq 0 -or $exitCode -in $noUpdateCodes); Skipped=$false; SkipReason=''; ExitCode=$exitCode; Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
+                    $wingetSearchSucceeded = $sourceFailureLines.Count -eq 0
+                    if (-not $wingetSearchSucceeded) { $actionOutput = $sourceFailureLines -join [Environment]::NewLine }
+                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($wingetSearchSucceeded -and ($exitCode -eq 0 -or $exitCode -in $noUpdateCodes)); Skipped=$false; SkipReason=''; ExitCode=$exitCode; Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
                 }
                 catch {
                     $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$_.Exception.Message }

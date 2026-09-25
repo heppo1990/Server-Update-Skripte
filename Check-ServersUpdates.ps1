@@ -764,6 +764,11 @@ if ($ServerADList -ne $null) {
           if (-not $packageResult.Available) { continue }
           if (-not $packageResult.Success) {
             Write-ScriptLog "WARNUNG: $($packageResult.Manager)-Prüfung auf ${Servername} fehlgeschlagen: $($packageResult.ActionOutput)"
+            $packageErrorHtml = [System.Net.WebUtility]::HtmlEncode([string]$packageResult.ActionOutput)
+            if ([string]::IsNullOrWhiteSpace($packageErrorHtml)) { $packageErrorHtml = 'Keine Fehlerdetails zurückgegeben.' }
+            $managerHtml = [System.Net.WebUtility]::HtmlEncode([string]$packageResult.Manager)
+            $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
+            $RepBody += "<div class='warning-box'><strong>$managerHtml-Prüfung auf $serverHtml fehlgeschlagen.</strong><br>$packageErrorHtml</div>"
             continue
           }
 
