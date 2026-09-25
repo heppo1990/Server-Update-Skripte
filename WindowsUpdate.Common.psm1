@@ -275,6 +275,7 @@ try {
             Unregister-ScheduledTask -TaskName $deferredTaskName -Confirm:$false -ErrorAction Stop
             $removed = $true
         }
+        Remove-Item -LiteralPath (Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
         $updates = @([PSCustomObject]@{ Removed = $removed })
     }
     elseif ($config.Mode -eq 'RebootStatus') {

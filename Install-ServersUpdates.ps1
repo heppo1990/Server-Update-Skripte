@@ -389,11 +389,15 @@ function Remove-DeferredUpdateTask {
   $taskName = 'WindowsUpdateAdm-DeferredUpdates'
   $removeTask = {
     param($Name)
+    $workerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
     if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
       Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
-      return $true
+      $removed = $true
+    } else {
+      $removed = $false
     }
-    return $false
+    Remove-Item -LiteralPath $workerPath -Force -ErrorAction SilentlyContinue
+    return $removed
   }
   if ($Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ComputerFQDN) {
     $removed = [bool](& $removeTask $taskName)
@@ -551,10 +555,26 @@ function Register-StartupRemoteTask {
     $AuthInfo = $null,
     [datetime]$At = [datetime]::MinValue
   )
-  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
+  # Der vollständige Worker ist für -EncodedCommand zu groß (Windows begrenzt
+  # die Prozessbefehlszeile). Er wird geschützt als temporäre Datei abgelegt;
+  # der Task-Aufruf selbst enthält nur noch den kurzen -File-Pfad.
   $sb = {
-    param($Name, $Encoded, $RunAt)
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
+    param($Name, $WorkerScript, $RunAt)
+    $WorkerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $WorkerPath) -Force | Out-Null
+    New-Item -ItemType File -Path $WorkerPath -Force | Out-Null
+    # SMTP-Daten im Worker dürfen nur SYSTEM und lokale Administratoren lesen.
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+      $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
+      $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'Allow')
+      $acl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $WorkerPath -AclObject $acl -ErrorAction Stop
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText($WorkerPath, $WorkerScript, $utf8Bom)
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$WorkerPath`""
     # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit und zusätzlich
     # direkt nach dem Systemstart geprüft. So kann die Nachinstallation nach
     # Ablauf der Mindestwartezeit noch im selben offenen Fenster beginnen.
@@ -566,9 +586,9 @@ function Register-StartupRemoteTask {
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $encoded $At; return }
+  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $At; return }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $encoded, $At)
+  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $At)
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
@@ -816,6 +836,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     if (`$rebootRequired) {
       Write-DeferredLog 'Nachinstallationsmail abgeschlossen. Erforderlicher Neustart wird jetzt sofort ausgelöst.'
       Unregister-ScheduledTask -TaskName `$taskName -Confirm:`$false -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
       shutdown.exe /r /t 0 /f | Out-Null
     }
   }
@@ -839,6 +860,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
   if (-not `$waitForReboot) {
     Write-DeferredLog 'Aufgabe wird entfernt.'
     Unregister-ScheduledTask -TaskName `$taskName -Confirm:`$false -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
   }
 }
 

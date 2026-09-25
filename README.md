@@ -24,6 +24,8 @@ Der Update-Check wiederholt eine Remote-SYSTEM-Suche einmal nach 20 Sekunden, we
 
 Wenn bei einem Server zurückgestellte Windows-Updates gefunden und eine Nachinstallationsaufgabe eingerichtet wird, zeigt der Installationsbericht direkt bei diesem Server den geplanten Start des Wartungsfensters (VM oder physisch), die konfigurierte Auswahl und die Mindestwartezeit nach einem erkannten Neustart. Ohne konfigurierten Wartungszeitpunkt weist der Bericht auf die Aktivierung beim nächsten Neustart hin. Die angezeigte Uhrzeit ist der geplante Aktivierungszeitpunkt; die tatsächliche Installation kann wegen Neustart, Mindestwartezeit oder geschlossenem Wartungsfenster später beginnen.
 
+Der Worker der Windows-Nachinstallationsaufgabe liegt während der offenen Aufgabe unter `%ProgramData%\WindowsUpdateAdm\DeferredUpdates.ps1`. Der Task startet ihn mit einem kurzen `-File`-Aufruf statt eines langen eingebetteten `-EncodedCommand`. Leserechte erhalten nur SYSTEM und die lokalen Administratoren. Nach erfolgreichem Abschluss, einem Fehler oder dem Entfernen der Aufgabe wird die Worker-Datei gelöscht.
+
 `default_settings.json` ist optional. Liegt sie nicht im Skriptordner, wird eine vollständige `settings.json` direkt verwendet; skriptspezifische `*.settings.json`-Dateien bleiben weiterhin möglich und haben Vorrang.
 
 ## Reihenfolge der Verwendung
