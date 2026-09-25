@@ -574,7 +574,28 @@ function Register-StartupRemoteTask {
     Set-Acl -LiteralPath $WorkerPath -AclObject $acl -ErrorAction Stop
     $utf8Bom = New-Object System.Text.UTF8Encoding($true)
     [System.IO.File]::WriteAllText($WorkerPath, $WorkerScript, $utf8Bom)
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$WorkerPath`""
+    # Der kurze Starthelfer protokolliert auch Parser-/Startfehler, bevor der
+    # Worker seine eigene DeferredUpdates.log initialisieren kann.
+    $workerPathLiteral = $WorkerPath.Replace("'", "''")
+    $taskLogPath = Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-TaskRunner.log'
+    $taskLogLiteral = $taskLogPath.Replace("'", "''")
+    $runnerSource = @"
+`$ErrorActionPreference = 'Stop'
+`$taskLogPath = '$taskLogLiteral'
+try {
+  New-Item -ItemType Directory -Path (Split-Path -Parent `$taskLogPath) -Force | Out-Null
+  "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  Task-Starthelfer gestartet." | Add-Content -LiteralPath `$taskLogPath -Encoding UTF8
+  & '$workerPathLiteral' *>> `$taskLogPath
+  `$workerSucceeded = `$?
+  if (-not `$workerSucceeded) { throw 'Der Worker wurde mit einem PowerShell-Fehler beendet; Details stehen in diesem Protokoll.' }
+  "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  Worker-Aufruf beendet." | Add-Content -LiteralPath `$taskLogPath -Encoding UTF8
+} catch {
+  "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  FEHLER im Task-Starthelfer: `$($_ | Out-String)" | Add-Content -LiteralPath `$taskLogPath -Encoding UTF8
+  exit 1
+}
+"@
+    $runnerEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($runnerSource))
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $runnerEncoded"
     # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit und zusätzlich
     # direkt nach dem Systemstart geprüft. So kann die Nachinstallation nach
     # Ablauf der Mindestwartezeit noch im selben offenen Fenster beginnen.
