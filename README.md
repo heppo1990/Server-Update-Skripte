@@ -61,7 +61,7 @@ Wichtige Werte in `UpdateSettings`:
 | `ClearUpdateCacheBeforeCheck` | `true` (Standard): Leert vor dem Update-Check Download und DataStore und stößt eine neue Erkennung an. `false`: überspringt diese Bereinigung, etwa bei häufigen Prüfungen.                              |
 | `EnableWingetUpdates`         | `true` (Standard): Winget-Pakete prüfen und beim Installationslauf aktualisieren. `false`: Winget vollständig überspringen.                                                                              |
 | `EnableChocolateyUpdates`     | `true` (Standard): Chocolatey-Pakete prüfen und beim Installationslauf aktualisieren. `false`: Chocolatey vollständig überspringen.                                                                      |
-| `DeferredUpdateCategories`    | Kategorien, die zunächst ausgelassen werden sollen, z. B. `Exchange` und `SQL`.                                                                                                                          |
+| `DeferredUpdateCategories`    | Update-Kategorien, die zunächst ausgelassen und später gemeinsam nachinstalliert werden sollen. Beispiele und Hinweise siehe [Kategorien für zurückgestellte Updates](#kategorien-für-zurückgestellte-updates). |
 | `DeferredUpdateKBs`           | Einzelne KBs, die zunächst ausgelassen werden sollen, z. B. `KB5122871`.                                                                                                                                 |
 | `InstallDeferredUpdates`      | `true`: zurückgestellte Updates werden nur dann nach dem nächsten Neustart nachinstalliert, wenn die Auswahl auf dem jeweiligen Ziel tatsächlich noch Updates enthält. `false`: sie bleiben ausgelassen. |
 | `DeferredUpdateDelayMinutes`  | Wartezeit ab dem tatsächlichen Neustart bis zur Nachinstallation. `1440` entspricht 24 Stunden.                                                                                                          |
@@ -71,6 +71,29 @@ Wichtige Werte in `UpdateSettings`:
 | `VMRebootWindowEndTime`       | Spätester Beginn eines VM-Neustarts und Ende des VM-Wartungsfensters. Leer lässt das Fensterende unbeschränkt.                                                                                           |
 | `VMRebootIntervalMinutes`     | Zeitversatz jeder weiteren VM; `0` erlaubt gleichzeitige VM-Neustarts, ein positiver Wert staffelt sie.                                                                                                  |
 | `VMRebootImmediately`         | `true` plant VM-Neustarts zeitnah; ein positives Intervall staffelt sie auch dann. Ein konfiguriertes Fensterende begrenzt den zulässigen Start.                                                          |
+
+### Kategorien für zurückgestellte Updates
+
+`DeferredUpdateCategories` wird als `-Category` beziehungsweise `-NotCategory` an `Get-WindowsUpdate` aus PSWindowsUpdate übergeben. Der Wert muss einer Kategorie entsprechen, die in den Metadaten der verfügbaren Updates auf dem jeweiligen System vorkommt. Es gibt deshalb keine vollständige, für alle Updatequellen und Produkte identische Liste.
+
+Häufige Windows-Update-Klassifizierungen sind:
+
+- `Critical Updates`
+- `Definition Updates`
+- `Driver Sets`
+- `Drivers`
+- `Feature Packs`
+- `Hotfix`
+- `Security Updates`
+- `Service Packs`
+- `Tools`
+- `Update Rollups`
+- `Updates`
+- `Upgrades`
+
+Daneben können Produktkategorien vorkommen, zum Beispiel `Windows Server 2019`, `SQL Server` oder `Exchange`. Welche Produktnamen tatsächlich greifen, hängt von den Update-Metadaten auf dem Zielsystem ab. Microsoft unterscheidet bei Updates zwischen Produkt und Klassifizierung; die obige Liste der Klassifizierungen ist daher nicht gleichbedeutend mit einer vollständigen Liste aller auswählbaren Kategorien. Siehe [Microsoft: Updates anzeigen und verwalten](https://learn.microsoft.com/en-us/windows-server/administration/windows-server-update-services/manage/viewing-and-managing-updates).
+
+Ein Eintrag wie `Security Updates` stellt alle passenden Sicherheitsupdates zurück, nicht nur kumulative Windows-Updates. Für eine gezielte Auswahl kann stattdessen `DeferredUpdateKBs` verwendet werden. Vor einem breiten Einsatz sollte geprüft werden, welche Kategoriebezeichnungen das jeweilige Ziel für die betreffenden Updates tatsächlich liefert.
 
 Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 
