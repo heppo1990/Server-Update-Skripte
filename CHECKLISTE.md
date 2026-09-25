@@ -7,6 +7,7 @@
   - [x] Ist `winget-install` bereits vorhanden: das Skript unter Windows PowerShell 5.1 mit `-UpdateSelf` aktualisieren und WinGet danach mit `-Force` reparieren.
   - [x] Ist `winget-install` nicht vorhanden: aus PSGallery installieren; bei Fehler die signierte aktuelle GitHub-Release-Datei verwenden.
 - [x] Nach der Reparatur `winget --version` im selben Ausführungskontext erneut prüfen und Ergebnis protokollieren.
+- [x] Bei einem Fehler beim Durchsuchen der WinGet-Quelle `winget` diese Quelle einmal aktualisieren und die Paketabfrage wiederholen.
 
 ## Konkrete Updates in der Nachinstallationsplanung
 

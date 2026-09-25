@@ -859,6 +859,25 @@ catch {
                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                     $_ -match '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
                 })
+                $wingetSourceRefreshOutput = ''
+                if ($sourceFailureLines.Count -gt 0) {
+                    # WinGet kann bei veraltetem oder kurzfristig nicht erreichbarem
+                    # Quellcache eine Fehlermeldung ausgeben, obwohl die Quelle danach
+                    # wieder funktioniert. Quelle einmal gezielt aktualisieren und
+                    # die Suche wiederholen, bevor der Lauf einen Fehler meldet.
+                    $wingetSourceRefreshOutput = & $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String
+                    $sourceRefreshExitCode = $LASTEXITCODE
+                    if ($sourceRefreshExitCode -eq 0) {
+                        $wingetBootstrapMessage += ' WinGet-Quelle winget wurde aktualisiert; die Paketabfrage wird wiederholt.'
+                        $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                        $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
+                            $_ -match '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
+                        })
+                    }
+                    else {
+                        $sourceFailureLines += "Aktualisieren der WinGet-Quelle winget fehlgeschlagen (ExitCode $sourceRefreshExitCode): $($wingetSourceRefreshOutput.Trim())"
+                    }
+                }
                 # Winget liefert eine formatierte Tabelle. Echte Upgrade-Zeilen
                 # enden mit ihrer Paketquelle (winget oder msstore); Status- und
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
@@ -878,6 +897,7 @@ catch {
                 $noUpdateCodes = @(-1978335188, -1978335189, -1978335192)
                     $wingetSearchSucceeded = $sourceFailureLines.Count -eq 0
                     if (-not $wingetSearchSucceeded) { $actionOutput = $sourceFailureLines -join [Environment]::NewLine }
+                    elseif (-not [string]::IsNullOrWhiteSpace($wingetSourceRefreshOutput)) { $actionOutput = "WinGet-Quelle winget wurde aktualisiert und die Suche wiederholt.`n$($wingetSourceRefreshOutput.Trim())" }
                     $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($wingetSearchSucceeded -and ($exitCode -eq 0 -or $exitCode -in $noUpdateCodes)); Skipped=$false; SkipReason=''; ExitCode=$exitCode; Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
                 }
                 catch {
