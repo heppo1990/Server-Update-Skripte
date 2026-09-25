@@ -908,8 +908,9 @@ catch {
         $packageResults = @(Invoke-Command @invokeParameters)
     }
     foreach ($packageResult in $packageResults) {
-        if ($packageResult.Manager -eq 'Winget' -and -not [string]::IsNullOrWhiteSpace([string]$packageResult.BootstrapMessage)) {
-            Write-CommonLog $WriteLog ([string]$packageResult.BootstrapMessage)
+        $bootstrapMessageProperty = $packageResult.PSObject.Properties['BootstrapMessage']
+        if ($packageResult.Manager -eq 'Winget' -and $bootstrapMessageProperty -and -not [string]::IsNullOrWhiteSpace([string]$bootstrapMessageProperty.Value)) {
+            Write-CommonLog $WriteLog ([string]$bootstrapMessageProperty.Value)
         }
     }
     return @($packageResults)
