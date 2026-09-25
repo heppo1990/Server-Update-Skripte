@@ -21,8 +21,7 @@
 		"VMRebootStartTime": "19:00",
 		"VMRebootWindowEndTime": "3:00",
 		"VMRebootImmediately": false,
-		"VMRebootIntervalMinutes": 30,
-		"DeferredUpdateDelayMinutes": 1440
+		"VMRebootIntervalMinutes": 30
 	},
 	"LinuxSettings": {
 		"Hosts": [],

@@ -753,9 +753,9 @@ function Register-DeferredLocalRebootTask {
 }
 
 function Register-DeferredUpdateTask {
-  param([string]$Servername, [string[]]$DeferredCategories, [string[]]$DeferredKBs = @(), [int]$DelayMinutes = 1440, [bool]$SucheOnline, $AuthInfo = $null, [datetime]$ScheduledAt = [datetime]::MinValue, [string]$MaintenanceEndTime = '')
-  # Die Aufgabe wird ausschließlich beim nächsten Boot gestartet.
-  # Erst dessen LastBootUpTime ist der Startpunkt der Nachinstallationsfrist.
+  param([string]$Servername, [string[]]$DeferredCategories, [string[]]$DeferredKBs = @(), [bool]$SucheOnline, $AuthInfo = $null, [datetime]$ScheduledAt = [datetime]::MinValue, [string]$MaintenanceEndTime = '')
+  # Nach einem Neustart prüft der Worker automatisch die Bereitschaft
+  # des Windows-Update-Dienstes, statt eine feste Minutenfrist abzuwarten.
   $taskName = 'WindowsUpdateAdm-DeferredUpdates'
   # InputObject verhindert, dass ein leeres Array zu JSON-null wird und später
   # als ein einzelnes leeres KB-Element interpretiert wird.
@@ -815,7 +815,6 @@ try {
   `$registeredAt = [DateTime]::FromFileTimeUtc($registeredAt)
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
   `$rebootDetected = `$lastBoot -gt `$registeredAt
-  `$rebootDueAt = if (`$rebootDetected) { `$lastBoot.AddMinutes($DelayMinutes) } else { [DateTime]::MinValue }
   `$windowEnd = [DateTime]::MaxValue
   if (`$scheduledAt -gt [DateTime]::MinValue) {
     `$windowOpen = `$true
@@ -829,52 +828,50 @@ try {
       if (`$windowEnd -le `$windowStart) { `$windowEnd = `$windowEnd.AddDays(1) }
       `$windowOpen = `$nowLocal -ge `$windowStart -and `$nowLocal -lt `$windowEnd
     }
-    # Die Aufgabe wird täglich im Wartungsfenster gestartet. Nach einem
-    # Neustart darf dessen Wartezeit das Fenster nicht unterschreiten.
+    # Die Aufgabe wird täglich im Wartungsfenster gestartet. Ein Neustart
+    # ist keine Voraussetzung, wenn das Fenster bereits offen ist.
     if (-not `$windowOpen) {
       `$waitForReboot = `$true
       Write-DeferredLog "Wartungsfenster ist geschlossen. Die Aufgabe wartet auf das nächste tägliche Wartungsfenster."
-    } elseif (`$rebootDetected -and [DateTime]::UtcNow -lt `$rebootDueAt) {
-      `$dueLocal = `$rebootDueAt.ToLocalTime()
-      `$canWaitInsideWindow = `$scheduledAt -le [DateTime]::MinValue -or (`$windowOpen -and `$dueLocal -lt `$windowEnd)
-      if (`$canWaitInsideWindow) {
-        `$secondsUntilDue = [int][Math]::Ceiling((`$dueLocal - (Get-Date)).TotalSeconds)
-        if (`$secondsUntilDue -gt 0) {
-          Write-DeferredLog "Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss')); die Nachinstallation startet danach im aktuellen Wartungsfenster."
-          Start-Sleep -Seconds `$secondsUntilDue
-        }
-        `$afterWait = Get-Date
-        if (`$scheduledAt -gt [DateTime]::MinValue -and -not [string]::IsNullOrWhiteSpace(`$maintenanceEndTime) -and `$afterWait -ge `$windowEnd) {
-          `$waitForReboot = `$true
-          Write-DeferredLog 'Die Mindestwartezeit endet erst nach dem Wartungsfenster. Nachinstallation wird bis zum nächsten Wartungsfenster verschoben.'
-        } else {
-          Write-DeferredLog 'Mindestwartezeit erfüllt. Nachinstallation beginnt jetzt im laufenden Wartungsfenster.'
-        }
-      } else {
-        `$waitForReboot = `$true
-        Write-DeferredLog "Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss')) und passt nicht mehr in das offene Wartungsfenster. Nachinstallation wartet auf das nächste Fenster."
-      }
     } elseif (-not `$rebootDetected) {
       # Ist das Wartungsfenster offen, dürfen zurückgestellte Updates auch
-      # ohne vorherigen Neustart installiert werden. Die Mindestwartezeit
-      # gilt ausschließlich ab einem tatsächlich erkannten Neustart.
-      Write-DeferredLog 'Wartungsfenster ist offen und seit Aufgabenanlage wurde kein Neustart erkannt. Nachinstallation startet ohne Neustartwartezeit.'
+      # ohne vorherigen Neustart installiert werden.
+      Write-DeferredLog 'Wartungsfenster ist offen und seit Aufgabenanlage wurde kein Neustart erkannt. Nachinstallation startet direkt.'
     } else {
-      Write-DeferredLog 'Wartungsfenster erreicht und Mindestwartezeit nach Neustart erfüllt. Nachinstallation wird jetzt ausgeführt.'
+      Write-DeferredLog 'Neustart erkannt und Wartungsfenster offen. Prüfe automatisch die Bereitschaft von Windows Update.'
     }
   } elseif (-not `$rebootDetected) {
     # Ohne Wartungszeit bleibt die Aufgabe bis zum Neustart aktiv.
     `$waitForReboot = `$true
     Write-DeferredLog 'Kein Wartungsfenster konfiguriert und noch kein Neustart erkannt. Aufgabe wartet auf Systemstart.'
-  } elseif ([DateTime]::UtcNow -lt `$rebootDueAt) {
-    # Ohne Wartungszeit wartet der laufende Task direkt bis zum Ende des Mindestabstands.
-    `$dueLocal = `$rebootDueAt.ToLocalTime()
-    `$secondsUntilDue = [int][Math]::Ceiling((`$dueLocal - (Get-Date)).TotalSeconds)
-    if (`$secondsUntilDue -gt 0) {
-      Write-DeferredLog "Kein Wartungsfenster konfiguriert. Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss'))."
-      Start-Sleep -Seconds `$secondsUntilDue
+  } else {
+    Write-DeferredLog 'Neustart erkannt. Prüfe automatisch die Bereitschaft von Windows Update.'
+  }
+  if (-not `$waitForReboot -and `$rebootDetected) {
+    # Statt einer festen Wartezeit auf eine erfolgreiche, rein lesende
+    # Windows-Update-Suche warten. Eine Obergrenze verhindert endloses Warten.
+    Import-Module PSWindowsUpdate -ErrorAction Stop
+    `$readyDeadline = (Get-Date).AddMinutes(5)
+    `$readyAttempt = 0
+    `$windowsUpdateReady = `$false
+    while (-not `$windowsUpdateReady -and (Get-Date) -lt `$readyDeadline) {
+      `$readyAttempt++
+      try {
+        `$null = @(Get-WindowsUpdate -AcceptAll -ErrorAction Stop)
+        `$windowsUpdateReady = `$true
+        Write-DeferredLog 'Windows Update antwortet auf die Bereitschaftssuche.'
+      } catch {
+        Write-DeferredLog "Windows Update ist noch nicht bereit (Versuch `$readyAttempt): `$(`$_.Exception.Message)"
+        if ((Get-Date) -lt `$readyDeadline) { Start-Sleep -Seconds 15 }
+      }
     }
-    Write-DeferredLog 'Mindestwartezeit erfüllt. Nachinstallation beginnt jetzt.'
+    if (-not `$windowsUpdateReady) {
+      `$waitForReboot = `$true
+      Write-DeferredLog 'Windows Update wurde innerhalb von fünf Minuten nach dem Neustart nicht bereit. Die Aufgabe bleibt bis zum nächsten Wartungsfenster bestehen.'
+    } elseif (`$scheduledAt -gt [DateTime]::MinValue -and -not [string]::IsNullOrWhiteSpace(`$maintenanceEndTime) -and (Get-Date) -ge `$windowEnd) {
+      `$waitForReboot = `$true
+      Write-DeferredLog 'Windows Update ist bereit, aber das Wartungsfenster ist inzwischen geschlossen. Nachinstallation wartet auf das nächste Fenster.'
+    }
   }
   if (-not `$waitForReboot) {
     Import-Module PSWindowsUpdate -ErrorAction Stop
@@ -1048,7 +1045,7 @@ if (`$waitForReboot) { exit 2 }
     if ($DeferredCategories.Count -gt 0) { "Kategorien: $($DeferredCategories -join ', ')" }
   ) -join '; '
   $activationText = if ($ScheduledAt -gt [datetime]::MinValue) { "im Wartungsfenster $($ScheduledAt.ToString('dd.MM.yyyy HH:mm'))" } else { 'beim nächsten Neustart' }
-  Write-ScriptLog "Nachinstallation auf $Servername wird $activationText aktiviert und startet danach nach $DelayMinutes Minute(n) ($selectionText; selbstlöschend)."
+  Write-ScriptLog "Nachinstallation auf $Servername wird $activationText aktiviert; nach einem Neustart wartet sie automatisch auf die Bereitschaft von Windows Update ($selectionText; selbstlöschend)."
 }
 
 function Register-DeferredMailTestTask {
@@ -1514,8 +1511,6 @@ if ($ServerADList -ne $null) {
         $vmRebootStartTime   = [string]$UpdateSettings.VMRebootStartTime
         $vmRebootWindowEndTime = [string]$UpdateSettings.VMRebootWindowEndTime
         $vmRebootImmediately = [bool]$UpdateSettings.VMRebootImmediately
-        # 1.440 Minuten entsprechen 24 Stunden. Minuten erlauben auch einen schnellen, sicheren Funktionstest.
-        $deferredDelayMinutes = [int]$UpdateSettings.DeferredUpdateDelayMinutes
         $installDeferred     = [bool]$UpdateSettings.InstallDeferredUpdates
         if ($UpdateSettings.DeferredUpdateCategories -and $UpdateSettings.DeferredUpdateCategories.Count -gt 0) {
           $deferredCategories = [string[]]$UpdateSettings.DeferredUpdateCategories
@@ -1582,16 +1577,13 @@ if ($ServerADList -ne $null) {
               -Servername          $Servername `
               -DeferredCategories  $deferredCategories `
               -DeferredKBs         $deferredKBs `
-              -DelayMinutes        $deferredDelayMinutes `
               -SucheOnline         $SucheOnline `
               -AuthInfo            $svcCredential `
               -ScheduledAt         $deferredScheduledAt `
               -MaintenanceEndTime  $deferredMaintenanceEndTime
 
-            # Der Report nennt den Aktivierungszeitpunkt und die Mindestwartezeit
-            # direkt beim betroffenen Server. Die tatsächliche Installation kann
-            # später beginnen, falls erst ein Neustart oder das nächste
-            # Wartungsfenster abgewartet werden muss.
+            # Der Report nennt den Aktivierungszeitpunkt und die automatische
+            # Bereitschaftsprüfung nach einem Neustart direkt beim Zielserver.
             $deferredSelection = @(
               if ($deferredKBs.Count -gt 0) { "KBs: $($deferredKBs -join ', ')" }
               if ($deferredCategories.Count -gt 0) { "Kategorien: $($deferredCategories -join ', ')" }
@@ -1637,11 +1629,11 @@ if ($ServerADList -ne $null) {
             } else {
               '<br><strong>Konkrete Updates:</strong> ' + @($deferredCheck.Updates).Count + ' zurückgestellte Updates gefunden; das Zielsystem hat dazu keine KB-Nummer und keinen Titel geliefert.'
             }
-            $deferredDelayText = "Die Installation startet nach einem erkannten Neustart frühestens nach $deferredDelayMinutes Minute(n)."
+            $deferredReadinessText = 'Nach einem Neustart startet die Installation, sobald Windows Update antwortet und das Wartungsfenster offen ist.'
             if ($deferredScheduledAt -gt [datetime]::MinValue) {
-              $deferredPlanText = "Nachinstallation eingeplant: ab Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' }))). $deferredDelayText"
+              $deferredPlanText = "Nachinstallation eingeplant: ab Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' }))). $deferredReadinessText"
             } else {
-              $deferredPlanText = "Nachinstallation eingeplant: beim nächsten Neustart. $deferredDelayText"
+              $deferredPlanText = "Nachinstallation eingeplant: beim nächsten Neustart. $deferredReadinessText"
             }
             $deferredPlanHtml = [System.Net.WebUtility]::HtmlEncode($deferredPlanText)
             $RepBody += "<div class='warning-box'><strong>$deferredPlanHtml</strong><br>Zurückgestellt: $deferredSelectionHtml$deferredUpdatesHtml</div>"

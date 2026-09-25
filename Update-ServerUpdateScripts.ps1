@@ -163,6 +163,20 @@ function Merge-ServerUpdateJsonProperties {
     }
 }
 
+function Remove-ServerUpdateJsonProperty {
+    param(
+        [Parameter(Mandatory)][object]$Destination,
+        [Parameter(Mandatory)][string]$PropertyName
+    )
+    if ($Destination -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+    $property = $Destination.PSObject.Properties[$PropertyName]
+    if ($null -ne $property) {
+        $Destination.PSObject.Properties.Remove($PropertyName)
+        return $true
+    }
+    return $false
+}
+
 function Update-ServerUpdateSettingsDefaults {
     param([Parameter(Mandatory)][string]$ScriptRoot)
 
@@ -199,8 +213,17 @@ function Update-ServerUpdateSettingsDefaults {
                 Merge-ServerUpdateJsonProperties -Destination $fileDefaults -Overrides $generalSettings
             }
 
+            # Veraltete Optionen werden bei der Settings-Migration entfernt.
+            # Die Sicherung enthält vor der Änderung weiterhin den vollständigen alten Stand.
+            $removedCount = 0
+            if ($settings.UpdateSettings) {
+                if (Remove-ServerUpdateJsonProperty -Destination $settings.UpdateSettings -PropertyName 'DeferredUpdateDelayMinutes') {
+                    $removedCount++
+                }
+            }
+
             $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $fileDefaults
-            if ($addedCount -eq 0) { continue }
+            if ($addedCount -eq 0 -and $removedCount -eq 0) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
             $backupPath = '{0}.bak.{1}_{2}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -213,7 +236,7 @@ function Update-ServerUpdateSettingsDefaults {
             if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
                 throw 'Einstellungsdatei oder Sicherung fehlt nach dem atomaren Austausch.'
             }
-            Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt; Sicherung: {1}" -f $addedCount, $backupPath) -ForegroundColor Cyan
+            Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt, {1} veraltete Einstellung(en) entfernt; Sicherung: {2}" -f $addedCount, $removedCount, $backupPath) -ForegroundColor Cyan
         }
         catch {
             Write-Warning "Standardwerte konnten in '$([IO.Path]::GetFileName($settingsPath))' nicht ergänzt werden. Vorhandene Einstellungen bleiben erhalten. Ursache: $($_.Exception.Message)"
