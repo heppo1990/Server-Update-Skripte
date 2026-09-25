@@ -507,17 +507,9 @@ function Invoke-WingetRepair {
     }
     else {
         $bootstrapPath = Join-Path $env:TEMP ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
-        $bootstrapScript = @'
-$ErrorActionPreference = 'Stop'
-try {
-    Install-Script -Name winget-install -Repository PSGallery -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop
-    exit 0
-}
-catch {
-    Write-Error $_
-    exit 1
-}
-'@
+        # Ein einzeiliges Skript vermeidet verschachtelte Here-Strings im
+        # ebenfalls als Here-String eingebetteten PowerShell-5.1-Vorlauf.
+        $bootstrapScript = '$ErrorActionPreference = ''Stop''; try { Install-Script -Name winget-install -Repository PSGallery -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop; exit 0 } catch { Write-Error $_; exit 1 }'
         [IO.File]::WriteAllText($bootstrapPath, $bootstrapScript, [Text.Encoding]::UTF8)
         try { $galleryResult = Invoke-WingetInstallScript -Path $bootstrapPath -InstallerArguments @() }
         finally { Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction SilentlyContinue }
