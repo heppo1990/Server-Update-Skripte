@@ -468,6 +468,82 @@ $statusPath = $env:SERVER_UPDATE_BOOTSTRAP_STATUS_PATH
 $noUpdateExitCodes = @(-1978335188, -1978335189, -1978335192)
 $wingetCommand = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
 $chocoPath = 'C:\ProgramData\chocolatey\bin\choco.exe'
+
+function Find-WingetInstallScript {
+    $command = Get-Command -Name 'winget-install.ps1' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
+    foreach ($candidate in @(
+        (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Scripts\winget-install.ps1'),
+        (Join-Path $env:ProgramFiles 'WindowsPowerShell\Scripts\winget-install.ps1')
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+function Invoke-WingetInstallScript {
+    param([string]$Path, [string[]]$InstallerArguments)
+    $powerShell51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
+    $output = & $powerShell51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @InstallerArguments 2>&1 | Out-String -Width 300
+    return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output.Trim() }
+}
+
+function Invoke-WingetRepair {
+    param([string]$ServerCaption)
+    if ($ServerCaption -notmatch 'Windows Server (2019|2022)') {
+        throw "Die WinGet-Reparatur ist nur für Windows Server 2019 und 2022 vorgesehen (erkannt: $ServerCaption)."
+    }
+
+    $installerPath = Find-WingetInstallScript
+    $temporaryInstallerPath = $null
+    if ($installerPath) {
+        if ((Get-AuthenticodeSignature -LiteralPath $installerPath).Status -ne 'Valid') {
+            throw "Die vorhandene winget-install-Datei hat keine gültige Authenticode-Signatur: $installerPath"
+        }
+        $updateResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-UpdateSelf')
+        if ($updateResult.ExitCode -ne 0) { throw "winget-install -UpdateSelf fehlgeschlagen: $($updateResult.Output)" }
+        $installerPath = Find-WingetInstallScript
+    }
+    else {
+        $bootstrapPath = Join-Path $env:TEMP ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+        $bootstrapScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    Install-Script -Name winget-install -Repository PSGallery -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop
+    exit 0
+}
+catch {
+    Write-Error $_
+    exit 1
+}
+'@
+        [IO.File]::WriteAllText($bootstrapPath, $bootstrapScript, [Text.Encoding]::UTF8)
+        try { $galleryResult = Invoke-WingetInstallScript -Path $bootstrapPath -InstallerArguments @() }
+        finally { Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction SilentlyContinue }
+        $installerPath = Find-WingetInstallScript
+        if ($galleryResult.ExitCode -ne 0 -or -not $installerPath) {
+            $temporaryInstallerPath = Join-Path $env:TEMP ("winget-install-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -UseBasicParsing -TimeoutSec 90 -OutFile $temporaryInstallerPath -ErrorAction Stop
+            $installerPath = $temporaryInstallerPath
+        }
+    }
+
+    try {
+        if (-not $installerPath -or (Get-AuthenticodeSignature -LiteralPath $installerPath).Status -ne 'Valid') {
+            throw 'Die winget-install-Datei hat keine gültige Authenticode-Signatur.'
+        }
+        $repairResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-Force')
+        if ($repairResult.ExitCode -ne 0) { throw "winget-install -Force fehlgeschlagen: $($repairResult.Output)" }
+    }
+    finally {
+        if ($temporaryInstallerPath -and (Test-Path -LiteralPath $temporaryInstallerPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $temporaryInstallerPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 try {
     if ($wingetCommand) {
         Write-Host 'Prüfe mit Windows PowerShell 5.1, ob Winget ein PowerShell-7-Update anbietet ...'
@@ -475,8 +551,26 @@ try {
         $packageExitCode = $LASTEXITCODE
         if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
         if ($packageExitCode -ne 0) {
-            Write-Warning "PowerShell-7-Update mit Winget fehlgeschlagen (Exitcode $packageExitCode). Der Installationslauf wird fortgesetzt. $($packageOutput | Out-String)"
-            exit 0
+            $serverCaption = ''
+            try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+            if ($serverCaption -match 'Windows Server (2019|2022)') {
+                Write-Warning "WinGet-Prüfung für PowerShell 7 fehlgeschlagen (Exitcode $packageExitCode); repariere WinGet auf $serverCaption mit winget-install und wiederhole die Prüfung."
+                Invoke-WingetRepair -ServerCaption $serverCaption
+                $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
+                $wingetCommand = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
+                $wingetPath = if ($wingetCommand) { $wingetCommand.Source } else { Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe' }
+                if (-not (Test-Path -LiteralPath $wingetPath -PathType Leaf)) { throw 'winget.exe wurde nach der Reparatur nicht gefunden.' }
+                $wingetVersionOutput = & $wingetPath --version 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
+                $packageOutput = & $wingetPath upgrade --id Microsoft.PowerShell --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1
+                $packageExitCode = $LASTEXITCODE
+                if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
+                if ($packageExitCode -ne 0) { throw "WinGet-Prüfung schlug auch nach der Reparatur fehl (Exitcode $packageExitCode): $($packageOutput | Out-String)" }
+            }
+            else {
+                Write-Warning "PowerShell-7-Update mit Winget fehlgeschlagen (Exitcode $packageExitCode). Der Installationslauf wird fortgesetzt. $($packageOutput | Out-String)"
+                exit 0
+            }
         }
     }
     elseif (Test-Path -LiteralPath $chocoPath -PathType Leaf) {

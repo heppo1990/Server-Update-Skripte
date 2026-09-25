@@ -7,6 +7,8 @@
   - [x] Ist `winget-install` bereits vorhanden: das Skript unter Windows PowerShell 5.1 mit `-UpdateSelf` aktualisieren und WinGet danach mit `-Force` reparieren.
   - [x] Ist `winget-install` nicht vorhanden: aus PSGallery installieren; bei Fehler die signierte aktuelle GitHub-Release-Datei verwenden.
 - [x] Nach der Reparatur `winget --version` im selben Ausführungskontext erneut prüfen und Ergebnis protokollieren.
+- [x] Schlägt die WinGet-Prüfung für das PS7-Update fehl, WinGet auf Windows Server 2019/2022 unabhängig von AD-Mitgliedschaft mit `winget-install` reparieren und die PS7-Prüfung wiederholen.
+- [x] Chocolatey nur dann für das PS7-Update verwenden, wenn es bereits installiert ist; Chocolatey nicht automatisch nachinstallieren.
 - [x] Bei einem Fehler beim Durchsuchen der WinGet-Quelle `winget` diese Quelle einmal aktualisieren und die Paketabfrage wiederholen.
 
 ## Konkrete Updates in der Nachinstallationsplanung
