@@ -46,7 +46,23 @@ function Write-WindowsUpdateJsonAtomically {
     try {
         $json = ConvertTo-Json -InputObject $Value -Depth 100
         [IO.File]::WriteAllText($temporaryPath, $json, [Text.UTF8Encoding]::new($false))
-        if (Test-Path -LiteralPath $Path -PathType Leaf) { [IO.File]::Replace($temporaryPath, $Path, $null) }
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $moveWithOverwrite = [IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
+            if ($null -ne $moveWithOverwrite) {
+                # PowerShell 7/.NET Core unterstützt atomaren Austausch direkt.
+                [IO.File]::Move($temporaryPath, $Path, $true)
+            }
+            else {
+                # Windows PowerShell 5.1/.NET Framework verlangt einen Backup-Pfad.
+                # Die alte Datei kann das bisherige Klartextpasswort enthalten und
+                # wird nach dem atomaren Austausch sofort wieder entfernt.
+                $replaceBackupPath = $temporaryPath + '.replace.bak'
+                try { [IO.File]::Replace($temporaryPath, $Path, $replaceBackupPath) }
+                finally {
+                    if (Test-Path -LiteralPath $replaceBackupPath -PathType Leaf) { [IO.File]::Delete($replaceBackupPath) }
+                }
+            }
+        }
         else { [IO.File]::Move($temporaryPath, $Path) }
     }
     finally {
@@ -126,6 +142,12 @@ function Get-WindowsUpdateSettings {
     }
 
     $settings = $DefaultSettingsJson | ConvertFrom-Json
+    $defaultMailSettingsProperty = $settings.PSObject.Properties['MailSettings']
+    $defaultAuthPassProperty = if ($defaultMailSettingsProperty -and $defaultMailSettingsProperty.Value) { $defaultMailSettingsProperty.Value.PSObject.Properties['AuthPass'] } else { $null }
+    if ($defaultAuthPassProperty -and -not [string]::IsNullOrEmpty([string]$defaultAuthPassProperty.Value) -and
+        -not ([string]$defaultAuthPassProperty.Value).StartsWith('DPAPI:', [StringComparison]::Ordinal)) {
+        throw 'Die Standard-Einstellungen enthalten ein Mailpasswort. Lege MailSettings.AuthPass ausschließlich in einer lokalen settings.json ab.'
+    }
     $scriptSettingsPath = Join-Path $ScriptRoot "$ScriptName.settings.json"
     $generalSettingsPath = Join-Path $ScriptRoot 'settings.json'
     $settingsFromFiles = @()
@@ -187,7 +209,7 @@ function Get-WindowsUpdateSettings {
         $mailPassword = if ($mailPasswordProperty) { [string]$mailPasswordProperty.Value } else { '' }
         if (-not [string]::IsNullOrEmpty($mailPassword)) {
             if (-not $mailPassword.StartsWith('DPAPI:', [StringComparison]::Ordinal)) {
-                throw 'MailSettings.AuthPass ist unverschlüsselt in den Standard-Einstellungen hinterlegt. Lege das Passwort in settings.json ab.'
+                throw 'MailSettings.AuthPass ist nach der Settings-Migration noch unverschlüsselt. Prüfe, ob das Skript die lokale settings.json schreiben darf.'
             }
             $settings.MailSettings.AuthPass = Unprotect-WindowsUpdateMailPassword -ProtectedPassword $mailPassword
         }
