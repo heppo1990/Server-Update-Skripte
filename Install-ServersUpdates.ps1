@@ -356,7 +356,32 @@ function Get-DeferredWindowsUpdates {
       $updates = @()
       foreach ($kb in @($KBs)) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
       foreach ($category in @($Categories)) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
-      $updates
+      # Eigenschaften vor dem Remoting vereinheitlichen: JEA und PS-Remoting
+      # liefern je nach PSWindowsUpdate-Version unterschiedlich serialisierte
+      # Objekte. Ohne diese Normalisierung gehen KB und Titel im Bericht verloren.
+      foreach ($update in $updates) {
+        if ($null -eq $update) { continue }
+        $kbValue = ''
+        foreach ($propertyName in @('KB', 'KBArticleID', 'KBArticleIDs')) {
+          $property = $update.PSObject.Properties[$propertyName]
+          if ($property -and $null -ne $property.Value -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            $kbValue = [string]$property.Value
+            break
+          }
+        }
+        if ($kbValue) {
+          $kbValue = (@(($kbValue -split ',\s*') | ForEach-Object { $articleId = $_.Trim(); if ($articleId -match '^KB') { $articleId } else { "KB$articleId" } }) -join ', ')
+        }
+        $titleValue = ''
+        foreach ($propertyName in @('Title', 'UpdateTitle', 'Name', 'Description')) {
+          $property = $update.PSObject.Properties[$propertyName]
+          if ($property -and $null -ne $property.Value -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            $titleValue = [string]$property.Value
+            break
+          }
+        }
+        [PSCustomObject]@{ KB = $kbValue; Title = $titleValue }
+      }
     }
 
     if ($isLocal) {
@@ -1529,7 +1554,7 @@ if ($ServerADList -ne $null) {
             $deferredUpdatesHtml = if ($deferredUpdateDescriptions.Count -gt 0) {
               '<br><strong>Konkrete Updates:</strong><ul>' + (($deferredUpdateDescriptions | ForEach-Object { '<li>' + [System.Net.WebUtility]::HtmlEncode($_) + '</li>' }) -join '') + '</ul>'
             } else {
-              '<br><strong>Konkrete Updates:</strong> Die Update-Suche hat keine KB-Nummer und keinen Titel zurückgegeben.'
+              '<br><strong>Konkrete Updates:</strong> ' + @($deferredCheck.Updates).Count + ' zurückgestellte Updates gefunden; das Zielsystem hat dazu keine KB-Nummer und keinen Titel geliefert.'
             }
             $deferredDelayText = "Die Installation startet nach einem erkannten Neustart frühestens nach $deferredDelayMinutes Minute(n)."
             if ($deferredScheduledAt -gt [datetime]::MinValue) {
