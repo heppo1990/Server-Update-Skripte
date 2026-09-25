@@ -746,7 +746,7 @@ if ($ServerADList -ne $null) {
 
         # Zusätzlich installierte Anwendungen über die zentrale Paketverwaltung prüfen.
         try {
-          $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates)
+          $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message) Write-ScriptLog $message })
         }
         catch {
           # Paketmanager sind optional. Ein separater Remoting-Fehler darf

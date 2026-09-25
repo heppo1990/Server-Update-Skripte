@@ -659,7 +659,8 @@ function Invoke-WindowsUpdatePackageManagers {
         $AuthInfo,
         [ValidateSet('Check', 'Install')][string]$Mode = 'Check',
         [bool]$EnableWinget = $true,
-        [bool]$EnableChocolatey = $true
+        [bool]$EnableChocolatey = $true,
+        [scriptblock]$WriteLog
     )
 
     # Der Block läuft lokal oder innerhalb der vorhandenen WinRM-Verbindung.
@@ -691,6 +692,50 @@ function Invoke-WindowsUpdatePackageManagers {
                 if ($candidate) { return $candidate.FullName }
             }
             return $null
+        }
+
+        function Test-WingetExecutable {
+            param([string]$Path)
+            if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                return [PSCustomObject]@{ Works = $false; Output = 'winget.exe wurde nicht gefunden.' }
+            }
+            try {
+                $output = (& $Path --version 2>&1 | Out-String -Width 300).Trim()
+                $exitCode = $LASTEXITCODE
+                $works = $exitCode -eq 0 -and $output -match '(?m)^\s*v?\d+\.\d+'
+                return [PSCustomObject]@{ Works = $works; Output = "ExitCode=$exitCode; Ausgabe=$output" }
+            }
+            catch {
+                return [PSCustomObject]@{ Works = $false; Output = $_.Exception.Message }
+            }
+        }
+
+        function Find-WingetInstallScript {
+            $command = Get-Command winget-install.ps1 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
+            $candidates = @(
+                (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Scripts\winget-install.ps1'),
+                (Join-Path $env:ProgramFiles 'WindowsPowerShell\Scripts\winget-install.ps1')
+            )
+            foreach ($candidate in $candidates) {
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+            }
+            return $null
+        }
+
+        function Invoke-WingetInstallScript {
+            param([string]$Path, [string[]]$InstallerArguments)
+            $powerShell51 = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
+            $output = (& $powerShell51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @InstallerArguments 2>&1 | Out-String -Width 300)
+            $exitCode = $LASTEXITCODE
+            return [PSCustomObject]@{ ExitCode = $exitCode; Output = $output.Trim() }
+        }
+
+        function Test-WingetInstallScriptSignature {
+            param([string]$Path)
+            $signature = Get-AuthenticodeSignature -LiteralPath $Path
+            return $signature.Status -eq 'Valid'
         }
 
         # Kein generisches .NET-List-Objekt: PowerShell 7 kann dieses beim
@@ -730,7 +775,84 @@ function Invoke-WindowsUpdatePackageManagers {
         }
         else {
             $wingetPath = Resolve-WingetExecutable
-            if ($wingetPath) {
+            $wingetBootstrapMessage = ''
+            $wingetPreparationSucceeded = $true
+            $serverCaption = ''
+            try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+            if ($serverCaption -match 'Windows Server (2019|2022)') {
+                $wingetHealth = Test-WingetExecutable -Path $wingetPath
+                if (-not $wingetHealth.Works) {
+                    $wingetBootstrapMessage = "WinGet auf $serverCaption fehlt oder ist nicht funktionsfähig ($($wingetHealth.Output)); starte Reparatur."
+                    $installerPath = Find-WingetInstallScript
+                    $temporaryInstallerPath = $null
+                    try {
+                        if ($installerPath) {
+                            if (-not (Test-WingetInstallScriptSignature -Path $installerPath)) {
+                                throw "Die vorhandene winget-install-Datei hat keine gültige Authenticode-Signatur: $installerPath"
+                            }
+                            $updateResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-UpdateSelf')
+                            $wingetBootstrapMessage += " UpdateSelf ExitCode=$($updateResult.ExitCode)."
+                            if (-not [string]::IsNullOrWhiteSpace($updateResult.Output)) { $wingetBootstrapMessage += " $($updateResult.Output)" }
+                            if ($updateResult.ExitCode -ne 0) { throw "winget-install -UpdateSelf endete mit ExitCode $($updateResult.ExitCode)." }
+                            $installerPath = Find-WingetInstallScript
+                        }
+                        else {
+                            # Skript aus PSGallery installieren; bei Galerieproblemen
+                            # auf die signierte GitHub-Release-Datei ausweichen.
+                            $bootstrapPath = Join-Path $env:TEMP ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+                            $bootstrapScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    Install-Script -Name winget-install -Repository PSGallery -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop
+    exit 0
+}
+catch {
+    Write-Error $_
+    exit 1
+}
+'@
+                            [IO.File]::WriteAllText($bootstrapPath, $bootstrapScript, [Text.Encoding]::UTF8)
+                            try { $galleryResult = Invoke-WingetInstallScript -Path $bootstrapPath -InstallerArguments @() }
+                            finally { Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction SilentlyContinue }
+                            $installerPath = Find-WingetInstallScript
+                            if ($galleryResult.ExitCode -ne 0 -or -not $installerPath) {
+                                $temporaryInstallerPath = Join-Path $env:TEMP ("winget-install-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+                                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                                Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -UseBasicParsing -TimeoutSec 90 -OutFile $temporaryInstallerPath -ErrorAction Stop
+                                $installerPath = $temporaryInstallerPath
+                            }
+                            $wingetBootstrapMessage += ' winget-install wurde bereitgestellt.'
+                        }
+
+                        if (-not $installerPath -or -not (Test-WingetInstallScriptSignature -Path $installerPath)) {
+                            throw 'Die winget-install-Datei hat keine gültige Authenticode-Signatur.'
+                        }
+                        $repairResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-Force')
+                        if ($repairResult.ExitCode -ne 0) {
+                            throw "winget-install -Force endete mit ExitCode $($repairResult.ExitCode): $($repairResult.Output)"
+                        }
+                        $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
+                        $wingetPath = Resolve-WingetExecutable
+                        $wingetHealth = Test-WingetExecutable -Path $wingetPath
+                        if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }
+                        $wingetBootstrapMessage += " Reparatur erfolgreich; $($wingetHealth.Output)"
+                    }
+                    catch {
+                        $wingetPreparationSucceeded = $false
+                        $wingetBootstrapMessage += " Reparatur fehlgeschlagen: $($_.Exception.Message)"
+                    }
+                    finally {
+                        if ($temporaryInstallerPath -and (Test-Path -LiteralPath $temporaryInstallerPath -PathType Leaf)) {
+                            Remove-Item -LiteralPath $temporaryInstallerPath -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+
+            if (-not $wingetPreparationSucceeded) {
+                $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$wingetBootstrapMessage; BootstrapMessage=$wingetBootstrapMessage }
+            }
+            elseif ($wingetPath) {
                 try {
                 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
                 $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
@@ -759,6 +881,11 @@ function Invoke-WindowsUpdatePackageManagers {
             else {
                 $result += [PSCustomObject]@{ Manager='Winget'; Available=$false; Success=$true; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }
             }
+            if (-not [string]::IsNullOrWhiteSpace($wingetBootstrapMessage)) {
+                foreach ($wingetResult in @($result | Where-Object { $_.Manager -eq 'Winget' })) {
+                    Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue $wingetBootstrapMessage -Force
+                }
+            }
         }
         return @($result)
     }
@@ -766,13 +893,20 @@ function Invoke-WindowsUpdatePackageManagers {
     $localNames = @($env:COMPUTERNAME, [System.Net.Dns]::GetHostName()) | Where-Object { $_ }
     if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
     if ($localNames -contains $ComputerName) {
-        return @(& $packageScript $Mode $EnableWinget $EnableChocolatey)
+        $packageResults = @(& $packageScript $Mode $EnableWinget $EnableChocolatey)
     }
-
-    $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
-    $invokeParameters.ScriptBlock = $packageScript
-    $invokeParameters.ArgumentList = @($Mode, $EnableWinget, $EnableChocolatey)
-    return @(Invoke-Command @invokeParameters)
+    else {
+        $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
+        $invokeParameters.ScriptBlock = $packageScript
+        $invokeParameters.ArgumentList = @($Mode, $EnableWinget, $EnableChocolatey)
+        $packageResults = @(Invoke-Command @invokeParameters)
+    }
+    foreach ($packageResult in $packageResults) {
+        if ($packageResult.Manager -eq 'Winget' -and -not [string]::IsNullOrWhiteSpace([string]$packageResult.BootstrapMessage)) {
+            Write-CommonLog $WriteLog ([string]$packageResult.BootstrapMessage)
+        }
+    }
+    return @($packageResults)
 }
 
 function Invoke-WindowsUpdateFileRetention {

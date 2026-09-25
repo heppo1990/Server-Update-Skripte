@@ -2,11 +2,11 @@
 
 ## WinGet auf Windows Server 2019 und 2022
 
-- [ ] Auf Windows Server 2019 und 2022 zu Beginn prüfen, ob `winget` vorhanden und ausführbar ist.
-- [ ] Wenn WinGet fehlt oder nicht funktioniert, das Installationsskript [asheroto/winget-install](https://github.com/asheroto/winget-install) verwenden.
-  - [ ] Ist `winget-install` bereits vorhanden: das Skript mit `-UpdateSelf` aktualisieren und anschließend WinGet unter Windows PowerShell 5.1 mit `-Force` neu installieren beziehungsweise reparieren.
-  - [ ] Ist `winget-install` nicht vorhanden: das Skript installieren und damit WinGet einrichten.
-- [ ] Abschließend prüfen, dass `winget` im für die Update-Skripte verwendeten Ausführungskontext funktioniert.
+- [x] Auf Windows Server 2019 und 2022 vor der Winget-Abfrage prüfen, ob `winget --version` im verwendeten Ausführungskontext erfolgreich ist.
+- [x] Wenn WinGet fehlt oder nicht funktioniert, das Installationsskript [asheroto/winget-install](https://github.com/asheroto/winget-install) verwenden.
+  - [x] Ist `winget-install` bereits vorhanden: das Skript unter Windows PowerShell 5.1 mit `-UpdateSelf` aktualisieren und WinGet danach mit `-Force` reparieren.
+  - [x] Ist `winget-install` nicht vorhanden: aus PSGallery installieren; bei Fehler die signierte aktuelle GitHub-Release-Datei verwenden.
+- [x] Nach der Reparatur `winget --version` im selben Ausführungskontext erneut prüfen und Ergebnis protokollieren.
 
 ## Konkrete Updates in der Nachinstallationsplanung
 
