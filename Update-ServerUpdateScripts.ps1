@@ -544,26 +544,43 @@ catch {
     }
 }
 
+function Resolve-WingetPath {
+    $command = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
+    if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
+    $aliasPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+    if (Test-Path -LiteralPath $aliasPath -PathType Leaf) { return $aliasPath }
+    return $null
+}
+
+function Invoke-PowerShellWingetUpdateCheck {
+    param([Parameter(Mandatory)][string]$Path)
+    $output = & $Path upgrade --id Microsoft.PowerShell --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1
+    return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+}
+
 try {
-    if ($wingetCommand) {
+    $serverCaption = ''
+    try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+    $wingetRepairSupported = $serverCaption -match 'Windows Server (2019|2022)'
+    $wingetPath = Resolve-WingetPath
+    if ($wingetPath) {
         Write-Host 'Prüfe mit Windows PowerShell 5.1, ob Winget ein PowerShell-7-Update anbietet ...'
-        $packageOutput = & $wingetCommand.Source upgrade --id Microsoft.PowerShell --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1
-        $packageExitCode = $LASTEXITCODE
+        $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath
+        $packageOutput = $wingetCheck.Output
+        $packageExitCode = $wingetCheck.ExitCode
         if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
         if ($packageExitCode -ne 0) {
-            $serverCaption = ''
-            try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
-            if ($serverCaption -match 'Windows Server (2019|2022)') {
+            if ($wingetRepairSupported) {
                 Write-Warning "WinGet-Prüfung für PowerShell 7 fehlgeschlagen (Exitcode $packageExitCode); repariere WinGet auf $serverCaption mit winget-install und wiederhole die Prüfung."
                 Invoke-WingetRepair -ServerCaption $serverCaption
                 $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
-                $wingetCommand = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
-                $wingetPath = if ($wingetCommand) { $wingetCommand.Source } else { Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe' }
-                if (-not (Test-Path -LiteralPath $wingetPath -PathType Leaf)) { throw 'winget.exe wurde nach der Reparatur nicht gefunden.' }
+                $wingetPath = Resolve-WingetPath
+                if (-not $wingetPath) { throw 'winget.exe wurde nach der Reparatur nicht gefunden.' }
                 $wingetVersionOutput = & $wingetPath --version 2>&1
                 if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
-                $packageOutput = & $wingetPath upgrade --id Microsoft.PowerShell --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1
-                $packageExitCode = $LASTEXITCODE
+                $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath
+                $packageOutput = $wingetCheck.Output
+                $packageExitCode = $wingetCheck.ExitCode
                 if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
                 if ($packageExitCode -ne 0) { throw "WinGet-Prüfung schlug auch nach der Reparatur fehl (Exitcode $packageExitCode): $($packageOutput | Out-String)" }
             }
@@ -572,6 +589,20 @@ try {
                 exit 0
             }
         }
+    }
+    elseif ($wingetRepairSupported) {
+        Write-Warning "WinGet fehlt auf $serverCaption; stelle es mit winget-install bereit und prüfe anschließend das PS7-Update."
+        Invoke-WingetRepair -ServerCaption $serverCaption
+        $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
+        $wingetPath = Resolve-WingetPath
+        if (-not $wingetPath) { throw 'winget.exe wurde nach der Installation nicht gefunden.' }
+        $wingetVersionOutput = & $wingetPath --version 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Installation weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
+        $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath
+        $packageOutput = $wingetCheck.Output
+        $packageExitCode = $wingetCheck.ExitCode
+        if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
+        if ($packageExitCode -ne 0) { throw "WinGet-Prüfung schlug nach der Installation fehl (Exitcode $packageExitCode): $($packageOutput | Out-String)" }
     }
     elseif (Test-Path -LiteralPath $chocoPath -PathType Leaf) {
         Write-Host 'Winget ist nicht installiert; prüfe mit Windows PowerShell 5.1 Chocolatey auf ein PowerShell-7-Update ...'
