@@ -1489,6 +1489,43 @@ if ($ServerADList -ne $null) {
               if ($deferredCategories.Count -gt 0) { "Kategorien: $($deferredCategories -join ', ')" }
             ) -join '; '
             $deferredSelectionHtml = [System.Net.WebUtility]::HtmlEncode($deferredSelection)
+            # Zusätzlich zur konfigurierten Auswahl die konkret erkannten Updates nennen.
+            $deferredUpdateDescriptions = @(
+              foreach ($deferredUpdate in @($deferredCheck.Updates)) {
+                if ($null -eq $deferredUpdate) { continue }
+                $updateKB = ''
+                foreach ($propertyName in @('KB', 'KBArticleID', 'KBArticleIDs')) {
+                  $updateProperty = $deferredUpdate.PSObject.Properties[$propertyName]
+                  if ($updateProperty -and -not [string]::IsNullOrWhiteSpace([string]$updateProperty.Value)) {
+                    $updateKB = [string]$updateProperty.Value
+                    break
+                  }
+                }
+                if (-not [string]::IsNullOrWhiteSpace($updateKB)) {
+                  $updateKB = (@(($updateKB -split ',\s*') | ForEach-Object { $articleId = $_.Trim(); if ($articleId -match '^KB') { $articleId } else { "KB$articleId" } }) -join ', ')
+                }
+                $updateTitle = ''
+                foreach ($propertyName in @('Title', 'UpdateTitle', 'Name')) {
+                  $updateProperty = $deferredUpdate.PSObject.Properties[$propertyName]
+                  if ($updateProperty -and -not [string]::IsNullOrWhiteSpace([string]$updateProperty.Value)) {
+                    $updateTitle = [string]$updateProperty.Value
+                    break
+                  }
+                }
+                if (-not [string]::IsNullOrWhiteSpace($updateKB) -and -not [string]::IsNullOrWhiteSpace($updateTitle)) {
+                  "$updateKB`: $updateTitle"
+                } elseif (-not [string]::IsNullOrWhiteSpace($updateTitle)) {
+                  $updateTitle
+                } elseif (-not [string]::IsNullOrWhiteSpace($updateKB)) {
+                  $updateKB
+                }
+              }
+            ) | Sort-Object -Unique
+            $deferredUpdatesHtml = if ($deferredUpdateDescriptions.Count -gt 0) {
+              '<br><strong>Konkrete Updates:</strong><ul>' + (($deferredUpdateDescriptions | ForEach-Object { '<li>' + [System.Net.WebUtility]::HtmlEncode($_) + '</li>' }) -join '') + '</ul>'
+            } else {
+              '<br><strong>Konkrete Updates:</strong> Die Update-Suche hat keine KB-Nummer und keinen Titel zurückgegeben.'
+            }
             $deferredDelayText = "Die Installation startet nach einem erkannten Neustart frühestens nach $deferredDelayMinutes Minute(n)."
             if ($deferredScheduledAt -gt [datetime]::MinValue) {
               $deferredPlanText = "Nachinstallation eingeplant: ab Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' }))). $deferredDelayText"
@@ -1496,7 +1533,7 @@ if ($ServerADList -ne $null) {
               $deferredPlanText = "Nachinstallation eingeplant: beim nächsten Neustart. $deferredDelayText"
             }
             $deferredPlanHtml = [System.Net.WebUtility]::HtmlEncode($deferredPlanText)
-            $RepBody += "<div class='warning-box'><strong>$deferredPlanHtml</strong><br>Zurückgestellt: $deferredSelectionHtml</div>"
+            $RepBody += "<div class='warning-box'><strong>$deferredPlanHtml</strong><br>Zurückgestellt: $deferredSelectionHtml$deferredUpdatesHtml</div>"
           }
           elseif ($deferredCheck.Success) {
             Remove-DeferredUpdateTask -Servername $Servername -AuthInfo $svcCredential
