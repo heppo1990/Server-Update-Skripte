@@ -360,6 +360,7 @@ function Get-DeferredWindowsUpdates {
       # liefern je nach PSWindowsUpdate-Version unterschiedlich serialisierte
       # Objekte. Ohne diese Normalisierung gehen KB und Titel im Bericht verloren.
       $unresolvedUpdateCount = 0
+      $unresolvedDiagnostics = @()
       $pendingUpdates = [System.Collections.Generic.Queue[object]]::new()
       foreach ($update in $updates) { if ($null -ne $update) { $pendingUpdates.Enqueue($update) } }
       while ($pendingUpdates.Count -gt 0) {
@@ -400,6 +401,9 @@ function Get-DeferredWindowsUpdates {
             foreach ($nestedUpdate in $update) { if ($null -ne $nestedUpdate) { $pendingUpdates.Enqueue($nestedUpdate); $nestedCount++ } }
             if ($nestedCount -gt 0) { continue }
           }
+          $propertyNames = @($update.PSObject.Properties | ForEach-Object { $_.Name }) -join ', '
+          $typeName = if ($null -ne $update -and $update.GetType()) { $update.GetType().FullName } else { '<unbekannt>' }
+          $unresolvedDiagnostics += "Typ=$typeName; Eigenschaften=[$propertyNames]"
           $unresolvedUpdateCount++
           continue
         }
@@ -411,7 +415,11 @@ function Get-DeferredWindowsUpdates {
         [PSCustomObject]@{ ComputerName = $computerValue; Status = $statusValue; KB = $kbValue; Size = $sizeValue; Title = $titleValue }
       }
       if ($unresolvedUpdateCount -gt 0) {
-        [PSCustomObject]@{ MetadataMissing = $true; UnresolvedCount = $unresolvedUpdateCount }
+        [PSCustomObject]@{
+          MetadataMissing = $true
+          UnresolvedCount = $unresolvedUpdateCount
+          Diagnostic = (@($unresolvedDiagnostics | Sort-Object -Unique) -join ' | ')
+        }
       }
     }
 
@@ -448,6 +456,11 @@ function Get-DeferredWindowsUpdates {
     if ($unresolved.Count -gt 0) {
       $missingCount = [int](@($unresolved | Measure-Object -Property UnresolvedCount -Sum).Sum)
       $errorMessage = "$missingCount Update-Ergebnis(se) ließen sich nicht in KB/Titel/Größe auflösen."
+      $diagnosticMessages = @($unresolved | ForEach-Object {
+        $diagnosticProperty = $_.PSObject.Properties['Diagnostic']
+        if ($diagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticProperty.Value)) { [string]$diagnosticProperty.Value }
+      } | Sort-Object -Unique)
+      if ($diagnosticMessages.Count -gt 0) { $errorMessage += " Rückgabe: $($diagnosticMessages -join ' | ')." }
       Write-ScriptLog "WARNUNG: $errorMessage"
       return [PSCustomObject]@{ Success = $false; Updates = $validUpdates; Error = $errorMessage }
     }
