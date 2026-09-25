@@ -423,9 +423,10 @@ try {
     else {
         $wuParams = @{}
         switch ($config.Mode) {
-            # Der reine Check fragt nur ab; AcceptAll und IgnoreReboot
-            # gehören in die Download-/Installationspfade, nicht in die Suche.
-            'Check'    { }
+            # AcceptAll bestätigt nur etwaige Rückfragen. Es löst weder einen
+            # Download noch eine Installation aus und verhindert leere
+            # Ergebnisse der nichtinteraktiven SYSTEM-Suche auf älteren Servern.
+            'Check'    { $wuParams.AcceptAll = $true }
             'Download' { $wuParams.AcceptAll = $true; $wuParams.Download = $true }
             'Install'  { $wuParams.AcceptAll = $true; $wuParams.Install = $true; $wuParams.IgnoreReboot = $true }
         }
