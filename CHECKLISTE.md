@@ -10,4 +10,4 @@
 
 ## Konkrete Updates in der Nachinstallationsplanung
 
-- [ ] Zurückgestellte Updates in der Nachinstallationsplanung und im Installationsbericht im selben Tabellenformat wie in Check-, Download- und Installationsskript anzeigen (`ComputerName`, `Status`, `KB`, `Size`, `Title`). Die aktuelle Rückmeldung „1 zurückgestellte Updates gefunden“ ohne Update-Zeile reicht nicht; die Metadaten müssen auch bei der Remote-Abfrage zuverlässig bis in die Darstellung übernommen werden.
+- [x] Zurückgestellte Updates in der Nachinstallationsplanung und im Installationsbericht im selben Tabellenformat wie in Check-, Download- und Installationsskript anzeigen (`ComputerName`, `Status`, `KB`, `Size`, `Title`). Kategorien werden einzeln aufgelöst; doppelte Update-Zeilen werden in Tabelle und Anzahl zusammengeführt.

@@ -878,7 +878,26 @@ try {
   }
   if (-not `$waitForReboot) {
     Import-Module PSWindowsUpdate -ErrorAction Stop
-    `$categories = @('$categories' | ConvertFrom-Json | Where-Object { -not [string]::IsNullOrWhiteSpace([string]`$_) })
+    # ConvertFrom-Json kann Arrays je nach PowerShell-Version verschachtelt
+    # zurückgeben. Kategorien rekursiv in einzelne Zeichenfolgen auflösen.
+    function Add-DeferredCategoryValue {
+      param(`$Value, [System.Collections.Generic.List[string]]`$Target)
+      if (`$null -eq `$Value) { return }
+      if (`$Value -is [string]) {
+        if (-not [string]::IsNullOrWhiteSpace(`$Value)) { `$Target.Add(`$Value.Trim()) }
+        return
+      }
+      if (`$Value -is [System.Collections.IEnumerable]) {
+        foreach (`$item in `$Value) { Add-DeferredCategoryValue -Value `$item -Target `$Target }
+        return
+      }
+      `$text = [string]`$Value
+      if (-not [string]::IsNullOrWhiteSpace(`$text)) { `$Target.Add(`$text.Trim()) }
+    }
+    `$parsedCategories = ConvertFrom-Json -InputObject '$categories'
+    `$categoryValues = New-Object 'System.Collections.Generic.List[string]'
+    Add-DeferredCategoryValue -Value `$parsedCategories -Target `$categoryValues
+    `$categories = `$categoryValues.ToArray()
     `$deferredKBs = @('$deferredKBsJson' | ConvertFrom-Json | Where-Object { -not [string]::IsNullOrWhiteSpace([string]`$_) })
     `$results = @()
     `$selectionParts = @()
@@ -892,14 +911,49 @@ try {
       `$selectionParts += "Kategorien: `$(`$categories -join ', ')"
       foreach (`$category in `$categories) { `$results += @(Get-WindowsUpdate -Category `$category -AcceptAll -Install -IgnoreReboot) }
     }
+    # Ein Update kann mehreren ausgewählten Kategorien zugeordnet sein.
+    # Doppelte Rückgabeobjekte dürfen weder mehrfach in der Mail erscheinen
+    # noch die angezeigte Installationsanzahl erhöhen.
+    `$seenUpdateKeys = @{}
+    `$results = @(`$results | Where-Object {
+      `$updateKB = [string]`$_.KB
+      `$updateTitle = [string]`$_.Title
+      `$updateID = [string]`$_.UpdateID
+      if ([string]::IsNullOrWhiteSpace(`$updateKB) -and [string]::IsNullOrWhiteSpace(`$updateTitle) -and [string]::IsNullOrWhiteSpace(`$updateID)) { `$false; return }
+      `$updateKey = if (-not [string]::IsNullOrWhiteSpace(`$updateKB) -or -not [string]::IsNullOrWhiteSpace(`$updateTitle)) { `$updateKB + '|' + `$updateTitle } else { `$updateID }
+      if (`$seenUpdateKeys.ContainsKey(`$updateKey)) { `$false }
+      else { `$seenUpdateKeys[`$updateKey] = `$true; `$true }
+    })
     `$selection = `$selectionParts -join '; '
-    `$rows = foreach (`$result in @(`$results)) {
-      `$kb = [System.Net.WebUtility]::HtmlEncode([string]`$result.KB)
-      `$title = [System.Net.WebUtility]::HtmlEncode([string]`$result.Title)
-      `$status = [System.Net.WebUtility]::HtmlEncode([string]`$result.Status)
-      "<tr><td>`$env:COMPUTERNAME</td><td>`$status</td><td>`$kb</td><td>`$title</td></tr>"
+    function Get-DeferredUpdateField {
+      param([object]`$Update, [string[]]`$Names)
+      foreach (`$name in `$Names) {
+        `$property = `$Update.PSObject.Properties[`$name]
+        if (`$null -eq `$property -or `$null -eq `$property.Value) { continue }
+        `$value = `$property.Value
+        if (`$value -is [array]) { `$value = @(`$value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]`$_) }) -join ', ' }
+        if (-not [string]::IsNullOrWhiteSpace([string]`$value)) { return [string]`$value }
+      }
+      return ''
     }
-    if (-not `$rows) { `$rows = '<tr><td colspan="4">Keine zurückgestellten Updates waren mehr verfügbar.</td></tr>' }
+    `$rows = foreach (`$result in @(`$results)) {
+      `$computerValue = Get-DeferredUpdateField -Update `$result -Names @('ComputerName', 'PSComputerName')
+      if ([string]::IsNullOrWhiteSpace(`$computerValue)) { `$computerValue = [string]`$env:COMPUTERNAME }
+      `$statusValue = Get-DeferredUpdateField -Update `$result -Names @('Status', 'Result', 'UpdateStatus')
+      `$kbValue = Get-DeferredUpdateField -Update `$result -Names @('KB', 'KBArticleID', 'KBArticleIDs')
+      if (-not [string]::IsNullOrWhiteSpace(`$kbValue)) {
+        `$kbValue = (@(([string]`$kbValue -split ',\s*') | ForEach-Object { if (`$_ -match '^KB') { `$_ } else { "KB`$_" } }) -join ', ')
+      }
+      `$sizeValue = Get-DeferredUpdateField -Update `$result -Names @('Size', 'MaxDownloadSize')
+      `$titleValue = Get-DeferredUpdateField -Update `$result -Names @('Title', 'UpdateTitle', 'Name')
+      `$computerName = [System.Net.WebUtility]::HtmlEncode(`$computerValue)
+      `$status = [System.Net.WebUtility]::HtmlEncode(`$statusValue)
+      `$kb = [System.Net.WebUtility]::HtmlEncode(`$kbValue)
+      `$size = [System.Net.WebUtility]::HtmlEncode(`$sizeValue)
+      `$title = [System.Net.WebUtility]::HtmlEncode(`$titleValue)
+      "<tr><td>`$computerName</td><td>`$status</td><td>`$kb</td><td>`$size</td><td>`$title</td></tr>"
+    }
+    if (-not `$rows) { `$rows = '<tr><td colspan="5">Keine zurückgestellten Updates waren mehr verfügbar.</td></tr>' }
     `$safeSelection = [System.Net.WebUtility]::HtmlEncode(`$selection)
     `$body = @'
 <!DOCTYPE html>
@@ -917,7 +971,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
 <h1>Nachinstallation – Server Updates</h1>
 <div class="info-box"><p><strong>Computer:</strong> {{computer}}</p><p><strong>Zeitpunkt:</strong> {{date}}</p><p><strong>Auswahl:</strong> {{selection}}</p></div>
 <div class="section-title">Nachinstallierte Windows-Updates</div>
-<table><tr><th>Computername</th><th>Status</th><th>KB</th><th>Titel</th></tr>{{rows}}</table>
+<table><tr><th>ComputerName</th><th>Status</th><th>KB</th><th>Size</th><th>Title</th></tr>{{rows}}</table>
 <div class="summary"><strong>Ergebnis:</strong> Die Nachinstallation wurde abgeschlossen. Installierte Updates: {{count}}.</div>
 </body></html>
 '@
@@ -927,7 +981,8 @@ tr:nth-child(even) { background-color: #f9f9f9; }
       `$mailSent = `$false
       for (`$attempt = 1; `$attempt -le 3 -and -not `$mailSent; `$attempt++) {
         try {
-          Write-DeferredLog "Sende Abschluss-E-Mail (Versuch `$attempt/3) an `$mail.MailTo über `$mail.Host:`$(`$mail.Port)."
+          # Nur Empfänger und SMTP-Host protokollieren, niemals das MailSettings-Objekt.
+          Write-DeferredLog "Sende Abschluss-E-Mail (Versuch `$attempt/3) an `$(`$mail.MailTo) über `$(`$mail.Host):`$(`$mail.Port)."
           `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port)
           `$smtp.EnableSsl = [bool]`$mail.UseSSL
           if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
