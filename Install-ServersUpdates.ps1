@@ -648,7 +648,7 @@ try {
   if (-not `$workerSucceeded) { throw 'Der Worker wurde mit einem PowerShell-Fehler beendet; Details stehen in diesem Protokoll.' }
   "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  Worker-Aufruf beendet." | Add-Content -LiteralPath `$taskLogPath -Encoding UTF8
 } catch {
-  "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  FEHLER im Task-Starthelfer: `$($_ | Out-String)" | Add-Content -LiteralPath `$taskLogPath -Encoding UTF8
+  "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  FEHLER im Task-Starthelfer: `$(`$_ | Out-String)" | Add-Content -LiteralPath `$taskLogPath -Encoding UTF8
   exit 1
 }
 "@
