@@ -199,6 +199,8 @@ Aufruf:
 
 Installiert Windows-Updates sowie verfügbare Chocolatey- und Winget-Updates. Die Winget-Ausgabe nennt zunächst die gefundenen Pakete und danach den Installationsfortschritt.
 
+Der Installationsbericht trennt installierte Updates von für die Nachinstallation eingeplanten Updates. Die geplanten Updates werden je Server in einer Tabelle mit ComputerName, Status, KB, Size und Title aufgeführt. Ein geplanter Deferred-Update-Lauf wird nicht als „System auf dem neuesten Stand“ gemeldet.
+
 Neustart-Ablauf:
 
 1. Nach Windows-Updates wird mit `Get-WURebootStatus -Silent` geprüft, ob ein Neustart erforderlich ist.

@@ -359,13 +359,17 @@ function Get-DeferredWindowsUpdates {
       # Eigenschaften vor dem Remoting vereinheitlichen: JEA und PS-Remoting
       # liefern je nach PSWindowsUpdate-Version unterschiedlich serialisierte
       # Objekte. Ohne diese Normalisierung gehen KB und Titel im Bericht verloren.
-      foreach ($update in $updates) {
+      $unresolvedUpdateCount = 0
+      $pendingUpdates = [System.Collections.Generic.Queue[object]]::new()
+      foreach ($update in $updates) { if ($null -ne $update) { $pendingUpdates.Enqueue($update) } }
+      while ($pendingUpdates.Count -gt 0) {
+        $update = $pendingUpdates.Dequeue()
         if ($null -eq $update) { continue }
         $kbValue = ''
         foreach ($propertyName in @('KB', 'KBArticleID', 'KBArticleIDs')) {
           $property = $update.PSObject.Properties[$propertyName]
           if ($property -and $null -ne $property.Value -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-            $kbValue = [string]$property.Value
+            $kbValue = if ($property.Value -is [array]) { @($property.Value) -join ', ' } else { [string]$property.Value }
             break
           }
         }
@@ -380,7 +384,34 @@ function Get-DeferredWindowsUpdates {
             break
           }
         }
-        [PSCustomObject]@{ KB = $kbValue; Title = $titleValue }
+        $sizeValue = ''
+        foreach ($propertyName in @('Size', 'MaxDownloadSize')) {
+          $property = $update.PSObject.Properties[$propertyName]
+          if ($property -and $null -ne $property.Value -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) { $sizeValue = [string]$property.Value; break }
+        }
+        $statusValue = ''
+        foreach ($propertyName in @('Status', 'Result', 'UpdateStatus')) {
+          $property = $update.PSObject.Properties[$propertyName]
+          if ($property -and $null -ne $property.Value -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) { $statusValue = [string]$property.Value; break }
+        }
+        if ([string]::IsNullOrWhiteSpace($kbValue) -and [string]::IsNullOrWhiteSpace($titleValue) -and [string]::IsNullOrWhiteSpace($sizeValue)) {
+          if ($update -is [System.Collections.IEnumerable] -and $update -isnot [string]) {
+            $nestedCount = 0
+            foreach ($nestedUpdate in $update) { if ($null -ne $nestedUpdate) { $pendingUpdates.Enqueue($nestedUpdate); $nestedCount++ } }
+            if ($nestedCount -gt 0) { continue }
+          }
+          $unresolvedUpdateCount++
+          continue
+        }
+        $computerValue = foreach ($propertyName in @('ComputerName', 'PSComputerName')) {
+          $property = $update.PSObject.Properties[$propertyName]
+          if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) { [string]$property.Value; break }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$computerValue)) { $computerValue = $env:COMPUTERNAME }
+        [PSCustomObject]@{ ComputerName = $computerValue; Status = $statusValue; KB = $kbValue; Size = $sizeValue; Title = $titleValue }
+      }
+      if ($unresolvedUpdateCount -gt 0) {
+        [PSCustomObject]@{ MetadataMissing = $true; UnresolvedCount = $unresolvedUpdateCount }
       }
     }
 
@@ -401,7 +432,15 @@ function Get-DeferredWindowsUpdates {
         $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "Prüfung zurückgestellter Updates auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params })
       }
     }
-    return [PSCustomObject]@{ Success = $true; Updates = @($updates | Sort-Object KB, ComputerName -Unique); Error = '' }
+    $unresolved = @($updates | Where-Object { $_ -and $_.MetadataMissing })
+    $validUpdates = @($updates | Where-Object { $_ -and -not $_.MetadataMissing -and ($_.KB -or $_.Title -or $_.Size) } | Sort-Object KB, Title -Unique)
+    if ($unresolved.Count -gt 0) {
+      $missingCount = [int](@($unresolved | Measure-Object -Property UnresolvedCount -Sum).Sum)
+      $errorMessage = "$missingCount Update-Ergebnis(se) ließen sich nicht in KB/Titel/Größe auflösen."
+      Write-ScriptLog "WARNUNG: $errorMessage"
+      return [PSCustomObject]@{ Success = $false; Updates = $validUpdates; Error = $errorMessage }
+    }
+    return [PSCustomObject]@{ Success = $true; Updates = $validUpdates; Error = '' }
   }
   catch {
     Write-ScriptLog "WARNUNG: Zurückgestellte Updates auf $Servername konnten nicht geprüft werden: $($_.Exception.Message)"
@@ -1458,6 +1497,7 @@ $RepBody = @"
 $ErrorCount = 0
 $WindowsAdCount = 0
 $WindowsNonAdCount = 0
+$DeferredUpdatesPlanned = 0
 
 if ($ServerADList -ne $null) {
   Write-ScriptLog "Verarbeite AD-Serverliste..."
@@ -1573,6 +1613,7 @@ if ($ServerADList -ne $null) {
             } else {
               Write-ScriptLog "WARNUNG: Für $Servername ist kein Wartungszeitpunkt konfiguriert; Nachinstallation wartet auf den nächsten Neustart."
             }
+            $DeferredUpdatesPlanned += @($deferredCheck.Updates).Count
             Register-DeferredUpdateTask `
               -Servername          $Servername `
               -DeferredCategories  $deferredCategories `
@@ -1589,46 +1630,18 @@ if ($ServerADList -ne $null) {
               if ($deferredCategories.Count -gt 0) { "Kategorien: $($deferredCategories -join ', ')" }
             ) -join '; '
             $deferredSelectionHtml = [System.Net.WebUtility]::HtmlEncode($deferredSelection)
-            # Zusätzlich zur konfigurierten Auswahl die konkret erkannten Updates nennen.
-            $deferredUpdateDescriptions = @(
-              foreach ($deferredUpdate in @($deferredCheck.Updates)) {
-                if ($null -eq $deferredUpdate) { continue }
-                $updateKB = ''
-                foreach ($propertyName in @('KB', 'KBArticleID', 'KBArticleIDs')) {
-                  $updateProperty = $deferredUpdate.PSObject.Properties[$propertyName]
-                  if ($updateProperty -and -not [string]::IsNullOrWhiteSpace([string]$updateProperty.Value)) {
-                    $updateKB = [string]$updateProperty.Value
-                    break
-                  }
-                }
-                if (-not [string]::IsNullOrWhiteSpace($updateKB)) {
-                  $updateKB = (@(($updateKB -split ',\s*') | ForEach-Object { $articleId = $_.Trim(); if ($articleId -match '^KB') { $articleId } else { "KB$articleId" } }) -join ', ')
-                }
-                $updateTitle = ''
-                foreach ($propertyName in @('Title', 'UpdateTitle', 'Name')) {
-                  $updateProperty = $deferredUpdate.PSObject.Properties[$propertyName]
-                  if ($updateProperty -and -not [string]::IsNullOrWhiteSpace([string]$updateProperty.Value)) {
-                    $updateTitle = [string]$updateProperty.Value
-                    break
-                  }
-                }
-                if (-not [string]::IsNullOrWhiteSpace($updateKB) -and -not [string]::IsNullOrWhiteSpace($updateTitle)) {
-                  "$updateKB`: $updateTitle"
-                } elseif (-not [string]::IsNullOrWhiteSpace($updateTitle)) {
-                  $updateTitle
-                } elseif (-not [string]::IsNullOrWhiteSpace($updateKB)) {
-                  $updateKB
-                }
+            # Wie in den übrigen Update-Berichten die konkreten Felder tabellarisch anzeigen.
+            $deferredUpdatesHtml = "<br><strong>Für die Nachinstallation vorgesehene Updates:</strong><table><tr><th>ComputerName</th><th>Status</th><th>KB</th><th>Size</th><th>Title</th></tr>"
+            foreach ($deferredUpdate in @($deferredCheck.Updates)) {
+              $deferredUpdatesHtml += '<tr>'
+              foreach ($fieldName in @('ComputerName', 'Status', 'KB', 'Size', 'Title')) {
+                $property = $deferredUpdate.PSObject.Properties[$fieldName]
+                $fieldValue = if ($property) { [string]$property.Value } else { '' }
+                $deferredUpdatesHtml += '<td>' + [System.Net.WebUtility]::HtmlEncode($fieldValue) + '</td>'
               }
-            )
-            # Sort-Object gibt bei genau einem Treffer einen Skalar zurück;
-            # die erneute Array-Klammerung hält Count auch unter StrictMode verfügbar.
-            $deferredUpdateDescriptions = @($deferredUpdateDescriptions | Sort-Object -Unique)
-            $deferredUpdatesHtml = if ($deferredUpdateDescriptions.Count -gt 0) {
-              '<br><strong>Konkrete Updates:</strong><ul>' + (($deferredUpdateDescriptions | ForEach-Object { '<li>' + [System.Net.WebUtility]::HtmlEncode($_) + '</li>' }) -join '') + '</ul>'
-            } else {
-              '<br><strong>Konkrete Updates:</strong> ' + @($deferredCheck.Updates).Count + ' zurückgestellte Updates gefunden; das Zielsystem hat dazu keine KB-Nummer und keinen Titel geliefert.'
+              $deferredUpdatesHtml += '</tr>'
             }
+            $deferredUpdatesHtml += '</table>'
             $deferredReadinessText = 'Nach einem Neustart startet die Installation, sobald Windows Update antwortet und das Wartungsfenster offen ist.'
             if ($deferredScheduledAt -gt [datetime]::MinValue) {
               $deferredPlanText = "Nachinstallation eingeplant: ab Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' }))). $deferredReadinessText"
@@ -1643,6 +1656,8 @@ if ($ServerADList -ne $null) {
           }
           else {
             Write-ScriptLog "WARNUNG: Nachinstallationsaufgabe auf $Servername wird wegen fehlgeschlagener Update-Prüfung nicht verändert."
+            $deferredErrorHtml = [System.Net.WebUtility]::HtmlEncode([string]$deferredCheck.Error)
+            $RepBody += "<div class='warning-box'><strong>Nachinstallationsprüfung auf $([System.Net.WebUtility]::HtmlEncode([string]$Servername)) fehlgeschlagen.</strong><br>$deferredErrorHtml</div>"
           }
         }
         else {
@@ -1842,7 +1857,14 @@ $TotalServerCount = $Anzahl + $LinuxServerCount + $HAServerCount
 $TotalUpdatesInstalled = $UpdCount + $PackageUpdateCount + $LinuxUpdatesInstalled + $HAUpdatesInstalled
 $TotalUpdatesFailed = $ErrorCount + $LinuxUpdatesFailed + $HAUpdatesFailed
 
-if ($TotalUpdatesInstalled -eq 0) {
+if ($TotalUpdatesInstalled -eq 0 -and $DeferredUpdatesPlanned -gt 0) {
+  $RepBody += @"
+<div class="summary warning">
+    <p><strong>✅ Im Hauptlauf wurden keine Updates installiert.</strong></p>
+    <p>$DeferredUpdatesPlanned zurückgestellte Update(s) sind zur Nachinstallation eingeplant.</p>
+</div>
+"@
+} elseif ($TotalUpdatesInstalled -eq 0) {
   $RepBody += @"
 <div class="summary success">
     <p><strong>✅ Ergebnis: Es wurden KEINE Updates installiert!</strong></p>
@@ -1888,6 +1910,7 @@ $RepBody += @"
 if ($PackageUpdateCount -gt 0) {
   $RepBody += "        <li>Anwendungsupdates: $PackageUpdateCount (Winget: $WingetUpdateCount, Chocolatey: $ChocolateyUpdateCount)</li>`n"
 }
+$RepBody += "        <li>Für die Nachinstallation eingeplant: $DeferredUpdatesPlanned</li>`n"
 if ($LinuxScriptExecuted) {
   $RepBody += "        <li>Linux-Updates: $LinuxUpdatesInstalled</li>`n"
 }
