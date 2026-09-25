@@ -801,12 +801,19 @@ if ($ServerADList -ne $null) {
 # Linux- und Home-Assistant-Checks laufen ausschließlich lesend in ihren
 # jeweiligen Skripten. Ihre Ergebnisdateien werden in den gemeinsamen Bericht
 # übernommen, ohne Paketinstallation, Backup oder Neustart auszulösen.
+$linuxCheckStatsPath = Join-Path $PSScriptRoot 'linux_update_check_stats.json'
+$haCheckStatsPath = Join-Path $PSScriptRoot 'ha_update_check_stats.json'
+# Reste eines abgebrochenen vorherigen Laufs dürfen nicht in den neuen Bericht
+# einfließen. Die Dateien sind nur ein temporärer Übergabekanal.
+foreach ($staleStatsPath in @($linuxCheckStatsPath, $haCheckStatsPath)) {
+  Remove-Item -LiteralPath $staleStatsPath -Force -ErrorAction SilentlyContinue
+}
+
 $linuxCheckScript = Join-Path $PSScriptRoot 'Install-Linux Updates.ps1'
 if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
   try {
     Write-ScriptLog 'Starte Linux-Update-Check...'
     & $linuxCheckScript -CheckOnly
-    $linuxCheckStatsPath = Join-Path $PSScriptRoot 'linux_update_check_stats.json'
     if (Test-Path -LiteralPath $linuxCheckStatsPath) {
       $linuxCheckStats = Get-Content -LiteralPath $linuxCheckStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $LinuxCheckExecuted = $true
@@ -826,13 +833,16 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
           $RepBody += "<div class='no-updates'>Keine Linux-Updates verfügbar.</div>"
         }
       }
-      Write-ScriptLog "Linux-Check: $LinuxUpdateCount Paketupdate(s) verfügbar, $LinuxCheckErrors Fehler."
     }
+    Write-ScriptLog "Linux-Check: $LinuxUpdateCount Paketupdate(s) verfügbar, $LinuxCheckErrors Fehler."
   }
   catch {
     $LinuxCheckErrors++
     Write-ScriptLog "WARNUNG: Linux-Check konnte nicht ausgeführt werden: $($_.Exception.Message)"
     $RepBody += "<div class='error-box'>Linux-Check fehlgeschlagen: $([System.Net.WebUtility]::HtmlEncode($_.Exception.Message))</div>"
+  }
+  finally {
+    Remove-Item -LiteralPath $linuxCheckStatsPath -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -841,7 +851,6 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   try {
     Write-ScriptLog 'Starte Home-Assistant-Update-Check...'
     & $haCheckScript -CheckOnly
-    $haCheckStatsPath = Join-Path $PSScriptRoot 'ha_update_check_stats.json'
     if (Test-Path -LiteralPath $haCheckStatsPath) {
       $haCheckStats = Get-Content -LiteralPath $haCheckStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $HACheckExecuted = $true
@@ -859,13 +868,16 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
         $details = @($haCheckStats.UpdateDetails | ForEach-Object { "{0}: {1} → {2}" -f $_.Component, $_.Current, $_.Available })
         $RepBody += "<div class='info-box'><strong>$HAUpdateCount Update(s) verfügbar:</strong><br>$([System.Net.WebUtility]::HtmlEncode(($details -join "`n")) -replace "`n", '<br>')</div>"
       }
-      Write-ScriptLog "Home-Assistant-Check: $HAUpdateCount Update(s) verfügbar, $HACheckErrors Fehler."
     }
+    Write-ScriptLog "Home-Assistant-Check: $HAUpdateCount Update(s) verfügbar, $HACheckErrors Fehler."
   }
   catch {
     $HACheckErrors++
     Write-ScriptLog "WARNUNG: Home-Assistant-Check konnte nicht ausgeführt werden: $($_.Exception.Message)"
     $RepBody += "<div class='error-box'>Home-Assistant-Check fehlgeschlagen: $([System.Net.WebUtility]::HtmlEncode($_.Exception.Message))</div>"
+  }
+  finally {
+    Remove-Item -LiteralPath $haCheckStatsPath -Force -ErrorAction SilentlyContinue
   }
 }
 

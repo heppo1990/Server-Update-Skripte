@@ -408,12 +408,19 @@ if ($ServerADList -ne $null) {
 # Linux und Home Assistant besitzen keinen getrennten Download-Cache. Der
 # Download-Lauf führt deshalb nur die gemeinsame Ersteinrichtung aus, sofern
 # nötig, und ermittelt anschließend ausschließlich lesend verfügbare Updates.
+$linuxStatsPath = Join-Path $PSScriptRoot 'linux_update_check_stats.json'
+$haStatsPath = Join-Path $PSScriptRoot 'ha_update_check_stats.json'
+# Alte Ergebnisse eines abgebrochenen Laufs nicht weiterverwenden; beide
+# Dateien dienen nur als temporärer Übergabekanal der CheckOnly-Aufrufe.
+foreach ($staleStatsPath in @($linuxStatsPath, $haStatsPath)) {
+  Remove-Item -LiteralPath $staleStatsPath -Force -ErrorAction SilentlyContinue
+}
+
 $linuxCheckScript = Join-Path $PSScriptRoot 'Install-Linux Updates.ps1'
 if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
   try {
     Write-ScriptLog 'Linux: Kein separater Paketdownload verfügbar – prüfe Einrichtung und verfügbare Updates.'
     & $linuxCheckScript -CheckOnly
-    $linuxStatsPath = Join-Path $PSScriptRoot 'linux_update_check_stats.json'
     if (Test-Path -LiteralPath $linuxStatsPath) {
       $linuxStats = Get-Content -LiteralPath $linuxStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $LinuxAvailableUpdateCount = [int]$linuxStats.UpdatesInstalled
@@ -426,6 +433,9 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
     Write-ScriptLog "WARNUNG: Linux-Prüfung im Download-Lauf fehlgeschlagen: $($_.Exception.Message)"
     $RepBody += "<div class='warning-box'>Linux-Prüfung fehlgeschlagen. Details im Log.</div>"
   }
+  finally {
+    Remove-Item -LiteralPath $linuxStatsPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 $haCheckScript = Join-Path $PSScriptRoot 'Install-HomeAssistant Updates.ps1'
@@ -433,7 +443,6 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   try {
     Write-ScriptLog 'Home Assistant: Kein separater Paketdownload verfügbar – prüfe Einrichtung und verfügbare Updates.'
     & $haCheckScript -CheckOnly
-    $haStatsPath = Join-Path $PSScriptRoot 'ha_update_check_stats.json'
     if (Test-Path -LiteralPath $haStatsPath) {
       $haStats = Get-Content -LiteralPath $haStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $HAAvailableUpdateCount = [int]$haStats.AvailableUpdates
@@ -445,6 +454,9 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   catch {
     Write-ScriptLog "WARNUNG: Home-Assistant-Prüfung im Download-Lauf fehlgeschlagen: $($_.Exception.Message)"
     $RepBody += "<div class='warning-box'>Home-Assistant-Prüfung fehlgeschlagen. Details im Log.</div>"
+  }
+  finally {
+    Remove-Item -LiteralPath $haStatsPath -Force -ErrorAction SilentlyContinue
   }
 }
 
