@@ -415,6 +415,7 @@ function Remove-DeferredUpdateTask {
   $removeTask = {
     param($Name)
     $workerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
+    $runnerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates-TaskRunner.cmd'
     if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
       Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
       $removed = $true
@@ -422,6 +423,7 @@ function Remove-DeferredUpdateTask {
       $removed = $false
     }
     Remove-Item -LiteralPath $workerPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
     return $removed
   }
   if ($Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ComputerFQDN) {
@@ -598,9 +600,8 @@ function Register-StartupRemoteTask {
   )
   # Der Worker wird von powershell.exe (Windows PowerShell 5.1) ausgeführt;
   # seine Syntax muss daher auch mit dem Windows-PowerShell-Parser gültig sein.
-  # Der vollständige Worker ist für -EncodedCommand zu groß (Windows begrenzt
-  # die Prozessbefehlszeile). Er wird geschützt als temporäre Datei abgelegt;
-  # der Task-Aufruf selbst enthält nur noch den kurzen -File-Pfad.
+  # Der vollständige Worker wird geschützt als temporäre Datei abgelegt. Ein
+  # CMD-Starthelfer protokolliert Prozessstart und Fehler vor PowerShell.
   $sb = {
     param($Name, $WorkerScript, $Password, $RunAt)
     if (-not [string]::IsNullOrEmpty($Password)) {
@@ -617,6 +618,7 @@ function Register-StartupRemoteTask {
     } else { $protectedPassword = '' }
     $WorkerScript = $WorkerScript.Replace('__WINDOWSUPDATEADM_DPAPI_MAILPASS__', $protectedPassword)
     $WorkerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
+    $RunnerPath = Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-TaskRunner.cmd'
     New-Item -ItemType Directory -Path (Split-Path -Parent $WorkerPath) -Force | Out-Null
     New-Item -ItemType File -Path $WorkerPath -Force | Out-Null
     # SMTP-Daten im Worker dürfen nur SYSTEM und lokale Administratoren lesen.
@@ -650,8 +652,20 @@ try {
   exit 1
 }
 "@
-    $runnerEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($runnerSource))
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $runnerEncoded"
+    $RunnerLogPath = Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-TaskRunner.log'
+    $runnerSource = @"
+@echo off
+echo [%date% %time%] Taskrunner gestartet.>>"$RunnerLogPath"
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$WorkerPath" >>"$RunnerLogPath" 2>&1
+set "WORKER_EXIT=%ERRORLEVEL%"
+echo [%date% %time%] PowerShell-Worker beendet; Exitcode %WORKER_EXIT%.>>"$RunnerLogPath"
+if "%WORKER_EXIT%"=="2" exit /b 0
+del "%~f0" >nul 2>&1
+exit /b %WORKER_EXIT%
+"@
+    [System.IO.File]::WriteAllText($RunnerPath, $runnerSource, [System.Text.Encoding]::ASCII)
+    Set-Acl -LiteralPath $RunnerPath -AclObject $acl -ErrorAction Stop
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/d /c ""{0}""' -f $RunnerPath) -WorkingDirectory (Split-Path -Parent $WorkerPath)
     # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit und zusätzlich
     # direkt nach dem Systemstart geprüft. So kann die Nachinstallation nach
     # Ablauf der Mindestwartezeit noch im selben offenen Fenster beginnen.
@@ -771,6 +785,7 @@ function Register-DeferredUpdateTask {
   $maintenanceEndBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($MaintenanceEndTime))
   $script = @"
 `$taskName = '$taskName'
+`$workerFailed = `$false
 try {
   `$logDirectory = Join-Path `$env:ProgramData 'WindowsUpdateAdm'
   `$logFile = Join-Path `$logDirectory 'DeferredUpdates.log'
@@ -839,8 +854,13 @@ try {
         `$waitForReboot = `$true
         Write-DeferredLog "Mindestwartezeit läuft bis `$(`$dueLocal.ToString('yyyy-MM-dd HH:mm:ss')) und passt nicht mehr in das offene Wartungsfenster. Nachinstallation wartet auf das nächste Fenster."
       }
+    } elseif (-not `$rebootDetected) {
+      # Ein täglicher Wartungsfenster-Trigger darf ohne erkannten Neustart
+      # keine zurückgestellten Updates installieren.
+      `$waitForReboot = `$true
+      Write-DeferredLog 'Wartungsfenster ist offen, aber seit Aufgabenanlage wurde kein Neustart erkannt. Aufgabe wartet auf Systemstart.'
     } else {
-      Write-DeferredLog 'Wartungsfenster erreicht und Mindestwartezeit erfüllt (oder seit Aufgabenanlage kein Neustart erfolgt). Nachinstallation wird jetzt ausgeführt.'
+      Write-DeferredLog 'Wartungsfenster erreicht und Mindestwartezeit nach Neustart erfüllt. Nachinstallation wird jetzt ausgeführt.'
     }
   } elseif (-not `$rebootDetected) {
     # Ohne Wartungszeit bleibt die Aufgabe bis zum Neustart aktiv.
@@ -937,6 +957,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     }
   }
 } catch {
+  `$workerFailed = `$true
   `$failureMessage = `$_.Exception.Message
   try { Write-DeferredLog "FEHLER: `$failureMessage" } catch { }
   try {
@@ -959,6 +980,11 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
   }
 }
+
+# Exitcodes halten die wiederkehrende Startaufgabe bei Wartephasen am Leben
+# und melden echte Worker-Fehler an den CMD-Starthelfer zurück.
+if (`$workerFailed) { exit 1 }
+if (`$waitForReboot) { exit 2 }
 
 "@
   Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo -At $ScheduledAt -MailPassword $deferredMailPassword
