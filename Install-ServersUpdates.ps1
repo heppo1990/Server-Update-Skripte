@@ -432,8 +432,19 @@ function Get-DeferredWindowsUpdates {
         $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "Prüfung zurückgestellter Updates auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params })
       }
     }
-    $unresolved = @($updates | Where-Object { $_ -and $_.MetadataMissing })
-    $validUpdates = @($updates | Where-Object { $_ -and -not $_.MetadataMissing -and ($_.KB -or $_.Title -or $_.Size) } | Sort-Object KB, Title -Unique)
+    # Normale Updateobjekte besitzen MetadataMissing nicht. Unter StrictMode
+    # darf die optionale Eigenschaft deshalb nur über PSObject.Properties gelesen werden.
+    $unresolved = @($updates | Where-Object {
+      if ($null -eq $_) { return $false }
+      $metadataProperty = $_.PSObject.Properties['MetadataMissing']
+      return ($metadataProperty -and [bool]$metadataProperty.Value)
+    })
+    $validUpdates = @($updates | Where-Object {
+      if ($null -eq $_) { return $false }
+      $metadataProperty = $_.PSObject.Properties['MetadataMissing']
+      $metadataMissing = $metadataProperty -and [bool]$metadataProperty.Value
+      return (-not $metadataMissing -and ($_.KB -or $_.Title -or $_.Size))
+    } | Sort-Object KB, Title -Unique)
     if ($unresolved.Count -gt 0) {
       $missingCount = [int](@($unresolved | Measure-Object -Property UnresolvedCount -Sum).Sum)
       $errorMessage = "$missingCount Update-Ergebnis(se) ließen sich nicht in KB/Titel/Größe auflösen."
