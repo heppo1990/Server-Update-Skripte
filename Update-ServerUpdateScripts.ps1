@@ -163,6 +163,38 @@ function Merge-ServerUpdateJsonProperties {
     }
 }
 
+function Convert-ServerUpdateJsonToDefaultOrder {
+    param([AllowNull()][object]$Value, [AllowNull()][object]$Defaults)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $ordered = [ordered]@{}
+        if ($Defaults -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($defaultProperty in $Defaults.PSObject.Properties) {
+                $valueProperty = $Value.PSObject.Properties[$defaultProperty.Name]
+                if ($null -ne $valueProperty) {
+                    $ordered[$defaultProperty.Name] = Convert-ServerUpdateJsonToDefaultOrder -Value $valueProperty.Value -Defaults $defaultProperty.Value
+                }
+                else {
+                    $ordered[$defaultProperty.Name] = Copy-ServerUpdateJsonValue -Value $defaultProperty.Value
+                }
+            }
+        }
+        foreach ($valueProperty in $Value.PSObject.Properties) {
+            if ($ordered.Contains($valueProperty.Name)) { continue }
+            $ordered[$valueProperty.Name] = Convert-ServerUpdateJsonToDefaultOrder -Value $valueProperty.Value -Defaults $null
+        }
+        return $ordered
+    }
+    if ($Value -is [array]) {
+        $items = @(
+            foreach ($item in $Value) { Convert-ServerUpdateJsonToDefaultOrder -Value $item -Defaults $null }
+        )
+        return ,$items
+    }
+    return $Value
+}
+
 function Remove-ServerUpdateJsonProperty {
     param(
         [Parameter(Mandatory)][object]$Destination,
@@ -196,16 +228,30 @@ function Convert-ServerUpdateLegacySettings {
     $legacySubject = $mail.PSObject.Properties['Subject']
     if (-not $legacySendMail -and -not $legacySubject) { return $migrated }
 
-    # Der Dateiname bestimmt den Berichtstyp der skriptspezifischen Datei.
-    # Eine allgemeine settings.json gilt weiterhin für alle drei Läufe.
+    # Nur SendMail wird anhand des Dateinamens einem Berichtslauf zugeordnet.
+    # Alle übrigen Mailfelder (SMTP, Zugangsdaten, Empfänger usw.) verbleiben
+    # unverändert im gemeinsamen MailSettings-Bereich.
     $actionNames = @()
     $settingsFileName = [IO.Path]::GetFileName($Path)
     if ($settingsFileName -match '(?i)^Check-ServersUpdates') { $actionNames = @('Check') }
     elseif ($settingsFileName -match '(?i)^Download-ServersUpdates') { $actionNames = @('Download') }
     elseif ($settingsFileName -match '(?i)^Install-ServersUpdates') { $actionNames = @('Install') }
-    if ($actionNames.Count -eq 0) { $actionNames = @('Check', 'Download', 'Install') }
+    $isGeneralSettings = $settingsFileName -ieq 'settings.json'
+    if ($isGeneralSettings) { $actionNames = @('Check', 'Download', 'Install') }
+    elseif ($actionNames.Count -eq 0) { $actionNames = @() }
 
-    foreach ($actionName in $actionNames) {
+    # Bei einer skriptspezifischen Datei ohne allgemeine settings.json werden
+    # die anderen Mailberichte ausdrücklich deaktiviert. Gibt es eine allgemeine
+    # Datei, kommen deren Werte für die übrigen Läufe über fileDefaults hinzu.
+    $actionsToInitialize = if ($isGeneralSettings -or (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) 'settings.json') -PathType Leaf)) {
+        $actionNames
+    }
+    elseif ($actionNames.Count -gt 0) {
+        @('Check', 'Download', 'Install')
+    }
+    else { @() }
+
+    foreach ($actionName in $actionsToInitialize) {
         $actionProperty = $mail.PSObject.Properties[$actionName]
         if (-not $actionProperty -or $null -eq $actionProperty.Value) {
             $action = [PSCustomObject]@{}
@@ -215,8 +261,12 @@ function Convert-ServerUpdateLegacySettings {
         }
         if ($actionProperty.Value -isnot [System.Management.Automation.PSCustomObject]) { continue }
 
-        if ($legacySendMail -and -not $actionProperty.Value.PSObject.Properties['SendMail']) {
-            Add-Member -InputObject $actionProperty.Value -NotePropertyName 'SendMail' -NotePropertyValue $legacySendMail.Value
+        if ($legacySendMail -and ($isGeneralSettings -or $actionNames -contains $actionName)) {
+            Add-Member -InputObject $actionProperty.Value -NotePropertyName 'SendMail' -NotePropertyValue $legacySendMail.Value -Force
+            $migrated++
+        }
+        elseif ($legacySendMail -and $actionNames.Count -gt 0 -and -not (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) 'settings.json') -PathType Leaf)) {
+            Add-Member -InputObject $actionProperty.Value -NotePropertyName 'SendMail' -NotePropertyValue $false -Force
             $migrated++
         }
     }
@@ -275,12 +325,16 @@ function Update-ServerUpdateSettingsDefaults {
 
             $legacyMigrationCount = Convert-ServerUpdateLegacySettings -Settings $settings -Path $settingsPath
             $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $fileDefaults
-            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0) { continue }
+            $orderedSettings = Convert-ServerUpdateJsonToDefaultOrder -Value $settings -Defaults $fileDefaults
+            $currentCompactJson = ConvertTo-Json -InputObject $settings -Depth 100 -Compress
+            $orderedCompactJson = ConvertTo-Json -InputObject $orderedSettings -Depth 100 -Compress
+            $orderChanged = $currentCompactJson -cne $orderedCompactJson
+            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
             $backupPath = '{0}.bak.{1}_{2}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $temporaryPath = '{0}.{1}.tmp' -f $settingsPath, [guid]::NewGuid().ToString('N')
-            $updatedJson = ConvertTo-Json -InputObject $settings -Depth 100
+            $updatedJson = ConvertTo-Json -InputObject $orderedSettings -Depth 100
             [System.IO.File]::WriteAllText($temporaryPath, $updatedJson, ([System.Text.UTF8Encoding]::new($false)))
             # Replace erstellt die Sicherung als Teil des atomaren Dateiaustauschs.
             [System.IO.File]::Replace($temporaryPath, $settingsPath, $backupPath)
