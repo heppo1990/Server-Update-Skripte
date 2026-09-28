@@ -730,6 +730,59 @@ function Invoke-WindowsUpdatePackageManagers {
             })
         }
 
+        function Get-WingetSourceResetState {
+            $sourceStateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+                $env:ProgramData
+            } elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+                $env:LOCALAPPDATA
+            } else {
+                $env:USERPROFILE
+            }
+            $sourceStateDirectory = Join-Path $sourceStateRoot 'ServerUpdateSkripte'
+            # Neuer Markername: ältere Skriptstände haben nur die Quelle
+            # winget zurückgesetzt. Deren Zeitmarke darf den ersten vollständigen
+            # Standardquellen-Reset nach diesem Fix nicht unterdrücken.
+            $markerPath = Join-Path $sourceStateDirectory 'WingetDefaultSourcesResetUtc.txt'
+            $allowed = $true
+            try {
+                if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+                    $lastResetUtc = [DateTime]::MinValue
+                    $markerText = Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop
+                    if ([DateTime]::TryParse($markerText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$lastResetUtc) -and
+                        ([DateTime]::UtcNow - $lastResetUtc.ToUniversalTime()).TotalHours -lt 24) {
+                        $allowed = $false
+                    }
+                }
+            }
+            catch {
+                # Ein nicht lesbarer Marker darf eine notwendige Reparatur
+                # nicht verhindern; der Fehler wird beim Speichern protokolliert.
+                $allowed = $true
+            }
+            return [PSCustomObject]@{ Allowed = $allowed; Directory = $sourceStateDirectory; MarkerPath = $markerPath }
+        }
+
+        function Reset-WingetDefaultSources {
+            param([Parameter(Mandatory)][string]$WingetPath)
+            # Entspricht `winget source reset --force`, setzt aber nur die
+            # eingebauten Quellen einzeln zurück und erhält kundeneigene Quellen.
+            foreach ($sourceName in @('msstore', 'winget', 'winget-font')) {
+                $resetOutput = & $WingetPath source reset --name $sourceName --force --disable-interactivity 2>&1 | Out-String
+                $resetExitCode = $LASTEXITCODE
+                if ($resetExitCode -ne 0) {
+                    throw "Zurücksetzen der Standardquelle '$sourceName' fehlgeschlagen (Exitcode $resetExitCode): $($resetOutput.Trim())"
+                }
+            }
+        }
+
+        function Save-WingetSourceResetState {
+            param([Parameter(Mandatory)]$State)
+            if (-not (Test-Path -LiteralPath $State.Directory -PathType Container)) {
+                New-Item -Path $State.Directory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            }
+            [IO.File]::WriteAllText($State.MarkerPath, [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
+        }
+
         function Find-WingetInstallScript {
             $command = Get-Command winget-install.ps1 -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
@@ -880,6 +933,7 @@ catch {
                     Test-WingetSourceFailureLine -Line ([string]$_)
                 })
                 $wingetSourceRefreshOutput = ''
+                $sourceResetPerformed = $false
                 if ($sourceFailureLines.Count -gt 0) {
                     # WinGet kann bei veraltetem oder kurzfristig nicht erreichbarem
                     # Quellcache eine Fehlermeldung ausgeben, obwohl die Quelle danach
@@ -897,87 +951,59 @@ catch {
                     else {
                         $sourceFailureLines += "Aktualisieren der WinGet-Quelle winget fehlgeschlagen (ExitCode $sourceRefreshExitCode): $($wingetSourceRefreshOutput.Trim())"
                     }
+                    if ($sourceFailureLines.Count -gt 0) {
+                        $sourceResetState = Get-WingetSourceResetState
+                        if ($sourceResetState.Allowed) {
+                            try {
+                                Reset-WingetDefaultSources -WingetPath $wingetPath
+                                $sourceResetPerformed = $true
+                                try { Save-WingetSourceResetState -State $sourceResetState }
+                                catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
+                                $wingetBootstrapMessage += ' WinGet-Standardquellen wurden zurückgesetzt; die Paketabfrage wird wiederholt.'
+                                $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                                $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
+                                    Test-WingetSourceFailureLine -Line ([string]$_)
+                                })
+                            }
+                            catch {
+                                $wingetBootstrapMessage += " Zurücksetzen der WinGet-Standardquellen fehlgeschlagen: $($_.Exception.Message)"
+                            }
+                        }
+                        else {
+                            $wingetBootstrapMessage += ' Der Quellenreset wurde übersprungen, da auf diesem Zielsystem innerhalb der letzten 24 Stunden bereits ein Reset ausgeführt wurde.'
+                        }
+                    }
                 }
                 # Winget liefert eine formatierte Tabelle. Echte Upgrade-Zeilen
                 # enden mit ihrer Paketquelle (winget oder msstore); Status- und
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
-                $noInstalledPackageResult = $availableOutput -match '(?i)(Es wurde kein installiertes Paket gefunden, das den Eingabekriterien entspricht|No installed package found matching input criteria)'
-                $emptyWingetResultConfirmed = $false
-                if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -gt 0 -and $noInstalledPackageResult) {
-                    # Nach einem erfolgreichen Quellenupdate kann WinGet bei
-                    # installierten Systemen ohne passende Paketupdates sowohl
-                    # eine Quellenwarnung als auch "kein installiertes Paket"
-                    # ausgeben. Ohne Paketzeilen ist das kein fehlgeschlagenes
-                    # Update; die leere Ergebnisliste wird normal verarbeitet.
-                    $sourceFailureLines = @()
-                    $wingetBootstrapMessage = ''
-                    $emptyWingetResultConfirmed = $true
-                }
-                if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $emptyWingetResultConfirmed) {
+                if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $sourceResetPerformed) {
                     # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
-                    # beschädigten WinGet-Quellcache hindeuten. Nur die Standard-
-                    # quelle 'winget' wird einmal zurückgesetzt; benutzerdefinierte
-                    # und Store-Quellen bleiben erhalten. Die Markierung liegt
-                    # maschinenweit, damit sie auch bei wechselnden/temporären
-                    # WinRM- und JEA-Profilen 24 Stunden lang erhalten bleibt.
-                    $sourceResetMarkerPath = ''
-                    $sourceResetAllowed = $true
-                    try {
-                        $sourceStateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
-                            $env:ProgramData
-                        } elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-                            $env:LOCALAPPDATA
-                        } else {
-                            $env:USERPROFILE
-                        }
-                        $sourceStateDirectory = Join-Path $sourceStateRoot 'ServerUpdateSkripte'
-                        $sourceResetMarkerPath = Join-Path $sourceStateDirectory 'WingetSourceResetUtc.txt'
-                        if (Test-Path -LiteralPath $sourceResetMarkerPath -PathType Leaf) {
-                            $lastSourceResetUtc = [DateTime]::MinValue
-                            $markerText = Get-Content -LiteralPath $sourceResetMarkerPath -Raw -ErrorAction Stop
-                            if ([DateTime]::TryParse($markerText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$lastSourceResetUtc) -and
-                                ([DateTime]::UtcNow - $lastSourceResetUtc.ToUniversalTime()).TotalHours -lt 24) {
-                                $sourceResetAllowed = $false
-                            }
-                        }
-                    }
-                    catch {
-                        # Ein nicht lesbarer Marker darf die gezielte Reparatur
-                        # nicht verhindern; im Fehlerfall wird normal geprüft.
-                        $sourceResetAllowed = $true
-                    }
-
-                    if ($sourceResetAllowed) {
+                    # beschädigten lokalen Quellenzustand hindeuten. Alle drei
+                    # eingebauten Standardquellen werden einmalig zurückgesetzt;
+                    # kundeneigene Quellen bleiben durch den Einzelreset erhalten.
+                    $sourceResetState = Get-WingetSourceResetState
+                    if ($sourceResetState.Allowed) {
                         try {
-                            $sourceResetOutput = & $wingetPath source reset --name winget --force --disable-interactivity 2>&1 | Out-String
-                            $sourceResetExitCode = $LASTEXITCODE
-                            if ($sourceResetExitCode -eq 0) {
-                                try {
-                                    if (-not (Test-Path -LiteralPath $sourceStateDirectory -PathType Container)) {
-                                        New-Item -Path $sourceStateDirectory -ItemType Directory -Force | Out-Null
-                                    }
-                                    [IO.File]::WriteAllText($sourceResetMarkerPath, [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
-                                }
-                                catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
-                                $wingetBootstrapMessage += " Die WinGet-Suche war leer; die Quelle 'winget' wurde gezielt zurückgesetzt und die Suche einmal wiederholt."
-                                $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
-                                $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
-                                    Test-WingetSourceFailureLine -Line ([string]$_)
-                                })
-                                $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
-                            }
-                            else {
-                                $wingetBootstrapMessage += " WinGet-Quelle 'winget' konnte nach einer leeren Suche nicht zurückgesetzt werden (ExitCode $sourceResetExitCode): $($sourceResetOutput.Trim())"
-                            }
+                            Reset-WingetDefaultSources -WingetPath $wingetPath
+                            $sourceResetPerformed = $true
+                            try { Save-WingetSourceResetState -State $sourceResetState }
+                            catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
+                            $wingetBootstrapMessage += ' Die WinGet-Suche war leer; die Standardquellen wurden gezielt zurückgesetzt und die Suche einmal wiederholt.'
+                            $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                            $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
+                                Test-WingetSourceFailureLine -Line ([string]$_)
+                            })
+                            $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
                         }
                         catch {
-                            $wingetBootstrapMessage += " WinGet-Quelle 'winget' konnte nach einer leeren Suche nicht zurückgesetzt werden: $($_.Exception.Message)"
+                            $wingetBootstrapMessage += " Zurücksetzen der WinGet-Standardquellen fehlgeschlagen: $($_.Exception.Message)"
                         }
                     }
                     else {
-                        $wingetBootstrapMessage += " Die WinGet-Suche war leer; ein erneuter Quellenreset wurde übersprungen, da innerhalb der letzten 24 Stunden bereits einer ausgeführt wurde."
+                        $wingetBootstrapMessage += " Die WinGet-Suche war leer; ein Quellenreset wurde übersprungen, da auf diesem Zielsystem innerhalb der letzten 24 Stunden bereits einer ausgeführt wurde."
                     }
                 }
                 $actionOutput = ''
