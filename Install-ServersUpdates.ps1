@@ -426,7 +426,10 @@ function Get-DeferredWindowsUpdates {
         [PSCustomObject]@{
           MetadataMissing = $true
           UnresolvedCount = $unresolvedUpdateCount
-          Diagnostic = (@($unresolvedDiagnostics | Sort-Object -Unique) -join ' | ')
+          # Sort-Object ist im eingeschränkten JEA-Endpunkt nicht zwingend
+          # verfügbar. Für Diagnosewerte ist die ursprüngliche Reihenfolge
+          # ausreichend; daher direkt zusammenfügen.
+          Diagnostic = (@($unresolvedDiagnostics) -join ' | ')
         }
       }
     }
