@@ -896,14 +896,51 @@ catch {
                 $actionOutput = ''
                 $exitCode = 0
                 if ($ExecutionMode -eq 'Install' -and $packageLines.Count -gt 0) {
-                    $actionOutput = & $wingetPath upgrade --all --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
-                    $exitCode = $LASTEXITCODE
+                    # Pakete einzeln ausführen, damit ein Installationsart-Konflikt
+                    # ein anderes Paket nicht am Aktualisieren hindert. Es wird
+                    # bewusst kein --installer-type erzwungen und nichts entfernt.
+                    $noUpdateCodes = @(-1978335188, -1978335189, -1978335192)
+                    foreach ($packageLine in $packageLines) {
+                        $packageMatch = [regex]::Match([string]$packageLine, '^\s*(?<Name>.+?)\s{2,}(?<Id>[A-Za-z0-9][A-Za-z0-9._-]*)\s{2,}')
+                        if (-not $packageMatch.Success) {
+                            $result += [PSCustomObject]@{
+                                Manager='Winget'; Available=$true; Success=$false; Skipped=$true
+                                SkipReason="Paket-ID konnte nicht sicher aus der WinGet-Liste gelesen werden: $($packageLine.Trim())"
+                                ExitCode=$null; Packages=@(); AvailableOutput=$availableOutput; ActionOutput=''
+                            }
+                            continue
+                        }
+
+                        $packageId = $packageMatch.Groups['Id'].Value
+                        try {
+                            $packageActionOutput = & $wingetPath upgrade --id $packageId --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                            $packageExitCode = $LASTEXITCODE
+                            $technologyMismatch = $packageActionOutput -match '(?i)(Installationstechnologie unterscheidet sich|installation technology (?:is|differs from|does not match)|technology.*different from the current installed)'
+                            if ($technologyMismatch) {
+                                $result += [PSCustomObject]@{
+                                    Manager='Winget'; Available=$true; Success=$false; Skipped=$true
+                                    SkipReason="Paket '$($packageMatch.Groups['Name'].Value.Trim())' [$packageId]: WinGet meldet einen Konflikt der Installationstechnologie. Es wurde nichts deinstalliert."
+                                    ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$packageActionOutput
+                                }
+                            }
+                            else {
+                                $result += [PSCustomObject]@{
+                                    Manager='Winget'; Available=$true; Success=($packageExitCode -eq 0 -or $packageExitCode -in $noUpdateCodes); Skipped=$false
+                                    SkipReason=''; ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$packageActionOutput
+                                }
+                            }
+                        }
+                        catch {
+                            $result += [PSCustomObject]@{
+                                Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
+                                ExitCode=$null; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$_.Exception.Message
+                            }
+                        }
+                    }
                 }
-                $noUpdateCodes = @(-1978335188, -1978335189, -1978335192)
-                    $wingetSearchSucceeded = $sourceFailureLines.Count -eq 0
-                    if (-not $wingetSearchSucceeded) { $actionOutput = $sourceFailureLines -join [Environment]::NewLine }
-                    elseif (-not [string]::IsNullOrWhiteSpace($wingetSourceRefreshOutput)) { $actionOutput = "WinGet-Quelle winget wurde aktualisiert und die Suche wiederholt.`n$($wingetSourceRefreshOutput.Trim())" }
-                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($wingetSearchSucceeded -and ($exitCode -eq 0 -or $exitCode -in $noUpdateCodes)); Skipped=$false; SkipReason=''; ExitCode=$exitCode; Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
+                else {
+                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($sourceFailureLines.Count -eq 0); Skipped=$false; SkipReason=''; ExitCode=0; Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
+                }
                 }
                 catch {
                     $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$_.Exception.Message }
