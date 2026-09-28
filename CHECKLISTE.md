@@ -10,6 +10,7 @@
 - [x] Fehlt WinGet oder schlägt die WinGet-Prüfung für das PS7-Update fehl, WinGet auf Windows Server 2019/2022 unabhängig von AD-Mitgliedschaft mit `winget-install` reparieren und die PS7-Prüfung wiederholen.
 - [x] Chocolatey nur dann für das PS7-Update verwenden, wenn es bereits installiert ist; Chocolatey nicht automatisch nachinstallieren.
 - [x] Bei einem Fehler beim Durchsuchen der WinGet-Quelle `winget` diese Quelle einmal aktualisieren und die Paketabfrage wiederholen.
+- [x] Alte `Mailsettings`-Bereiche und die globalen `SendMail`-/`Subject`-Werte in allen vorhandenen allgemeinen und skriptspezifischen Settings-Dateien sichern und in das aktuelle Mail-Schema konvertieren.
 
 ## Konkrete Updates in der Nachinstallationsplanung
 

@@ -177,6 +177,53 @@ function Remove-ServerUpdateJsonProperty {
     return $false
 }
 
+function Convert-ServerUpdateLegacySettings {
+    param([Parameter(Mandatory)][object]$Settings)
+
+    if ($Settings -isnot [System.Management.Automation.PSCustomObject]) { return 0 }
+    $mailProperty = @($Settings.PSObject.Properties | Where-Object { $_.Name -ieq 'MailSettings' } | Select-Object -First 1)
+    if ($mailProperty.Count -eq 0 -or $mailProperty[0].Value -isnot [System.Management.Automation.PSCustomObject]) { return 0 }
+
+    $mail = $mailProperty[0].Value
+    $migrated = 0
+    if (-not [string]::Equals($mailProperty[0].Name, 'MailSettings', [StringComparison]::Ordinal)) {
+        $Settings.PSObject.Properties.Remove($mailProperty[0].Name)
+        Add-Member -InputObject $Settings -NotePropertyName 'MailSettings' -NotePropertyValue $mail
+        $migrated++
+    }
+
+    $legacySendMail = $mail.PSObject.Properties['SendMail']
+    $legacySubject = $mail.PSObject.Properties['Subject']
+    if (-not $legacySendMail -and -not $legacySubject) { return $migrated }
+
+    # Alte Dateien hatten einen globalen Mail-Schalter und Betreff. Diese Werte
+    # gelten nach dem Umbau für alle drei Läufe; vorhandene Einzelwerte haben Vorrang.
+    foreach ($actionName in @('Check', 'Download', 'Install')) {
+        $actionProperty = $mail.PSObject.Properties[$actionName]
+        if (-not $actionProperty -or $null -eq $actionProperty.Value) {
+            $action = [PSCustomObject]@{}
+            Add-Member -InputObject $mail -NotePropertyName $actionName -NotePropertyValue $action
+            $actionProperty = $mail.PSObject.Properties[$actionName]
+            $migrated++
+        }
+        if ($actionProperty.Value -isnot [System.Management.Automation.PSCustomObject]) { continue }
+
+        if ($legacySendMail -and -not $actionProperty.Value.PSObject.Properties['SendMail']) {
+            Add-Member -InputObject $actionProperty.Value -NotePropertyName 'SendMail' -NotePropertyValue $legacySendMail.Value
+            $migrated++
+        }
+        if ($legacySubject -and -not [string]::IsNullOrWhiteSpace([string]$legacySubject.Value) -and
+            -not $actionProperty.Value.PSObject.Properties['Subject']) {
+            Add-Member -InputObject $actionProperty.Value -NotePropertyName 'Subject' -NotePropertyValue ([string]$legacySubject.Value)
+            $migrated++
+        }
+    }
+
+    if ($legacySubject) { $mail.PSObject.Properties.Remove($legacySubject.Name); $migrated++ }
+    if ($legacySendMail) { $mail.PSObject.Properties.Remove($legacySendMail.Name); $migrated++ }
+    return $migrated
+}
+
 function Update-ServerUpdateSettingsDefaults {
     param([Parameter(Mandatory)][string]$ScriptRoot)
 
@@ -222,8 +269,9 @@ function Update-ServerUpdateSettingsDefaults {
                 }
             }
 
+            $legacyMigrationCount = Convert-ServerUpdateLegacySettings -Settings $settings
             $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $fileDefaults
-            if ($addedCount -eq 0 -and $removedCount -eq 0) { continue }
+            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
             $backupPath = '{0}.bak.{1}_{2}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -236,7 +284,7 @@ function Update-ServerUpdateSettingsDefaults {
             if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
                 throw 'Einstellungsdatei oder Sicherung fehlt nach dem atomaren Austausch.'
             }
-            Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt, {1} veraltete Einstellung(en) entfernt; Sicherung: {2}" -f $addedCount, $removedCount, $backupPath) -ForegroundColor Cyan
+            Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt, {1} veraltete Einstellung(en) entfernt und {2} Legacy-Einstellung(en) konvertiert; Sicherung: {3}" -f $addedCount, $removedCount, $legacyMigrationCount, $backupPath) -ForegroundColor Cyan
         }
         catch {
             Write-Warning "Standardwerte konnten in '$([IO.Path]::GetFileName($settingsPath))' nicht ergänzt werden. Vorhandene Einstellungen bleiben erhalten. Ursache: $($_.Exception.Message)"
