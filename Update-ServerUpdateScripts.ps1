@@ -196,20 +196,13 @@ function Convert-ServerUpdateLegacySettings {
     $legacySubject = $mail.PSObject.Properties['Subject']
     if (-not $legacySendMail -and -not $legacySubject) { return $migrated }
 
-    # Alte Dateien hatten einen globalen Mail-Schalter und Betreff. Wenn Dateiname
-    # oder Betreff den Berichtstyp erkennen lassen, wird nur dieser Bereich befüllt.
-    # Bei nicht zuordenbaren Altbetreffs bleibt das frühere globale Verhalten erhalten.
+    # Der Dateiname bestimmt den Berichtstyp der skriptspezifischen Datei.
+    # Eine allgemeine settings.json gilt weiterhin für alle drei Läufe.
     $actionNames = @()
     $settingsFileName = [IO.Path]::GetFileName($Path)
     if ($settingsFileName -match '(?i)^Check-ServersUpdates') { $actionNames = @('Check') }
     elseif ($settingsFileName -match '(?i)^Download-ServersUpdates') { $actionNames = @('Download') }
     elseif ($settingsFileName -match '(?i)^Install-ServersUpdates') { $actionNames = @('Install') }
-    if ($actionNames.Count -eq 0 -and $legacySubject) {
-        $subjectText = [string]$legacySubject.Value
-        if ($subjectText -match '(?i)(install|installiert|installed|nachinstallation)') { $actionNames = @('Install') }
-        elseif ($subjectText -match '(?i)(download|heruntergeladen|downloaded)') { $actionNames = @('Download') }
-        elseif ($subjectText -match '(?i)(check|prüfung|pruefung|update-?check)') { $actionNames = @('Check') }
-    }
     if ($actionNames.Count -eq 0) { $actionNames = @('Check', 'Download', 'Install') }
 
     foreach ($actionName in $actionNames) {
@@ -226,13 +219,10 @@ function Convert-ServerUpdateLegacySettings {
             Add-Member -InputObject $actionProperty.Value -NotePropertyName 'SendMail' -NotePropertyValue $legacySendMail.Value
             $migrated++
         }
-        if ($legacySubject -and -not [string]::IsNullOrWhiteSpace([string]$legacySubject.Value) -and
-            -not $actionProperty.Value.PSObject.Properties['Subject']) {
-            Add-Member -InputObject $actionProperty.Value -NotePropertyName 'Subject' -NotePropertyValue ([string]$legacySubject.Value)
-            $migrated++
-        }
     }
 
+    # Der frühere Betreff wird verworfen. Die aktuellen Standardbetreffe werden
+    # anschließend aus default_settings.json ergänzt und beim Versand generiert.
     if ($legacySubject) { $mail.PSObject.Properties.Remove($legacySubject.Name); $migrated++ }
     if ($legacySendMail) { $mail.PSObject.Properties.Remove($legacySendMail.Name); $migrated++ }
     return $migrated
