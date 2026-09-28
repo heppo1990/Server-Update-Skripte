@@ -739,10 +739,10 @@ function Invoke-WindowsUpdatePackageManagers {
                 $env:USERPROFILE
             }
             $sourceStateDirectory = Join-Path $sourceStateRoot 'ServerUpdateSkripte'
-            # Neuer Markername: ältere Skriptstände haben nur die Quelle
-            # winget zurückgesetzt. Deren Zeitmarke darf den ersten vollständigen
-            # Standardquellen-Reset nach diesem Fix nicht unterdrücken.
-            $markerPath = Join-Path $sourceStateDirectory 'WingetDefaultSourcesResetUtc.txt'
+            # Neuer Markername: ältere Skriptstände haben Standardquellen
+            # einzeln zurückgesetzt. Deren Zeitmarke darf den ersten vollständigen
+            # Quellenreset nach diesem Fix nicht unterdrücken.
+            $markerPath = Join-Path $sourceStateDirectory 'WingetAllSourcesResetUtc.txt'
             $allowed = $true
             try {
                 if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
@@ -764,14 +764,33 @@ function Invoke-WindowsUpdatePackageManagers {
 
         function Reset-WingetDefaultSources {
             param([Parameter(Mandatory)][string]$WingetPath)
-            # Entspricht `winget source reset --force`, setzt aber nur die
-            # eingebauten Quellen einzeln zurück und erhält kundeneigene Quellen.
-            foreach ($sourceName in @('msstore', 'winget', 'winget-font')) {
-                $resetOutput = & $WingetPath source reset --name $sourceName --force --disable-interactivity 2>&1 | Out-String
-                $resetExitCode = $LASTEXITCODE
-                if ($resetExitCode -ne 0) {
-                    throw "Zurücksetzen der Standardquelle '$sourceName' fehlgeschlagen (Exitcode $resetExitCode): $($resetOutput.Trim())"
+            # Der vollständige Reset hat sich als notwendig erwiesen. Vorher
+            # prüfen, ob kundeneigene Quellen vorhanden sind, da WinGet sie bei
+            # einem globalen Reset entfernt.
+            $sourceListOutput = & $WingetPath source list --disable-interactivity 2>&1 | Out-String
+            $sourceListExitCode = $LASTEXITCODE
+            if ($sourceListExitCode -ne 0) {
+                throw "WinGet-Quellen konnten vor dem Reset nicht aufgelistet werden (Exitcode $sourceListExitCode): $($sourceListOutput.Trim())"
+            }
+            $configuredSources = @($sourceListOutput -split "`r?`n" | ForEach-Object {
+                if ($_ -match '^\s*(?<Name>.+?)\s{2,}\S+') {
+                    $name = $Matches.Name.Trim()
+                    if ($name -and $name -ne 'Name') { $name }
                 }
+            })
+            $defaultSources = @('msstore', 'winget', 'winget-font')
+            $customSources = @($configuredSources | Where-Object { $_ -notin $defaultSources })
+            if ($configuredSources.Count -eq 0) {
+                throw 'WinGet-Quellenliste war leer oder konnte nicht ausgewertet werden; vollständiger Reset aus Sicherheitsgründen abgebrochen.'
+            }
+            if ($customSources.Count -gt 0) {
+                throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); vollständiger Reset wurde aus Sicherheitsgründen abgebrochen, damit diese Quellen erhalten bleiben."
+            }
+
+            $resetOutput = & $WingetPath source reset --force --disable-interactivity 2>&1 | Out-String
+            $resetExitCode = $LASTEXITCODE
+            if ($resetExitCode -ne 0) {
+                throw "Vollständiger WinGet-Quellenreset fehlgeschlagen (Exitcode $resetExitCode): $($resetOutput.Trim())"
             }
         }
 
@@ -981,9 +1000,9 @@ catch {
                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
                 if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $sourceResetPerformed) {
                     # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
-                    # beschädigten lokalen Quellenzustand hindeuten. Alle drei
-                    # eingebauten Standardquellen werden einmalig zurückgesetzt;
-                    # kundeneigene Quellen bleiben durch den Einzelreset erhalten.
+                    # beschädigten lokalen Quellenzustand hindeuten. Der nötige
+                    # vollständige Reset erfolgt nur, wenn keine kundeneigenen
+                    # Quellen vorhanden sind.
                     $sourceResetState = Get-WingetSourceResetState
                     if ($sourceResetState.Allowed) {
                         try {
