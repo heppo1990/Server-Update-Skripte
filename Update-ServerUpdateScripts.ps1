@@ -178,7 +178,7 @@ function Remove-ServerUpdateJsonProperty {
 }
 
 function Convert-ServerUpdateLegacySettings {
-    param([Parameter(Mandatory)][object]$Settings)
+    param([Parameter(Mandatory)][object]$Settings, [Parameter(Mandatory)][string]$Path)
 
     if ($Settings -isnot [System.Management.Automation.PSCustomObject]) { return 0 }
     $mailProperty = @($Settings.PSObject.Properties | Where-Object { $_.Name -ieq 'MailSettings' } | Select-Object -First 1)
@@ -196,9 +196,23 @@ function Convert-ServerUpdateLegacySettings {
     $legacySubject = $mail.PSObject.Properties['Subject']
     if (-not $legacySendMail -and -not $legacySubject) { return $migrated }
 
-    # Alte Dateien hatten einen globalen Mail-Schalter und Betreff. Diese Werte
-    # gelten nach dem Umbau für alle drei Läufe; vorhandene Einzelwerte haben Vorrang.
-    foreach ($actionName in @('Check', 'Download', 'Install')) {
+    # Alte Dateien hatten einen globalen Mail-Schalter und Betreff. Wenn Dateiname
+    # oder Betreff den Berichtstyp erkennen lassen, wird nur dieser Bereich befüllt.
+    # Bei nicht zuordenbaren Altbetreffs bleibt das frühere globale Verhalten erhalten.
+    $actionNames = @()
+    $settingsFileName = [IO.Path]::GetFileName($Path)
+    if ($settingsFileName -match '(?i)^Check-ServersUpdates') { $actionNames = @('Check') }
+    elseif ($settingsFileName -match '(?i)^Download-ServersUpdates') { $actionNames = @('Download') }
+    elseif ($settingsFileName -match '(?i)^Install-ServersUpdates') { $actionNames = @('Install') }
+    if ($actionNames.Count -eq 0 -and $legacySubject) {
+        $subjectText = [string]$legacySubject.Value
+        if ($subjectText -match '(?i)(install|installiert|installed|nachinstallation)') { $actionNames = @('Install') }
+        elseif ($subjectText -match '(?i)(download|heruntergeladen|downloaded)') { $actionNames = @('Download') }
+        elseif ($subjectText -match '(?i)(check|prüfung|pruefung|update-?check)') { $actionNames = @('Check') }
+    }
+    if ($actionNames.Count -eq 0) { $actionNames = @('Check', 'Download', 'Install') }
+
+    foreach ($actionName in $actionNames) {
         $actionProperty = $mail.PSObject.Properties[$actionName]
         if (-not $actionProperty -or $null -eq $actionProperty.Value) {
             $action = [PSCustomObject]@{}
@@ -269,7 +283,7 @@ function Update-ServerUpdateSettingsDefaults {
                 }
             }
 
-            $legacyMigrationCount = Convert-ServerUpdateLegacySettings -Settings $settings
+            $legacyMigrationCount = Convert-ServerUpdateLegacySettings -Settings $settings -Path $settingsPath
             $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $fileDefaults
             if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0) { continue }
 
