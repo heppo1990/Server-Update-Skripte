@@ -262,7 +262,7 @@ Aufruf:
 
 ### `Install-ServersUpdates.ps1`
 
-Installiert Windows-Updates sowie verfügbare Chocolatey- und Winget-Updates. Winget-Pakete werden einzeln ohne fest vorgegebenen Installer-Typ aktualisiert, sodass ein einzelnes problematisches Paket die folgenden Pakete nicht aufhält. Meldet WinGet für ein Paket einen Konflikt der Installationstechnologie, wird dieses Paket mit Name und ID als übersprungen protokolliert; das Skript deinstalliert nichts und fährt mit den übrigen Paketen fort. Die Winget-Ausgabe nennt zunächst die gefundenen Pakete und danach den Installationsfortschritt.
+Installiert Windows-Updates sowie verfügbare Chocolatey- und Winget-Updates. Winget-Pakete werden einzeln ohne fest vorgegebenen Installer-Typ aktualisiert, sodass ein einzelnes problematisches Paket die folgenden Pakete nicht aufhält. Wenn WinGet ein in der Gesamtliste gefundenes Update beim direkten Aufruf über die Paket-ID nicht als installiert erkennt, versucht das Skript denselben Upgrade-Aufruf mit dem exakten Anzeigenamen und derselben Quelle. Meldet WinGet einen Konflikt der Installationstechnologie, wird das Paket mit Name und ID als übersprungen protokolliert; das Skript deinstalliert nichts und fährt mit den übrigen Paketen fort. Die Winget-Ausgabe nennt zunächst die gefundenen Pakete und danach den Installationsfortschritt.
 
 Der Installationsbericht trennt installierte Updates von für die Nachinstallation eingeplanten Updates. Die geplanten Updates werden je Server in einer Tabelle mit ComputerName, Status, KB, Size und Title aufgeführt. Ein geplanter Deferred-Update-Lauf wird nicht als „System auf dem neuesten Stand“ gemeldet.
 

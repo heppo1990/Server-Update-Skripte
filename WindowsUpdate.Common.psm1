@@ -979,14 +979,42 @@ catch {
                         }
 
                         $packageId = $packageMatch.Groups['Id'].Value
+                        $packageName = $packageMatch.Groups['Name'].Value.Trim()
+                        $packageSourceMatch = [regex]::Match([string]$packageLine, '\s(?<Source>winget|msstore)\s*$')
+                        $packageSource = if ($packageSourceMatch.Success) { $packageSourceMatch.Groups['Source'].Value } else { '' }
                         try {
-                            $packageActionOutput = & $wingetPath upgrade --id $packageId --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                            $packageArguments = @('upgrade', '--id', $packageId, '--exact')
+                            if (-not [string]::IsNullOrWhiteSpace($packageSource)) { $packageArguments += @('--source', $packageSource) }
+                            $packageArguments += @('--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+                            $packageActionOutput = & $wingetPath @packageArguments 2>&1 | Out-String
                             $packageExitCode = $LASTEXITCODE
+                            $noInstalledPackage = $packageActionOutput -match '(?i)(kein installiertes Paket gefunden|no installed package found)'
+                            if ($noInstalledPackage) {
+                                # Manche WinGet-Versionen zeigen ein Upgrade in der
+                                # Gesamtliste, finden es beim exakten ID-Aufruf aber
+                                # nicht wieder. Dann dieselbe Quelle mit dem exakten
+                                # Anzeigenamen aus der Liste ansprechen.
+                                $fallbackArguments = @('upgrade', '--name', $packageName, '--exact')
+                                if (-not [string]::IsNullOrWhiteSpace($packageSource)) { $fallbackArguments += @('--source', $packageSource) }
+                                $fallbackArguments += @('--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+                                $fallbackOutput = & $wingetPath @fallbackArguments 2>&1 | Out-String
+                                $fallbackExitCode = $LASTEXITCODE
+                                $packageActionOutput += "`nFallback mit exaktem Paketnamen '$packageName':`n$($fallbackOutput.Trim())"
+                                $packageExitCode = $fallbackExitCode
+                                $noInstalledPackage = $fallbackOutput -match '(?i)(kein installiertes Paket gefunden|no installed package found)'
+                            }
                             $technologyMismatch = $packageActionOutput -match '(?i)(Installationstechnologie unterscheidet sich|installation technology (?:is|differs from|does not match)|technology.*different from the current installed)'
                             if ($technologyMismatch) {
                                 $result += [PSCustomObject]@{
                                     Manager='Winget'; Available=$true; Success=$false; Skipped=$true
-                                    SkipReason="Paket '$($packageMatch.Groups['Name'].Value.Trim())' [$packageId]: WinGet meldet einen Konflikt der Installationstechnologie. Es wurde nichts deinstalliert."
+                                    SkipReason="Paket '$packageName' [$packageId]: WinGet meldet einen Konflikt der Installationstechnologie. Es wurde nichts deinstalliert."
+                                    ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$packageActionOutput
+                                }
+                            }
+                            elseif ($noInstalledPackage) {
+                                $result += [PSCustomObject]@{
+                                    Manager='Winget'; Available=$true; Success=$false; Skipped=$true
+                                    SkipReason="Paket '$packageName' [$packageId] steht in der Upgrade-Liste, konnte aber per ID und exaktem Namen nicht als installiertes Paket aufgelöst werden. Es wurde übersprungen."
                                     ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$packageActionOutput
                                 }
                             }
