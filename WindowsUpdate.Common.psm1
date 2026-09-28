@@ -715,13 +715,18 @@ function Invoke-WindowsUpdatePackageManagers {
             }
         }
 
+        function Test-WingetSourceFailureLine {
+            param([string]$Line)
+            return $Line -match '(?i)(Fehler beim Durchsuchen der Quelle|Fehler beim Versuch, die Quelle zu aktualisieren|An error occurred while searching the source|Failed when searching (?:the )?source|Failed in attempting to update the source)'
+        }
+
         function Get-WingetUpgradeLines {
             param([string]$Output)
             return @($Output -split "`r?`n" | Where-Object {
                 $line = $_.Trim()
                 $line -match '\s(?:winget|msstore)\s*$' -and
                 $line -notmatch '^Name\s+' -and
-                $line -notmatch '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
+                -not (Test-WingetSourceFailureLine -Line $line)
             })
         }
 
@@ -872,7 +877,7 @@ catch {
                 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
                 $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
-                    $_ -match '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
+                    Test-WingetSourceFailureLine -Line ([string]$_)
                 })
                 $wingetSourceRefreshOutput = ''
                 if ($sourceFailureLines.Count -gt 0) {
@@ -886,7 +891,7 @@ catch {
                         $wingetBootstrapMessage += ' WinGet-Quelle winget wurde aktualisiert; die Paketabfrage wird wiederholt.'
                         $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
                         $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
-                            $_ -match '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
+                            Test-WingetSourceFailureLine -Line ([string]$_)
                         })
                     }
                     else {
@@ -944,7 +949,7 @@ catch {
                                 if (-not [string]::IsNullOrWhiteSpace($sourceResetOutput)) { $wingetBootstrapMessage += " $($sourceResetOutput.Trim())" }
                                 $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
                                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
-                                    $_ -match '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
+                                    Test-WingetSourceFailureLine -Line ([string]$_)
                                 })
                                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
                             }
