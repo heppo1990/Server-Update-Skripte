@@ -715,6 +715,16 @@ function Invoke-WindowsUpdatePackageManagers {
             }
         }
 
+        function Get-WingetUpgradeLines {
+            param([string]$Output)
+            return @($Output -split "`r?`n" | Where-Object {
+                $line = $_.Trim()
+                $line -match '\s(?:winget|msstore)\s*$' -and
+                $line -notmatch '^Name\s+' -and
+                $line -notmatch '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
+            })
+        }
+
         function Find-WingetInstallScript {
             $command = Get-Command winget-install.ps1 -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
@@ -887,12 +897,69 @@ catch {
                 # enden mit ihrer Paketquelle (winget oder msstore); Status- und
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
-                $packageLines = @($availableOutput -split "`r?`n" | Where-Object {
-                    $line = $_.Trim()
-                    $line -match '\s(?:winget|msstore)\s*$' -and
-                    $line -notmatch '^Name\s+' -and
-                    $line -notmatch '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
-                })
+                $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
+                if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0) {
+                    # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
+                    # beschädigten WinGet-Quellcache hindeuten. Nur die Standard-
+                    # quelle 'winget' wird einmal zurückgesetzt; benutzerdefinierte
+                    # und Store-Quellen bleiben erhalten. Pro Benutzer höchstens
+                    # ein Reset je 24 Stunden, damit normale Leersuchen günstig sind.
+                    $sourceResetMarkerPath = ''
+                    $sourceResetAllowed = $true
+                    try {
+                        $sourceStateDirectory = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+                            Join-Path $env:LOCALAPPDATA 'ServerUpdateSkripte'
+                        } else {
+                            Join-Path $env:USERPROFILE 'AppData\Local\ServerUpdateSkripte'
+                        }
+                        $sourceResetMarkerPath = Join-Path $sourceStateDirectory 'WingetSourceResetUtc.txt'
+                        if (Test-Path -LiteralPath $sourceResetMarkerPath -PathType Leaf) {
+                            $lastSourceResetUtc = [DateTime]::MinValue
+                            $markerText = Get-Content -LiteralPath $sourceResetMarkerPath -Raw -ErrorAction Stop
+                            if ([DateTime]::TryParse($markerText, [ref]$lastSourceResetUtc) -and
+                                ([DateTime]::UtcNow - $lastSourceResetUtc.ToUniversalTime()).TotalHours -lt 24) {
+                                $sourceResetAllowed = $false
+                            }
+                        }
+                    }
+                    catch {
+                        # Ein nicht lesbarer Marker darf die gezielte Reparatur
+                        # nicht verhindern; im Fehlerfall wird normal geprüft.
+                        $sourceResetAllowed = $true
+                    }
+
+                    if ($sourceResetAllowed) {
+                        try {
+                            $sourceResetOutput = & $wingetPath source reset --name winget --force --disable-interactivity 2>&1 | Out-String
+                            $sourceResetExitCode = $LASTEXITCODE
+                            if ($sourceResetExitCode -eq 0) {
+                                try {
+                                    if (-not (Test-Path -LiteralPath $sourceStateDirectory -PathType Container)) {
+                                        New-Item -Path $sourceStateDirectory -ItemType Directory -Force | Out-Null
+                                    }
+                                    [IO.File]::WriteAllText($sourceResetMarkerPath, [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
+                                }
+                                catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
+                                $wingetBootstrapMessage += " Die WinGet-Suche war leer; die Quelle 'winget' wurde gezielt zurückgesetzt und die Suche einmal wiederholt."
+                                if (-not [string]::IsNullOrWhiteSpace($sourceResetOutput)) { $wingetBootstrapMessage += " $($sourceResetOutput.Trim())" }
+                                $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                                $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
+                                    $_ -match '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source)'
+                                })
+                                $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
+                            }
+                            else {
+                                $wingetBootstrapMessage += " WinGet-Quelle 'winget' konnte nach einer leeren Suche nicht zurückgesetzt werden (ExitCode $sourceResetExitCode): $($sourceResetOutput.Trim())"
+                            }
+                        }
+                        catch {
+                            $wingetBootstrapMessage += " WinGet-Quelle 'winget' konnte nach einer leeren Suche nicht zurückgesetzt werden: $($_.Exception.Message)"
+                        }
+                    }
+                    else {
+                        $wingetBootstrapMessage += " Die WinGet-Suche war leer; ein erneuter Quellenreset wurde übersprungen, da innerhalb der letzten 24 Stunden bereits einer ausgeführt wurde."
+                    }
+                }
                 $actionOutput = ''
                 $exitCode = 0
                 if ($ExecutionMode -eq 'Install' -and $packageLines.Count -gt 0) {
