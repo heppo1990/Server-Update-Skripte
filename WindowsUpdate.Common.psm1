@@ -788,8 +788,29 @@ function Invoke-WindowsUpdatePackageManagers {
             if ($sourceListExitCode -ne 0) {
                 throw "WinGet-Quellen konnten vor dem Reset nicht aufgelistet werden (Exitcode $sourceListExitCode): $($sourceListOutput.Trim())"
             }
+            $defaultSourceUrls = @{
+                msstore = 'https://storeedge.dsx.mp.microsoft.com/v9.0'
+                winget = 'https://cdn.winget.microsoft.com/cache'
+                'winget-font' = 'https://cdn.winget.microsoft.com/fonts'
+            }
             $configuredSources = @($sourceListOutput -split "`r?`n" | ForEach-Object {
-                if ($_ -match '^\s*(?<Name>.+?)\s{2,}\S+') {
+                $line = [string]$_
+                # winget source list ist eine formatierte Tabelle; zwischen
+                # Name und URL steht je nach Spaltenbreite teils nur ein
+                # Leerzeichen. Deshalb die bekannten Microsoft-Quellen zuerst
+                # anhand von Name UND Argument erkennen.
+                if ($line -match '^\s*(?<Name>msstore|winget|winget-font)\s+(?<Argument>https?://\S+)') {
+                    $name = $Matches.Name
+                    $argument = $Matches.Argument.TrimEnd('/')
+                    $expectedArgument = $defaultSourceUrls[$name].TrimEnd('/')
+                    if ([string]::Equals($argument, $expectedArgument, [StringComparison]::OrdinalIgnoreCase)) {
+                        $name
+                    }
+                    else {
+                        "$name [$argument]"
+                    }
+                }
+                elseif ($line -match '^\s*(?<Name>.+?)\s{2,}\S+') {
                     $name = $Matches.Name.Trim()
                     if ($name -and $name -ne 'Name') { $name }
                 }
