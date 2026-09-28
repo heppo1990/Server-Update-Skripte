@@ -903,7 +903,19 @@ catch {
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
-                if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0) {
+                $noInstalledPackageResult = $availableOutput -match '(?i)(Es wurde kein installiertes Paket gefunden, das den Eingabekriterien entspricht|No installed package found matching input criteria)'
+                $emptyWingetResultConfirmed = $false
+                if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -gt 0 -and $noInstalledPackageResult) {
+                    # Nach einem erfolgreichen Quellenupdate kann WinGet bei
+                    # installierten Systemen ohne passende Paketupdates sowohl
+                    # eine Quellenwarnung als auch "kein installiertes Paket"
+                    # ausgeben. Ohne Paketzeilen ist das kein fehlgeschlagenes
+                    # Update; die leere Ergebnisliste wird normal verarbeitet.
+                    $sourceFailureLines = @()
+                    $wingetBootstrapMessage = ''
+                    $emptyWingetResultConfirmed = $true
+                }
+                if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $emptyWingetResultConfirmed) {
                     # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
                     # beschädigten WinGet-Quellcache hindeuten. Nur die Standard-
                     # quelle 'winget' wird einmal zurückgesetzt; benutzerdefinierte
