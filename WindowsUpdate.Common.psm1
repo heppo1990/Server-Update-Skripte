@@ -968,7 +968,18 @@ catch {
                     # bewusst kein --installer-type erzwungen und nichts entfernt.
                     $noUpdateCodes = @(-1978335188, -1978335189, -1978335192)
                     foreach ($packageLine in $packageLines) {
-                        $packageMatch = [regex]::Match([string]$packageLine, '^\s*(?<Name>.+?)\s{2,}(?<Id>[A-Za-z0-9][A-Za-z0-9._-]*)\s{2,}')
+                        # WinGet richtet Tabellen je nach Terminalbreite und
+                        # Ausgabeumleitung unterschiedlich aus. Paketname und ID
+                        # sind deshalb nicht zuverlässig durch mehrere Leerzeichen
+                        # getrennt. Die letzten vier Spalten (ID, installierte
+                        # Version, verfügbare Version, Quelle) werden von rechts
+                        # erkannt; so wird eine Versionsnummer nie als Paket-ID
+                        # fehlinterpretiert.
+                        $packageMatch = [regex]::Match(
+                            [string]$packageLine,
+                            '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)\s+(?<Source>winget|msstore)\s*$',
+                            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+                        )
                         if (-not $packageMatch.Success) {
                             $result += [PSCustomObject]@{
                                 Manager='Winget'; Available=$true; Success=$false; Skipped=$true
@@ -980,8 +991,7 @@ catch {
 
                         $packageId = $packageMatch.Groups['Id'].Value
                         $packageName = $packageMatch.Groups['Name'].Value.Trim()
-                        $packageSourceMatch = [regex]::Match([string]$packageLine, '\s(?<Source>winget|msstore)\s*$')
-                        $packageSource = if ($packageSourceMatch.Success) { $packageSourceMatch.Groups['Source'].Value } else { '' }
+                        $packageSource = $packageMatch.Groups['Source'].Value
                         try {
                             $packageArguments = @('upgrade', '--id', $packageId, '--exact')
                             if (-not [string]::IsNullOrWhiteSpace($packageSource)) { $packageArguments += @('--source', $packageSource) }
