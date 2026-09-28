@@ -907,21 +907,25 @@ catch {
                     # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
                     # beschädigten WinGet-Quellcache hindeuten. Nur die Standard-
                     # quelle 'winget' wird einmal zurückgesetzt; benutzerdefinierte
-                    # und Store-Quellen bleiben erhalten. Pro Benutzer höchstens
-                    # ein Reset je 24 Stunden, damit normale Leersuchen günstig sind.
+                    # und Store-Quellen bleiben erhalten. Die Markierung liegt
+                    # maschinenweit, damit sie auch bei wechselnden/temporären
+                    # WinRM- und JEA-Profilen 24 Stunden lang erhalten bleibt.
                     $sourceResetMarkerPath = ''
                     $sourceResetAllowed = $true
                     try {
-                        $sourceStateDirectory = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-                            Join-Path $env:LOCALAPPDATA 'ServerUpdateSkripte'
+                        $sourceStateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+                            $env:ProgramData
+                        } elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+                            $env:LOCALAPPDATA
                         } else {
-                            Join-Path $env:USERPROFILE 'AppData\Local\ServerUpdateSkripte'
+                            $env:USERPROFILE
                         }
+                        $sourceStateDirectory = Join-Path $sourceStateRoot 'ServerUpdateSkripte'
                         $sourceResetMarkerPath = Join-Path $sourceStateDirectory 'WingetSourceResetUtc.txt'
                         if (Test-Path -LiteralPath $sourceResetMarkerPath -PathType Leaf) {
                             $lastSourceResetUtc = [DateTime]::MinValue
                             $markerText = Get-Content -LiteralPath $sourceResetMarkerPath -Raw -ErrorAction Stop
-                            if ([DateTime]::TryParse($markerText, [ref]$lastSourceResetUtc) -and
+                            if ([DateTime]::TryParse($markerText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$lastSourceResetUtc) -and
                                 ([DateTime]::UtcNow - $lastSourceResetUtc.ToUniversalTime()).TotalHours -lt 24) {
                                 $sourceResetAllowed = $false
                             }
@@ -946,7 +950,6 @@ catch {
                                 }
                                 catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
                                 $wingetBootstrapMessage += " Die WinGet-Suche war leer; die Quelle 'winget' wurde gezielt zurückgesetzt und die Suche einmal wiederholt."
-                                if (-not [string]::IsNullOrWhiteSpace($sourceResetOutput)) { $wingetBootstrapMessage += " $($sourceResetOutput.Trim())" }
                                 $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
                                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                                     Test-WingetSourceFailureLine -Line ([string]$_)
@@ -1069,8 +1072,14 @@ catch {
                         }
                     }
                 }
-                else {
-                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($sourceFailureLines.Count -eq 0); Skipped=$false; SkipReason=''; ExitCode=0; Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
+                    else {
+                    if ($sourceFailureLines.Count -gt 0) {
+                        $wingetFailureDetails = @()
+                        if (-not [string]::IsNullOrWhiteSpace($wingetBootstrapMessage)) { $wingetFailureDetails += $wingetBootstrapMessage.Trim() }
+                        if (-not [string]::IsNullOrWhiteSpace($availableOutput)) { $wingetFailureDetails += $availableOutput.Trim() }
+                        $actionOutput = $wingetFailureDetails -join "`n"
+                    }
+                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($sourceFailureLines.Count -eq 0); Skipped=$false; SkipReason=''; ExitCode=$(if ($sourceFailureLines.Count -gt 0) { 1 } else { 0 }); Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
                 }
                 }
                 catch {
