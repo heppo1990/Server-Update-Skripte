@@ -708,10 +708,26 @@ function Invoke-WindowsUpdatePackageManagers {
                 $output = (& $Path --version 2>&1 | Out-String -Width 300).Trim()
                 $exitCode = $LASTEXITCODE
                 $works = $exitCode -eq 0 -and $output -match '(?m)^\s*v?\d+\.\d+'
-                return [PSCustomObject]@{ Works = $works; Output = "ExitCode=$exitCode; Ausgabe=$output" }
+                if ($works) { return [PSCustomObject]@{ Works = $true; Output = "ExitCode=$exitCode; Ausgabe=$output" } }
+                $failureSummary = if ($output -match '(?i)(Zugriff verweigert|Access is denied|access denied)') {
+                    'Zugriff auf winget.exe verweigert.'
+                } else {
+                    @($output -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) -join ''
+                }
+                if ([string]::IsNullOrWhiteSpace($failureSummary)) { $failureSummary = "ExitCode=$exitCode; keine Versionsausgabe erhalten." }
+                if ($failureSummary.Length -gt 200) { $failureSummary = $failureSummary.Substring(0, 197) + '...' }
+                return [PSCustomObject]@{ Works = $false; Output = "ExitCode=$exitCode; $failureSummary"; DiagnosticOutput = $output }
             }
             catch {
-                return [PSCustomObject]@{ Works = $false; Output = $_.Exception.Message }
+                $diagnostic = $_.Exception.ToString()
+                $failureSummary = if ($_.Exception.Message -match '(?i)(Zugriff verweigert|Access is denied|access denied)') {
+                    'Zugriff auf winget.exe verweigert.'
+                } else {
+                    ([string]$_.Exception.Message -split "`r?`n")[0].Trim()
+                }
+                if ([string]::IsNullOrWhiteSpace($failureSummary)) { $failureSummary = 'WinGet-Versionsprüfung fehlgeschlagen.' }
+                if ($failureSummary.Length -gt 200) { $failureSummary = $failureSummary.Substring(0, 197) + '...' }
+                return [PSCustomObject]@{ Works = $false; Output = $failureSummary; DiagnosticOutput = $diagnostic }
             }
         }
 
