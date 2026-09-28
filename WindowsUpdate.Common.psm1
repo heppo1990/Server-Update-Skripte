@@ -990,6 +990,7 @@ catch {
                                 Manager='Winget'; Available=$true; Success=$false; Skipped=$true
                                 SkipReason="Paket-ID konnte nicht sicher aus der WinGet-Liste gelesen werden: $($packageLine.Trim())"
                                 ExitCode=$null; Packages=@(); AvailableOutput=$availableOutput; ActionOutput=''
+                                RequiresManualAction=$true; ManualActionText="Paketzeile konnte nicht automatisch zugeordnet werden: $($packageLine.Trim()). Bitte dieses WinGet-Update manuell prüfen."
                             }
                             continue
                         }
@@ -1027,6 +1028,7 @@ catch {
                                     Manager='Winget'; Available=$true; Success=$false; Skipped=$true
                                     SkipReason="Paket '$packageName' [$packageId]: WinGet meldet einen Konflikt der Installationstechnologie. Es wurde nichts deinstalliert."
                                     ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$packageActionOutput
+                                    RequiresManualAction=$true; ManualActionText="Paket '$packageName' [$packageId] konnte wegen eines Konflikts der Installationstechnologie nicht automatisch aktualisiert werden. Bitte Installationsart manuell prüfen und das Paket aktualisieren."
                                 }
                             }
                             elseif ($appxSessionFailure -or $appxRegistrationFailure) {
@@ -1041,6 +1043,7 @@ catch {
                                     Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
                                     ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput
                                     ActionOutput=$manualHint; DiagnosticOutput=$packageActionOutput
+                                    RequiresManualAction=$true; ManualActionText=$manualHint
                                 }
                             }
                             elseif ($noInstalledPackage) {
@@ -1048,6 +1051,7 @@ catch {
                                     Manager='Winget'; Available=$true; Success=$false; Skipped=$true
                                     SkipReason="Paket '$packageName' [$packageId] steht in der Upgrade-Liste, konnte aber per ID und exaktem Namen nicht als installiertes Paket aufgelöst werden. Es wurde übersprungen."
                                     ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$packageActionOutput
+                                    RequiresManualAction=$true; ManualActionText="Paket '$packageName' [$packageId] steht in der WinGet-Upgrade-Liste, wurde lokal aber nicht als installiert erkannt. Bitte Installation und Paket-ID manuell prüfen."
                                 }
                             }
                             else {

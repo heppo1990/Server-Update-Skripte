@@ -1533,6 +1533,7 @@ $ErrorCount = 0
 $WindowsAdCount = 0
 $WindowsNonAdCount = 0
 $DeferredUpdatesPlanned = 0
+$ManualActions = @()
 
 if ($ServerADList -ne $null) {
   Write-ScriptLog "Verarbeite AD-Serverliste..."
@@ -1569,6 +1570,25 @@ if ($ServerADList -ne $null) {
         # Package-Manager-Updates
         $packageResults = @(Invoke-PackageManagerUpdates -Servername $Servername -AuthInfo $svcCredential)
         foreach ($packageResult in $packageResults) {
+          $manualActionProperty = $packageResult.PSObject.Properties['RequiresManualAction']
+          $requiresManualAction = $manualActionProperty -and [bool]$manualActionProperty.Value
+          $requiresManualReview = $packageResult.Available -and -not $packageResult.Success -and -not $packageResult.Skipped
+          if ($requiresManualAction -or $requiresManualReview) {
+            $manualTextProperty = $packageResult.PSObject.Properties['ManualActionText']
+            $manualText = if ($manualTextProperty -and -not [string]::IsNullOrWhiteSpace([string]$manualTextProperty.Value)) {
+              [string]$manualTextProperty.Value
+            } elseif (-not [string]::IsNullOrWhiteSpace([string]$packageResult.SkipReason)) {
+              [string]$packageResult.SkipReason
+            } else {
+              "$($packageResult.Manager)-Update konnte nicht automatisch abgeschlossen werden (Exitcode: $($packageResult.ExitCode)). Bitte das Laufprotokoll prüfen und das Update bei Bedarf manuell nacharbeiten."
+            }
+            $ManualActions += [PSCustomObject]@{
+              Server = $Servername
+              Manager = [string]$packageResult.Manager
+              Packages = @($packageResult.Packages)
+              Text = $manualText
+            }
+          }
           if (-not $packageResult.Available -or -not $packageResult.Success) { continue }
           $packages = @($packageResult.Packages)
           if ($packages.Count -eq 0) { continue }
@@ -1892,6 +1912,20 @@ $TotalServerCount = $Anzahl + $LinuxServerCount + $HAServerCount
 $TotalUpdatesInstalled = $UpdCount + $PackageUpdateCount + $LinuxUpdatesInstalled + $HAUpdatesInstalled
 $TotalUpdatesFailed = $ErrorCount + $LinuxUpdatesFailed + $HAUpdatesFailed
 
+if (@($ManualActions).Count -gt 0) {
+  $RepBody += "<div class='warning-box'><h2>Manuelle Prüfung/Aktion erforderlich</h2><ul>"
+  foreach ($manualAction in @($ManualActions)) {
+    $manualServerHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Server)
+    $manualManagerHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Manager)
+    $manualPackages = @($manualAction.Packages | ForEach-Object { [System.Net.WebUtility]::HtmlEncode([string]$_) }) -join '<br>'
+    $manualTextHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Text) -replace "`r?`n", '<br>'
+    $RepBody += "<li><strong>$manualServerHtml ($manualManagerHtml)</strong>"
+    if ($manualPackages) { $RepBody += "<br>$manualPackages" }
+    $RepBody += "<br>$manualTextHtml</li>"
+  }
+  $RepBody += "</ul></div>"
+}
+
 if ($TotalUpdatesInstalled -eq 0 -and $DeferredUpdatesPlanned -gt 0) {
   $RepBody += @"
 <div class="summary warning">
@@ -1992,6 +2026,7 @@ if ($PackageUpdateCount -gt 0) { $summaryLines += "  • Anwendungen: $PackageUp
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesInstalled" }
 if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesInstalled" }
 $summaryLines += @('', "Fehler: $TotalUpdatesFailed", "  • Windows: $ErrorCount")
+if (@($ManualActions).Count -gt 0) { $summaryLines += "Manuelle Prüfung/Aktion erforderlich: $(@($ManualActions).Count)" }
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesFailed" }
 if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesFailed" }
 $summaryLines += @('', "Dauer: $ScriptDuration Minuten")
