@@ -374,6 +374,16 @@ function Get-DeferredWindowsUpdates {
       while ($pendingUpdates.Count -gt 0) {
         $update = $pendingUpdates.Dequeue()
         if ($null -eq $update) { continue }
+        # Einige PSWindowsUpdate-Versionen liefern je Kategorie eine
+        # Collection<PSObject> als einzelnes Remoting-Ergebnis. Diese Collection
+        # muss vor der Metadatenprüfung indexweise entpackt werden; andernfalls
+        # erscheint sie selbst fälschlich als Update ohne KB und Titel.
+        if ($update -is [System.Collections.IList] -and $update -isnot [string]) {
+          for ($updateIndex = 0; $updateIndex -lt $update.Count; $updateIndex++) {
+            if ($null -ne $update[$updateIndex]) { $pendingUpdates.Enqueue($update[$updateIndex]) }
+          }
+          continue
+        }
         $kbValue = ''
         foreach ($propertyName in @('KB', 'KBArticleID', 'KBArticleIDs')) {
           $property = $update.PSObject.Properties[$propertyName]
