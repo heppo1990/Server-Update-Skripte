@@ -374,6 +374,30 @@ function Update-ServerUpdateSettingsDefaults {
     }
 }
 
+# Schützt Klartextpasswörter vor jeder Settings-Migration, damit weder die
+# geänderte Datei noch eine dabei erzeugte Sicherung ein Klartextpasswort enthält.
+function Protect-ServerUpdateSettingsPasswords {
+    param([Parameter(Mandatory)][string]$ScriptRoot)
+
+    $modulePath = Join-Path $ScriptRoot 'WindowsUpdate.Common.psm1'
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+        throw 'WindowsUpdate.Common.psm1 fehlt; Settings werden zur Sicherheit nicht migriert.'
+    }
+    Import-Module -Name $modulePath -Force -ErrorAction Stop
+    $protector = Get-Command -Name Protect-WindowsUpdateSettingsFilePassword -CommandType Function -ErrorAction Stop
+
+    $settingsPaths = [System.Collections.Generic.List[string]]::new()
+    $generalPath = Join-Path $ScriptRoot 'settings.json'
+    if (Test-Path -LiteralPath $generalPath -PathType Leaf) { $settingsPaths.Add($generalPath) }
+    foreach ($settingsFile in @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.settings.json' -File -ErrorAction SilentlyContinue)) {
+        if (-not $settingsPaths.Contains($settingsFile.FullName)) { $settingsPaths.Add($settingsFile.FullName) }
+    }
+
+    foreach ($settingsPath in $settingsPaths) {
+        & $protector -Path $settingsPath
+    }
+}
+
 function Invoke-ServerUpdateScripts {
     [CmdletBinding()]
     param(
@@ -437,6 +461,7 @@ function Invoke-ServerUpdateScripts {
             (Get-ServerUpdateGitBlobSha1 -Path $localPath) -ne $_.Sha
         })
         if ($filesToFetch.Count -eq 0) {
+            Protect-ServerUpdateSettingsPasswords -ScriptRoot $scriptRoot
             Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot
             try {
                 New-Item -Path $cacheDirectory -ItemType Directory -Force | Out-Null
@@ -502,6 +527,7 @@ function Invoke-ServerUpdateScripts {
                     }
                     Copy-Item -LiteralPath (Join-Path $stageDirectory $relativePath) -Destination $localPath -Force -ErrorAction Stop
                 }
+                Protect-ServerUpdateSettingsPasswords -ScriptRoot $scriptRoot
                 Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot
             }
             catch {
