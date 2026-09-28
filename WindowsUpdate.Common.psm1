@@ -1019,11 +1019,28 @@ catch {
                                 $noInstalledPackage = $fallbackOutput -match '(?i)(kein installiertes Paket gefunden|no installed package found)'
                             }
                             $technologyMismatch = $packageActionOutput -match '(?i)(Installationstechnologie unterscheidet sich|installation technology (?:is|differs from|does not match)|technology.*different from the current installed)'
+                            $appxSessionFailure = $packageActionOutput -match '(?i)(0x80073D19|2147958041|Fehler aufgrund der Abmeldung eines Benutzers|An error occurred because a user was logged off)'
+                            $appxRegistrationFailure = $packageActionOutput -match '(?i)(0x80070002|2147942402)' -and
+                                $packageActionOutput -match '(?i)(RegisterByPackageFullName|RegisterPackageByFullName|im Repository nicht gefunden werden konnte|could not be found in the repository)'
                             if ($technologyMismatch) {
                                 $result += [PSCustomObject]@{
                                     Manager='Winget'; Available=$true; Success=$false; Skipped=$true
                                     SkipReason="Paket '$packageName' [$packageId]: WinGet meldet einen Konflikt der Installationstechnologie. Es wurde nichts deinstalliert."
                                     ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$packageActionOutput
+                                }
+                            }
+                            elseif ($appxSessionFailure -or $appxRegistrationFailure) {
+                                $manualCommand = "winget upgrade --id $packageId --exact --source $packageSource --accept-package-agreements --accept-source-agreements"
+                                $failureReason = if ($appxSessionFailure) {
+                                    'Windows meldet 0x80073D19 (Benutzer abgemeldet), während WinGet eine AppX-Abhängigkeit bereitstellt.'
+                                } else {
+                                    'WinGet konnte das AppX-Paket nach der Bereitstellung nicht im Paketrepository registrieren (0x80070002).'
+                                }
+                                $manualHint = "Paket '$packageName' [$packageId] konnte über WinRM nicht abgeschlossen werden. $failureReason Dieses AppX-Update muss direkt auf dem Zielsystem in einer angemeldeten PowerShell-Sitzung ausgeführt werden: $manualCommand"
+                                $result += [PSCustomObject]@{
+                                    Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
+                                    ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput
+                                    ActionOutput=$manualHint; DiagnosticOutput=$packageActionOutput
                                 }
                             }
                             elseif ($noInstalledPackage) {

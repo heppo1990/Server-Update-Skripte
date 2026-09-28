@@ -151,6 +151,12 @@ function Invoke-PackageManagerUpdates {
       }
       if (-not $result.Success) {
         Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $($result.ActionOutput)"
+        $diagnosticProperty = $result.PSObject.Properties['DiagnosticOutput']
+        $debugActionOutput = if ($diagnosticProperty) { [string]$diagnosticProperty.Value } else { [string]$result.ActionOutput }
+        if ($DebugMode -and -not [string]::IsNullOrWhiteSpace($debugActionOutput)) {
+          Write-ScriptLog "Vollständiger $($result.Manager)-Output von ${Servername}:" -IsDebug
+          $debugActionOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-ScriptLog "  $_" -IsDebug }
+        }
         continue
       }
 
@@ -164,9 +170,11 @@ function Invoke-PackageManagerUpdates {
       foreach ($package in @($result.Packages)) {
         Write-ScriptLog "  ${Servername}: $package"
       }
-      if ($DebugMode -and -not [string]::IsNullOrWhiteSpace([string]$result.ActionOutput)) {
+      $diagnosticProperty = $result.PSObject.Properties['DiagnosticOutput']
+      $debugActionOutput = if ($diagnosticProperty) { [string]$diagnosticProperty.Value } else { [string]$result.ActionOutput }
+      if ($DebugMode -and -not [string]::IsNullOrWhiteSpace($debugActionOutput)) {
         Write-ScriptLog "Vollständiger $($result.Manager)-Output von ${Servername}:" -IsDebug
-        $result.ActionOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-ScriptLog "  $_" -IsDebug }
+        $debugActionOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-ScriptLog "  $_" -IsDebug }
       }
     }
     return $results
