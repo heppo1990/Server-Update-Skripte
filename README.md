@@ -56,26 +56,80 @@ Bei einem lokalen Start aus PowerShell 7 aktiviert `Enable-PSRemoting` nur Power
 
 Für eine geplante Aufgabe den Skriptordner im Feld **„Starten in“** setzen und das jeweilige Skript relativ aufrufen, beispielsweise `powershell.exe -NonInteractive -ExecutionPolicy Bypass -File ".\Install-ServersUpdates.ps1"`. Dadurch bleibt der Speicherort der Skripte frei wählbar.
 
-Wichtige Werte in `UpdateSettings`:
+Die folgenden Tabellen beschreiben alle Felder aus `default_settings.json`. Optionale Felder können zusätzlich verwendet werden, wenn sie in der jeweiligen Beschreibung genannt sind. Die Werte der allgemeinen und skriptspezifischen Dateien überschreiben die Vorlage nur dort, wo sie tatsächlich gesetzt sind.
 
-| Einstellung                   | Bedeutung                                                                                                                                                                                                |
-|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `TargetComputers`             | `Server` für Windows Server oder `All` für alle Windows-Computer in AD.                                                                                                                                  |
-| `AdditionalComputers`         | Zusätzliche Rechner außerhalb der AD.                                                                                                                                                                    |
-| `HypervisorComputers`         | Hypervisoren außerhalb der AD, z. B. `SrvHv01`.                                                                                                                                                          |
-| `ClientCertThumbprint`        | Fingerabdruck des lokalen Client-Zertifikats für Nicht-AD-Ziele. Wird durch das Zertifikat-Setup synchronisiert.                                                                                         |
-| `ClearUpdateCacheBeforeCheck` | `true` (Standard): Leert vor dem Update-Check Download und DataStore und stößt eine neue Erkennung an. `false`: überspringt diese Bereinigung, etwa bei häufigen Prüfungen.                              |
-| `EnableWingetUpdates`         | `true` (Standard): Winget-Pakete prüfen und beim Installationslauf aktualisieren. `false`: Winget vollständig überspringen.                                                                              |
-| `EnableChocolateyUpdates`     | `true` (Standard): Chocolatey-Pakete prüfen und beim Installationslauf aktualisieren. `false`: Chocolatey vollständig überspringen.                                                                      |
-| `DeferredUpdateCategories`    | Update-Kategorien, die zunächst ausgelassen und später gemeinsam nachinstalliert werden sollen. Beispiele und Hinweise siehe [Kategorien für zurückgestellte Updates](#kategorien-für-zurückgestellte-updates). |
-| `DeferredUpdateKBs`           | Einzelne KBs, die zunächst ausgelassen werden sollen, z. B. `KB5122871`.                                                                                                                                 |
-| `InstallDeferredUpdates`      | `true`: zurückgestellte Updates werden nur dann nach dem nächsten Neustart nachinstalliert, wenn die Auswahl auf dem jeweiligen Ziel tatsächlich noch Updates enthält. `false`: sie bleiben ausgelassen. |
-| `PhysicalRebootTime`          | Startzeit des Wartungsfensters für physische Rechner, z. B. `03:00`. Leer bedeutet: kein automatischer Neustart.                                                                                        |
-| `PhysicalRebootWindowEndTime` | Spätester Beginn eines physischen Neustarts und Ende des Wartungsfensters, z. B. `05:00`. Leer lässt das Fensterende unbeschränkt.                                                                      |
-| `VMRebootStartTime`           | Startzeit des VM-Wartungsfensters und Uhrzeit für die erste VM, z. B. `19:00`. Leer bedeutet: kein zeitgesteuerter VM-Neustart.                                                                         |
-| `VMRebootWindowEndTime`       | Spätester Beginn eines VM-Neustarts und Ende des VM-Wartungsfensters. Leer lässt das Fensterende unbeschränkt.                                                                                           |
-| `VMRebootIntervalMinutes`     | Zeitversatz jeder weiteren VM; `0` erlaubt gleichzeitige VM-Neustarts, ein positiver Wert staffelt sie.                                                                                                  |
-| `VMRebootImmediately`         | `true` plant VM-Neustarts zeitnah; ein positives Intervall staffelt sie auch dann. Ein konfiguriertes Fensterende begrenzt den zulässigen Start.                                                          |
+### `UpdateSettings`
+
+| Feld | Wirkung |
+|---|---|
+| `SucheOnline` | Bestimmt, ob PSWindowsUpdate auch die Quelle Microsoft Update statt nur der konfigurierten Windows-Update-Quelle durchsucht. |
+| `WriteReport` | Aktiviert oder deaktiviert das Speichern des HTML-Berichts. Ein Mailversand wird separat durch `MailSettings.<Skript>.SendMail` gesteuert. |
+| `KeepReportFiles` | Maximale Anzahl gespeicherter HTML-Berichte je Skript; ältere Berichte werden entfernt. |
+| `WriteLogFile` | Aktiviert oder deaktiviert die ausführliche lokale Logdatei. |
+| `KeepLogFiles` | Maximale Anzahl gespeicherter Logdateien je Skript; ältere Logs werden entfernt. |
+| `DetectNowWaitSeconds` | Wartezeit nach dem Anstoßen einer Windows-Update-Erkennung, bevor das Skript mit der Suche fortfährt. |
+| `ClearUpdateCacheBeforeCheck` | Bei `true` werden vor dem Check Download- und DataStore-Cache bereinigt und eine neue Erkennung angestoßen; `false` überspringt diese Bereinigung. |
+| `EnableWingetUpdates` | Bei `true` werden Winget-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Winget. |
+| `EnableChocolateyUpdates` | Bei `true` werden Chocolatey-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Chocolatey. Chocolatey wird dadurch nicht installiert. |
+| `TargetComputers` | AD-Auswahl: `Server` verarbeitet Windows-Server, `All` alle passenden Windows-Computer. Zusätzliche Geräte werden über die nächsten beiden Listen angegeben. |
+| `AdditionalComputers` | Liste zusätzlicher Computer, die unabhängig von der AD-Auswahl verarbeitet werden. |
+| `HypervisorComputers` | Liste der Hypervisoren außerhalb der AD-Auswahl; sie werden als eigene Zielgruppe für Remoting und Neustartplanung behandelt. |
+| `ClientCertThumbprint` | Fingerabdruck des Client-Zertifikats für zertifikatsbasiertes Remoting zu Nicht-AD-Zielen. Das Verteilungs-/Zertifikat-Setup kann diesen Wert synchronisieren. |
+| `DeferredUpdateCategories` | Kategorien, die beim regulären Update-Lauf ausgelassen und für die Nachinstallation vorgemerkt werden. Auswahl wird später gemeinsam abgearbeitet. Siehe [Kategorien für zurückgestellte Updates](#kategorien-für-zurückgestellte-updates). |
+| `DeferredUpdateKBs` | Einzelne KB-Nummern, die ausgelassen und für die Nachinstallation vorgemerkt werden, zum Beispiel `KB5122871`. |
+| `InstallDeferredUpdates` | Bei `true` richtet das Installationsskript eine Nachinstallationsaufgabe ein, wenn zurückgestellte Updates vorhanden sind; bei `false` bleiben diese Updates ausgelassen. |
+| `PhysicalRebootTime` | Beginn des Wartungsfensters und geplante Neustartzeit für physische Systeme im Format `HH:mm`. Leer bedeutet, dass kein zeitgesteuerter Neustart geplant wird. |
+| `PhysicalRebootWindowEndTime` | Ende des Wartungsfensters für physische Systeme. Neustarts dürfen spätestens zu dieser Zeit beginnen; leer lässt das Fensterende offen. |
+| `VMRebootStartTime` | Beginn des VM-Wartungsfensters und geplante Neustartzeit der ersten VM im Format `HH:mm`. |
+| `VMRebootWindowEndTime` | Ende des VM-Wartungsfensters. Neustarts dürfen spätestens zu dieser Zeit beginnen; leer lässt das Fensterende offen. |
+| `VMRebootImmediately` | Bei `true` werden VM-Neustarts zeitnah eingeplant, unter Beachtung der Staffelung und des Wartungsfensters. Bei `false` gilt der konfigurierte Start des Wartungsfensters. |
+| `VMRebootIntervalMinutes` | Abstand zwischen geplanten Neustarts von VMs. `0` erlaubt gleichzeitige Neustarts; ein positiver Wert staffelt die VMs. Die Staffelung wird bei der Planung physischer Neustarts berücksichtigt. |
+
+### `MailSettings`
+
+| Feld | Wirkung |
+|---|---|
+| `CompanyName` | Firmenname im Betreff. Das Skript setzt ihn automatisch genau einmal vor den Betreff des jeweiligen Laufs: `Firmenname - Betreff`. Ist der Name leer, wird nur der Betreff verwendet. |
+| `Host` | Hostname des SMTP-Servers. |
+| `Port` | TCP-Port des SMTP-Servers, üblicherweise `587` für STARTTLS oder `465` für implizites TLS, je nach Mailserver. |
+| `UseSSL` | Aktiviert die verschlüsselte SMTP-Verbindung gemäß der vom Mailserver erwarteten TLS-Verbindung. |
+| `Auth` | Legt fest, ob sich das Skript mit SMTP-Benutzerdaten anmeldet. |
+| `AuthUser` | Benutzername für die SMTP-Anmeldung, sofern `Auth` aktiviert ist. |
+| `AuthPass` | SMTP-Passwort. Ein Klartextwert wird beim Laden automatisch maschinengebunden mit DPAPI geschützt; in `default_settings.json` gehört kein echtes Passwort. |
+| `Sender` | Absenderadresse der E-Mail. Muss für den SMTP-Server gültig und zulässig sein. Wenn das Feld leer ist und `CompanyName` gesetzt ist, erzeugt das Skript automatisch `Updates@<Firmenname>.de` (mit bereinigtem Namen). |
+| `MailTo` | Empfängeradresse der E-Mail. |
+| `MailCC` | Optionale CC-Empfänger. |
+| `MailBCC` | Optionale BCC-Empfänger. |
+| `Check.SendMail` | Bei `true` versendet `Check-ServersUpdates.ps1` den Check-Bericht per E-Mail. |
+| `Check.Subject` | Betrefftext für den Check-Bericht; `CompanyName` wird automatisch davor gesetzt. |
+| `Download.SendMail` | Bei `true` versendet `Download-ServersUpdates.ps1` den Download-Bericht. |
+| `Download.Subject` | Betrefftext für den Download-Bericht; `CompanyName` wird automatisch davor gesetzt. |
+| `Install.SendMail` | Bei `true` versendet `Install-ServersUpdates.ps1` den Installationsbericht. |
+| `Install.Subject` | Betrefftext für den Installationsbericht; `CompanyName` wird automatisch davor gesetzt. |
+
+Bei der Migration alter Dateien wird `SendMail` anhand des Dateinamens dem passenden Skriptbereich zugeordnet (`Check-ServersUpdates.settings.json` → `Check`, `Download-ServersUpdates.settings.json` → `Download`, `Install-ServersUpdates.settings.json` → `Install`). Alte Betrefftexte werden verworfen, damit ein alter Firmenname im `Subject` nicht zusätzlich zum automatisch vorangestellten `CompanyName` erscheint. Die aktuellen Betrefftexte kommen aus den Standardwerten.
+
+### `LinuxSettings`
+
+| Feld | Wirkung |
+|---|---|
+| `Hosts` | Liste der Linux-Ziele. Jeder Eintrag braucht `Host` (alternativ `Name`) und `User`, zum Beispiel `{ "Host": "linux01.example.local", "User": "admin" }`. Eine leere Liste bedeutet, dass keine Linux-Ziele verarbeitet werden. |
+| `ConnectTimeoutSeconds` | Maximale Wartezeit für den SSH-Verbindungsaufbau in Sekunden. |
+| `LockWaitMinutes` | Maximale Wartezeit auf eine vorhandene Update-Sperre auf dem Linux-Ziel, bevor der Lauf abbricht. |
+
+### `HomeAssistantSettings`
+
+| Feld | Wirkung |
+|---|---|
+| `Host` | Hostname oder IP-Adresse der Home-Assistant-OS-Instanz. Leer bedeutet, dass Home Assistant nicht konfiguriert ist. |
+| `User` | SSH-Benutzer für die Verbindung zur Home-Assistant-Instanz. |
+| `Port` | SSH-Port, normalerweise `22`. |
+| `KeyPath` | Optionaler Pfad zum privaten SSH-Schlüssel. Ohne Angabe wird der vorgesehene Schlüssel im Benutzerprofil verwendet. |
+| `SSHPath` | Optionaler Pfad zu `ssh.exe`. Ohne Angabe verwendet das Skript OpenSSH aus dem Systempfad beziehungsweise dem Windows-OpenSSH-Verzeichnis. |
+| `CommandTimeoutSeconds` | Optionale maximale Laufzeit eines einzelnen HA-CLI-Aufrufs in Sekunden; Standardwert `300`. |
+| `RebootWaitSeconds` | Optionale maximale Wartezeit auf die Rückkehr von SSH und Supervisor nach einem sofortigen Neustart; Standardwert `300`. |
+
+Home Assistant verwendet für geplante Neustarts die gemeinsamen VM-/physischen Wartungszeitfelder aus `UpdateSettings`.
 
 ### Kategorien für zurückgestellte Updates
 
