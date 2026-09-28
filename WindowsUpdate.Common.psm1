@@ -1070,16 +1070,26 @@ catch {
                                 }
                             }
                             else {
+                                $installerErrorCode = [regex]::Match($packageActionOutput, '(?i)0x[0-9a-f]{8}').Value
+                                $packageErrorSummary = "Paket '$packageName' [$packageId] konnte nicht automatisch aktualisiert werden"
+                                if ($installerErrorCode) { $packageErrorSummary += " ($installerErrorCode)" }
+                                elseif ($null -ne $packageExitCode) { $packageErrorSummary += " (Exitcode $packageExitCode)" }
+                                $packageErrorSummary += '; manuelle Prüfung erforderlich.'
                                 $result += [PSCustomObject]@{
                                     Manager='Winget'; Available=$true; Success=($packageExitCode -eq 0 -or $packageExitCode -in $noUpdateCodes); Skipped=$false
                                     SkipReason=''; ExitCode=$packageExitCode; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$packageActionOutput
+                                    ErrorSummary=$packageErrorSummary; DiagnosticOutput=$packageActionOutput; RequiresManualAction=($packageExitCode -ne 0 -and $packageExitCode -notin $noUpdateCodes)
                                 }
                             }
                         }
                         catch {
+                            $packageException = $_.Exception.Message
+                            if ($packageException.Length -gt 240) { $packageException = $packageException.Substring(0, 237) + '...' }
                             $result += [PSCustomObject]@{
                                 Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
                                 ExitCode=$null; Packages=@($packageLine); AvailableOutput=$availableOutput; ActionOutput=$_.Exception.Message
+                                ErrorSummary="Paket '$packageName' [$packageId] konnte nicht automatisch aktualisiert werden; manuelle Prüfung erforderlich. $packageException"
+                                DiagnosticOutput=$_.Exception.ToString(); RequiresManualAction=$true
                             }
                         }
                     }

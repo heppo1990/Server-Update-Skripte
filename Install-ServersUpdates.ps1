@@ -150,7 +150,9 @@ function Invoke-PackageManagerUpdates {
         continue
       }
       if (-not $result.Success) {
-        Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $($result.ActionOutput)"
+        $errorSummaryProperty = $result.PSObject.Properties['ErrorSummary']
+        $errorSummary = if ($errorSummaryProperty -and -not [string]::IsNullOrWhiteSpace([string]$errorSummaryProperty.Value)) { [string]$errorSummaryProperty.Value } else { [string]$result.ActionOutput }
+        Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $errorSummary"
         $diagnosticProperty = $result.PSObject.Properties['DiagnosticOutput']
         $debugActionOutput = if ($diagnosticProperty) { [string]$diagnosticProperty.Value } else { [string]$result.ActionOutput }
         if ($DebugMode -and -not [string]::IsNullOrWhiteSpace($debugActionOutput)) {
