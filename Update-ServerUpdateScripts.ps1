@@ -37,10 +37,16 @@ function Get-ServerUpdateConfiguration {
         try {
             $settings = Get-Content -LiteralPath $configurationFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
             if ($settings.LinuxSettings -and $settings.LinuxSettings.PSObject.Properties['Hosts']) {
-                $configuration.LinuxHosts = @($settings.LinuxSettings.Hosts | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                $configuredLinuxHosts = @($settings.LinuxSettings.Hosts | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                if ($configuredLinuxHosts.Count -gt 0) {
+                    $configuration.LinuxHosts = @($configuration.LinuxHosts + $configuredLinuxHosts | Select-Object -Unique)
+                }
             }
             if ($settings.HomeAssistantSettings -and $settings.HomeAssistantSettings.PSObject.Properties['Host']) {
-                $configuration.HomeAssistantHost = [string]$settings.HomeAssistantSettings.Host
+                $configuredHomeAssistantHost = [string]$settings.HomeAssistantSettings.Host
+                if (-not [string]::IsNullOrWhiteSpace($configuredHomeAssistantHost)) {
+                    $configuration.HomeAssistantHost = $configuredHomeAssistantHost
+                }
             }
         }
         catch {
@@ -438,6 +444,9 @@ function Invoke-ServerUpdateScripts {
                     ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cachePath -Encoding UTF8 -Force
             }
             catch { Write-Warning 'Update-Metadaten konnten nicht lokal gespeichert werden; beim nächsten Lauf wird erneut geprüft.' }
+            if ($scriptName -eq 'Update-ServerUpdateScripts.ps1') {
+                Write-Host 'Alle benötigten Skriptdateien sind bereits aktuell. Die Settings wurden geprüft und gegebenenfalls migriert.' -ForegroundColor Green
+            }
             return
         }
 
@@ -752,4 +761,10 @@ catch {
             }
         }
     }
+}
+
+# Direkter Aufruf synchronisiert den vollständigen für die vorhandenen Settings
+# benötigten Programmstand. Als Bibliothek wird diese Datei nur dot-sourced.
+if ($MyInvocation.InvocationName -ne '.') {
+    Invoke-ServerUpdateScripts -ScriptPath $PSCommandPath
 }
