@@ -4,6 +4,8 @@ Diese Sammlung verwaltet Windows-, Linux- und Home-Assistant-Updates zentral. Al
 
 Bei Altinstallationen mit einer alleinstehenden `default.settings.json` behandelt der Updater diese Datei als allgemeine Kundeneinstellung. Er migriert ihre Felder und die alte flache Mailkonfiguration, legt wie bei anderen Änderungen eine Sicherung an und benennt sie nach erfolgreicher Migration in `settings.json` um. Gibt es bereits eine `settings.json`, wird `default.settings.json` nicht als Kundeneinstellung übernommen oder umbenannt.
 
+Die Mailkonfiguration lässt sich mit `Check-ServersUpdates.ps1 -TestMail` gezielt prüfen. Der Modus lädt die wirksamen allgemeinen und skriptspezifischen Settings, validiert erforderliche SMTP-Felder und sendet genau eine Testnachricht an die konfigurierten Empfänger. Er sendet diese Testmail auch dann, wenn der normale Check-Mailversand mit `SendMail: false` ausgeschaltet ist, und startet keine Windows-Update-Prüfung.
+
 ## Automatische Skriptaktualisierung
 
 Bei jedem Lauf von `Check-ServersUpdates.ps1` wird zusätzlich das lokal auf dem Verwaltungsrechner verwendete Modul `PSWindowsUpdate` mit der aktuellen Version aus der PowerShell Gallery verglichen. Ist eine neuere Version verfügbar, installiert der Check sie maschinenweit und stellt dieselbe Modulversion in den Modulpfaden von Windows PowerShell 5.1 und PowerShell 7 bereit; ältere PSWindowsUpdate-Versionen in diesen beiden Pfaden werden entfernt. Ist die PowerShell Gallery nicht erreichbar oder schlägt das Aktualisieren fehl, protokolliert der Check eine Warnung und verwendet die vorhandene Modulversion weiter. Diese Laufzeitaktualisierung betrifft den Verwaltungsrechner; die PSWindowsUpdate-Module auf den Zielservern werden weiterhin durch die Verteilung aktualisiert.

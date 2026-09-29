@@ -43,6 +43,9 @@
 #>
 
 
+[CmdletBinding()]
+param([switch]$TestMail)
+
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
 $scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
@@ -85,7 +88,7 @@ function Get-CheckSettingsFromCommon {
 $Settings = $null
 $UpdateSettings = $null
 $MailSettings = $null
-$ComputerFQDN = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+$ComputerFQDN = if ($TestMail) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName }
 $UpdCount = 0
 $PackageUpdateCount = 0
 $WingetUpdateCount = 0
@@ -365,6 +368,57 @@ $LinuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Propert
 $HAConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
 $UpdateSettings = $Settings.UpdateSettings
 $MailSettings = $Settings.MailSettings
+
+if ($TestMail) {
+  if ($null -eq $MailSettings) {
+    Write-Error 'MailSettings fehlen in der geladenen Konfiguration.'
+    exit 2
+  }
+
+  $companyName = [string]$MailSettings.CompanyName
+  if ([string]::IsNullOrWhiteSpace([string]$MailSettings.Sender) -and -not [string]::IsNullOrWhiteSpace($companyName)) {
+    $mailSafeName = ConvertTo-WindowsUpdateMailSafeString -Text $companyName
+    $MailSettings.Sender = "Updates@$mailSafeName.de"
+  }
+
+  $requiredMailFields = @('Host', 'Port', 'Sender', 'MailTo')
+  if ([bool]$MailSettings.Auth) { $requiredMailFields += @('AuthUser', 'AuthPass') }
+  $missingMailFields = @($requiredMailFields | Where-Object {
+    $property = $MailSettings.PSObject.Properties[$_]
+    $null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)
+  })
+  if ($missingMailFields.Count -gt 0) {
+    Write-Error "Mailtest abgebrochen. Diese Pflichtfelder fehlen: $($missingMailFields -join ', ')."
+    exit 2
+  }
+
+  $testSubject = if ([string]::IsNullOrWhiteSpace($companyName)) {
+    'Server-Updates - Mailkonfigurationstest'
+  } else {
+    "$companyName - Mailkonfigurationstest"
+  }
+  $testBody = @"
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"></head><body style="font-family:Arial,sans-serif">
+<h2>Mailkonfiguration erfolgreich getestet</h2>
+<p>Diese Testnachricht wurde von <strong>$env:COMPUTERNAME</strong> am $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss') versendet.</p>
+<p>SMTP-Server: $([System.Net.WebUtility]::HtmlEncode([string]$MailSettings.Host)):$([int]$MailSettings.Port)<br>
+SSL: $([bool]$MailSettings.UseSSL)<br>
+Authentifizierung: $([bool]$MailSettings.Auth)<br>
+Absender: $([System.Net.WebUtility]::HtmlEncode([string]$MailSettings.Sender))<br>
+Empfänger: $([System.Net.WebUtility]::HtmlEncode([string]$MailSettings.MailTo))</p>
+</body></html>
+"@
+  Write-Host "Sende Mailkonfigurationstest an $($MailSettings.MailTo) über $($MailSettings.Host):$($MailSettings.Port)..."
+  $testMailSent = Send-WindowsUpdateHtmlMail -MailSettings $MailSettings -Subject $testSubject -HtmlBody $testBody -RetryCount 1 -RetryDelaySeconds 0 -WriteLog { param($message) Write-ScriptLog $message }
+  if (-not $testMailSent) {
+    Write-Error 'Mailkonfigurationstest fehlgeschlagen. Details stehen im Check-Log.'
+    exit 1
+  }
+  Write-Host 'Mailkonfigurationstest erfolgreich versendet.' -ForegroundColor Green
+  exit 0
+}
+
 $TargetComputers = $UpdateSettings.TargetComputers
 if ([string]::IsNullOrWhiteSpace($TargetComputers)) {
   $TargetComputers = "Server"
