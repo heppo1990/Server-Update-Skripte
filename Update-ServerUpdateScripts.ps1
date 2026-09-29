@@ -544,7 +544,9 @@ function Invoke-ServerUpdateScripts {
     try {
         if ($latestCommit -notmatch '^[0-9a-f]{40}$') {
             $feedUrl = "https://github.com/$repoOwner/$repoName/commits/$branch.atom"
-            $feed = Invoke-WebRequest -Uri $feedUrl -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            $feed = Invoke-ServerUpdateGitHubRequest -Description 'Commitfeed' -Request {
+                Invoke-WebRequest -Uri $feedUrl -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            }
             $commitMatch = [regex]::Match([string]$feed.Content, '::Commit/([0-9a-f]{40})')
             if (-not $commitMatch.Success) { throw 'Die aktuelle Commit-ID konnte nicht aus dem GitHub-Feed gelesen werden.' }
             $latestCommit = $commitMatch.Groups[1].Value
@@ -569,7 +571,9 @@ function Invoke-ServerUpdateScripts {
         if ($manifestCommit -ne $latestCommit -or $repositoryBlobs.Count -eq 0) {
             $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'Server-Update-Skripte-Updater' }
             $treeUrl = "https://api.github.com/repos/$repoOwner/$repoName/git/trees/$latestCommit`?recursive=1"
-            $treeResponse = Invoke-RestMethod -Uri $treeUrl -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+            $treeResponse = Invoke-ServerUpdateGitHubRequest -Description 'Dateiliste' -Request {
+                Invoke-RestMethod -Uri $treeUrl -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+            }
             if ($treeResponse.truncated) { throw 'GitHub lieferte eine unvollständige Dateiliste.' }
             $repositoryBlobs = @{}
             foreach ($item in @($treeResponse.tree | Where-Object { $_.type -eq 'blob' })) {
@@ -616,7 +620,9 @@ function Invoke-ServerUpdateScripts {
                 if (-not (Test-Path -LiteralPath $stageParent -PathType Container)) {
                     New-Item -Path $stageParent -ItemType Directory -Force | Out-Null
                 }
-                Invoke-WebRequest -Uri $sourceUrl -UseBasicParsing -TimeoutSec 30 -OutFile $stagePath -ErrorAction Stop
+                Invoke-ServerUpdateGitHubRequest -Description "Datei '$relativePath'" -Request {
+                    Invoke-WebRequest -Uri $sourceUrl -UseBasicParsing -TimeoutSec 30 -OutFile $stagePath -ErrorAction Stop
+                } | Out-Null
                 if (-not (Test-Path -LiteralPath $stagePath -PathType Leaf)) {
                     throw "GitHub lieferte keine gültige Datei für '$relativePath'."
                 }
@@ -685,7 +691,8 @@ function Invoke-ServerUpdateScripts {
         $restartRequired = $changedFiles.Count -gt 0
     }
     catch {
-        Write-Warning "Automatische Skriptaktualisierung fehlgeschlagen; der vorhandene lokale Stand wird verwendet. Ursache: $($_.Exception.Message)"
+        $shortCause = Get-ServerUpdateShortError -Exception $_.Exception
+        Write-Warning "Automatische Skriptaktualisierung fehlgeschlagen; lokaler Stand wird verwendet. Ursache: $shortCause"
     }
 
     if ($restartRequired) {
@@ -966,6 +973,45 @@ catch {
                 foreach ($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }
                 Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
             }
+        }
+    }
+}
+
+function Get-ServerUpdateShortError {
+    param([Parameter(Mandatory)][System.Exception]$Exception)
+
+    $message = [string]$Exception.Message
+    if ($message -match '(?i)(übertragungsverbindung|remotehost geschlossen|connection.*closed|forcibly closed|unable to read data)') {
+        return 'GitHub hat die Verbindung während der Übertragung geschlossen.'
+    }
+    if ($message -match '(?i)(timeout|zeitüberschreitung|operation has timed out)') {
+        return 'Zeitüberschreitung bei der Verbindung zu GitHub.'
+    }
+    $message = ([string]($message -split "`r?`n")[0]).Trim()
+    $message = [regex]::Replace($message, '\s+', ' ')
+    if ($message.Length -gt 180) { $message = $message.Substring(0, 177) + '...' }
+    if ([string]::IsNullOrWhiteSpace($message)) { return 'Unbekannter Netzwerkfehler.' }
+    return $message
+}
+
+function Invoke-ServerUpdateGitHubRequest {
+    param(
+        [Parameter(Mandatory)][string]$Description,
+        [Parameter(Mandatory)][scriptblock]$Request
+    )
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            return & $Request
+        }
+        catch {
+            $shortCause = Get-ServerUpdateShortError -Exception $_.Exception
+            $transient = $_.Exception.Message -match '(?i)(übertragungsverbindung|remotehost|connection|verbindung|timeout|zeitüberschreitung|temporar|429|\b5\d\d\b|unable to read data)'
+            if (-not $transient -or $attempt -ge 3) {
+                throw "GitHub-$Description nach $attempt Versuch(en) fehlgeschlagen: $shortCause"
+            }
+            Write-Warning "GitHub-${Description}: Versuch $attempt/3 fehlgeschlagen ($shortCause); nächster Versuch in 30 Sekunden."
+            Start-Sleep -Seconds 30
         }
     }
 }
