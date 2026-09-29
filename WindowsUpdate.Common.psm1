@@ -1420,24 +1420,22 @@ catch {
                     }
                     if ($sourceFailureLines.Count -gt 0) {
                         $sourceResetState = Get-WingetSourceResetState
-                        if ($sourceResetState.Allowed) {
-                            try {
-                                Reset-WingetDefaultSources -WingetPath $wingetPath
-                                $sourceResetPerformed = $true
-                                try { Save-WingetSourceResetState -State $sourceResetState }
-                                catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
-                                $wingetBootstrapMessage += ' WinGet-Standardquellen wurden zurückgesetzt; die Paketabfrage wird wiederholt.'
-                                $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
-                                $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
-                                    Test-WingetSourceFailureLine -Line ([string]$_)
-                                })
-                            }
-                            catch {
-                                $wingetBootstrapMessage += " Zurücksetzen der WinGet-Standardquellen fehlgeschlagen: $($_.Exception.Message)"
-                            }
+                        # Bei einem echten Quellenfehler gilt die 24-Stunden-
+                        # Sperre nicht. Der Reset prüft weiterhin, dass vorab
+                        # ausschließlich die bekannten Standardquellen vorliegen.
+                        try {
+                            Reset-WingetDefaultSources -WingetPath $wingetPath
+                            $sourceResetPerformed = $true
+                            try { Save-WingetSourceResetState -State $sourceResetState }
+                            catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
+                            $wingetBootstrapMessage += ' WinGet-Standardquellen wurden zurückgesetzt; die Paketabfrage wird wiederholt.'
+                            $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                            $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
+                                Test-WingetSourceFailureLine -Line ([string]$_)
+                            })
                         }
-                        else {
-                            $wingetBootstrapMessage += ' Der Quellenreset wurde übersprungen, da auf diesem Zielsystem innerhalb der letzten 24 Stunden bereits ein Reset ausgeführt wurde.'
+                        catch {
+                            $wingetBootstrapMessage += " Zurücksetzen der WinGet-Standardquellen fehlgeschlagen: $($_.Exception.Message)"
                         }
                     }
                 }
