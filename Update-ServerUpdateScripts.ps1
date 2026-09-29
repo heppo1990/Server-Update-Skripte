@@ -432,7 +432,19 @@ function Update-ServerUpdateSettingsDefaults {
             # Austausch erzeugt keine zweite Sicherung mit Klartextpasswort.
             $moveWithOverwrite = [System.IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
             if ($null -ne $moveWithOverwrite) { [System.IO.File]::Move($temporaryPath, $settingsPath, $true) }
-            else { [System.IO.File]::Replace($temporaryPath, $settingsPath, $null) }
+            else {
+                # .NET Framework (Windows PowerShell 5.1) verlangt einen
+                # gültigen Sicherungspfad für File.Replace. Diese temporäre
+                # Sicherung wird direkt wieder entfernt; die dauerhafte
+                # Sicherung ist bereits unter $backupPath angelegt.
+                $replaceBackupPath = $temporaryPath + '.replace.bak'
+                try { [System.IO.File]::Replace($temporaryPath, $settingsPath, $replaceBackupPath) }
+                finally {
+                    if (Test-Path -LiteralPath $replaceBackupPath -PathType Leaf) {
+                        [System.IO.File]::Delete($replaceBackupPath)
+                    }
+                }
+            }
             $temporaryPath = $null
             if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
                 throw 'Einstellungsdatei oder Sicherung fehlt nach dem atomaren Austausch.'
