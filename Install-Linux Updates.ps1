@@ -73,7 +73,7 @@ $script:VMRebootIndex = $VMRebootIndexStart
 $script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new()
 
 function Write-LinuxLog {
-    param([Parameter(Mandatory)][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info')
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info')
     $color = @{ Info='White'; Success='Green'; Warning='Yellow'; Error='Red' }[$Level]
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
     Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color
