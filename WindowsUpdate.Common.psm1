@@ -30,6 +30,8 @@ function Format-WindowsUpdateConsoleError {
     param([AllowEmptyString()][string]$Message)
 
     if ([string]::IsNullOrWhiteSpace($Message)) { return $Message }
+    # Ein Fehlerzähler von null ist ein erfolgreicher Status, keine Meldung.
+    if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*0(?:\D|$)') { return $Message }
     if ($Message -notmatch '(?i)^\s*(WARNUNG|WARNING|FEHLER\b|ERROR\b|\[WARN\]|\[ERROR\])|^\s*Fehler bei\b|fehlgeschlagen|konnte nicht|UnableToDownload|Access is denied|Zugriff verweigert|Exception|Fehler beim') { return $Message }
 
     $target = $null
@@ -133,8 +135,8 @@ function Test-WindowsUpdateConsoleMessage {
         $script:WindowsUpdateConsolePackageRowsActive = $Message -notmatch '(?i)Keine Paketupdates'
         return $true
     }
-    if ($Message -match '(?i)(Windows-Updates installiert|Updates verfügbar|Nachinstallation auf .* geplant|Neustart(aufgabe)? auf .* geplant|Neustart auf .* verschoben|Linux-(Check|Zusammenfassung)|Linux-Update(-Prüfung)? auf .* abgeschlossen|Linux auf .* (keine Paketupdates|Paketupdates verfügbar)|Home-Assistant-Check|Home Assistant auf .*(keine Updates|Update\(s\) verfügbar))') {
-        if ($Message -match '(?i)(Linux auf .* Paketupdates verfügbar|Home Assistant auf .*Update\(s\) verfügbar)') { $script:WindowsUpdateConsolePackageRowsActive = $true }
+    if ($Message -match '(?i)(Windows-Updates installiert|Updates verfügbar|Nachinstallation auf .* geplant|Neustart(aufgabe)? auf .* geplant|Neustart auf .* verschoben|Linux-(Check|Zusammenfassung)|Linux-Update(-Prüfung)? auf .* abgeschlossen|Linux auf .* (keine Paketupdates|Paketupdates verfügbar|Paketupdates installiert)|Home-Assistant-Check|Home Assistant auf .*(keine Updates|Update\(s\) verfügbar|Update\(s\) installiert))') {
+        if ($Message -match '(?i)(Linux auf .* (Paketupdates verfügbar|Paketupdates installiert)|Home Assistant auf .*Update\(s\) (verfügbar|installiert))') { $script:WindowsUpdateConsolePackageRowsActive = $true }
         return $true
     }
     return $false

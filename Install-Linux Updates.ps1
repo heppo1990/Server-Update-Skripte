@@ -459,7 +459,7 @@ foreach ($entry in $hostEntries) {
         }
         if ($result.UpdateCount -gt 0) { $updateDetails += [PSCustomObject]@{ Host=$remoteHost; UpdateCount=$result.UpdateCount; Packages=$result.UpdatedPackages } }
         $statusText = if ($result.RebootRequired) { 'Erfolgreich (Neustart erforderlich)' } else { 'Erfolgreich' }
-        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status=$statusText; UpdateCount=$result.UpdateCount; Packages=($result.UpdatedPackages -join ', '); IsVirtual=$isVirtual; RebootScheduled=$rebootScheduled; LogFile=$logFile }
+        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status=$statusText; UpdateCount=$result.UpdateCount; Packages=($result.UpdatedPackages -join ', '); PackageList=@($result.UpdatedPackages); IsVirtual=$isVirtual; RebootScheduled=$rebootScheduled; LogFile=$logFile }
         $completionText = if ($DryRun) {
             "Linux-Update-Prüfung auf $remoteHost abgeschlossen: $($result.UpdateCount) Update(s) verfügbar."
         }

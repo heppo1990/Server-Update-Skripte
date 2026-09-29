@@ -1999,6 +1999,32 @@ $TotalServerCount = $Anzahl + $LinuxServerCount + $HAServerCount
 $TotalUpdatesInstalled = $UpdCount + $PackageUpdateCount + $LinuxUpdatesInstalled + $HAUpdatesInstalled
 $TotalUpdatesFailed = $ErrorCount + $LinuxUpdatesFailed + $HAUpdatesFailed
 
+# Linux- und Home-Assistant-Updates wie Windows-/Paketupdates auch vor der
+# Gesamtsumme je Ziel mit Namen und Versionen ausgeben.
+foreach ($hostInfo in @($LinuxUpdateDetails)) {
+  if ($hostInfo.Status -eq 'Fehler') {
+    Write-ScriptLog "WARNUNG: Linux auf $($hostInfo.Host) fehlgeschlagen; Details im Log."
+    continue
+  }
+  if ([int]$hostInfo.UpdateCount -le 0) { continue }
+  Write-ScriptLog "Linux auf $($hostInfo.Host): $($hostInfo.UpdateCount) Paketupdates installiert."
+  $packageList = if ($hostInfo.PSObject.Properties['PackageList']) { @($hostInfo.PackageList) } else { @(([string]$hostInfo.Packages -split ',\s*') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) }
+  foreach ($package in $packageList) { Write-ScriptLog "  $($hostInfo.Host): $package" }
+  Write-ScriptLog ''
+}
+foreach ($hostInfo in @($HAUpdateDetails)) {
+  if ($hostInfo.Status -eq 'Fehler') {
+    Write-ScriptLog "WARNUNG: Home Assistant auf $($hostInfo.Host) fehlgeschlagen; Details im Log."
+    continue
+  }
+  if ([int]$hostInfo.UpdateCount -le 0) { continue }
+  Write-ScriptLog "Home Assistant auf $($hostInfo.Host): $($hostInfo.UpdateCount) Update(s) installiert."
+  foreach ($detail in ([string]$hostInfo.Details -split '<br>' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne 'Keine Updates' })) {
+    Write-ScriptLog "  $detail"
+  }
+  Write-ScriptLog ''
+}
+
 if (@($ManualActions).Count -gt 0) {
   $RepBody += "<div class='warning-box'><h2>Manuelle Prüfung/Aktion erforderlich</h2><ul>"
   foreach ($manualAction in @($ManualActions)) {
