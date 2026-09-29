@@ -84,7 +84,7 @@ function Write-DeployLog {
     if ($LogOnly) { return }
 
     $show = [string]::IsNullOrWhiteSpace($Message) -or $Level -in @('Warning', 'Error') -or
-        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe Setup|Warte|Teste|Erfolg|FEHLER|Verbindung vorbereitet|Linux-Hosts|Home Assistant)|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|Home-Assistant-Instanzen:|Gesamt Systeme:|Gesamt:|Logdatei:|\s{2,}[^:]+: \d+ (Paketupdates|Updates? verfügbar)|\s{2,}(Linux-Paket|Core|Supervisor|OS|Add-on))'
+        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe Setup|Warte|Teste|Erfolg|FEHLER|Verbindung vorbereitet|WindowsUpdateAdm-Endpunkt|Linux-Hosts|Home Assistant)|\[(Linux|Home Assistant)\]|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|Home-Assistant-Instanzen:|Gesamt Systeme:|Gesamt:|Logdatei:|\s{2,}[^:]+: \d+ (Paketupdates|Updates? verfügbar)|\s{2,}(Linux-Paket|Core|Supervisor|OS|Add-on))'
     if (-not $show) { return }
 
     $color = switch ($Level) {
