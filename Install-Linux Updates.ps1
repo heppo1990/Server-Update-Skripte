@@ -73,7 +73,10 @@ $script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new(
 function Write-LinuxLog {
     param([Parameter(Mandatory)][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info')
     $color = @{ Info='White'; Success='Green'; Warning='Yellow'; Error='Red' }[$Level]
-    Write-Host $Message -ForegroundColor $color
+    # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
+    if ($Level -in @('Warning', 'Error') -or (Test-WindowsUpdateConsoleMessage -Message $Message)) {
+        Write-Host $Message -ForegroundColor $color
+    }
     if ($script:WriteExecutionLog) {
         [IO.File]::AppendAllText($LogFile, $Message + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
     }
@@ -177,7 +180,7 @@ function Register-LinuxReboot {
     $arguments += "${RemoteUser}@${RemoteHost}", "sudo /sbin/shutdown -r +$delayMinutes"
     & $script:SSHPath @arguments 2>&1 | ForEach-Object { if ($_){ Write-LinuxLog -Message ([string]$_) -LogFile $LogFile } }
     if ($LASTEXITCODE -ne 0) { throw "Linux-Neustart auf $RemoteHost konnte nicht geplant werden." }
-    Write-LinuxLog -Message "Neustart auf $RemoteHost geplant für $($scheduled.ToString('dd.MM.yyyy HH:mm')) (manueller Neustart hebt ihn auf)." -LogFile $LogFile -Level Warning
+    Write-LinuxLog -Message "Neustart auf $RemoteHost geplant: $($scheduled.ToString('dd.MM.yyyy HH:mm'))" -LogFile $LogFile -Level Warning
     return $true
 }
 
@@ -438,6 +441,7 @@ foreach ($entry in $hostEntries) {
     $remoteUser = if ($properties['User']) { [string]$properties['User'].Value } else { '' }
     if ([string]::IsNullOrWhiteSpace($remoteHost) -or [string]::IsNullOrWhiteSpace($remoteUser)) { Write-Warning 'Ungültiger Eintrag in LinuxSettings.Hosts (Host/Name und User sind Pflicht).'; continue }
     $logFile = if ($script:WriteExecutionLog) { Join-Path $script:LogDirectory ("{0}_{1}.log" -f $remoteHost,(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')) } else { '' }
+    Write-LinuxLog -Message '' -LogFile $logFile
     try {
         if (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
             Install-LinuxPublicKey -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile
@@ -462,7 +466,7 @@ foreach ($entry in $hostEntries) {
         else {
             "Linux-Update auf $remoteHost abgeschlossen: $($result.UpdateCount) Update(s) installiert."
         }
-        Write-LinuxLog -Message $completionText -LogFile $logFile -Level Success
+        if ($result.UpdateCount -gt 0) { Write-LinuxLog -Message $completionText -LogFile $logFile -Level Success }
     } catch {
         $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; UpdateCount=0; Packages=''; LogFile=$logFile }
         Write-LinuxLog -Message "Fehler bei ${remoteHost}: $($_.Exception.Message)" -LogFile $logFile -Level Error
@@ -475,4 +479,6 @@ $statsFile = Join-Path $PSScriptRoot $(if ($CheckOnly) { 'linux_update_check_sta
 $linuxStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statsFile -Encoding utf8
 $summaryVerb = if ($DryRun) { 'verfügbar' } else { 'installiert' }
 $summaryLabel = if ($CheckOnly) { 'Linux-Check' } else { 'Linux-Zusammenfassung' }
-Write-Host "${summaryLabel}: $($linuxStats.HostsProcessed)/$($linuxStats.TotalHosts) erfolgreich, $totalUpdatesInstalled Update(s) $summaryVerb, $($linuxStats.FailedHosts) Fehler." -ForegroundColor Cyan
+if ($totalUpdatesInstalled -gt 0 -or $linuxStats.FailedHosts -gt 0) {
+    Write-Host "${summaryLabel}: $($linuxStats.HostsProcessed)/$($linuxStats.TotalHosts) erfolgreich, $totalUpdatesInstalled Update(s) $summaryVerb, $($linuxStats.FailedHosts) Fehler." -ForegroundColor Cyan
+}

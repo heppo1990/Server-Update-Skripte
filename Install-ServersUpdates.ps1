@@ -139,6 +139,8 @@ function Invoke-PackageManagerUpdates {
     $enableWinget = if ($UpdateSettings.PSObject.Properties['EnableWingetUpdates']) { [bool]$UpdateSettings.EnableWingetUpdates } else { $true }
     $enableChocolatey = if ($UpdateSettings.PSObject.Properties['EnableChocolateyUpdates']) { [bool]$UpdateSettings.EnableChocolateyUpdates } else { $true }
     $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -WriteLog { param($message) Write-ScriptLog $message })
+    # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
+    $successfulPackagesByManager = @{}
     foreach ($result in $results) {
       if ($result.Skipped) {
         $skipReason = if ([string]::IsNullOrWhiteSpace([string]$result.SkipReason)) { 'ohne Angabe eines Grundes' } else { [string]$result.SkipReason }
@@ -164,20 +166,22 @@ function Invoke-PackageManagerUpdates {
 
       $packageCount = @($result.Packages).Count
       if ($packageCount -eq 0) {
-        Write-ScriptLog "$($result.Manager) auf ${Servername}: Keine Paketupdates verfügbar."
         continue
       }
 
-      Write-ScriptLog "$($result.Manager) auf ${Servername}: $packageCount Paketupdate(s) erkannt und verarbeitet."
-      foreach ($package in @($result.Packages)) {
-        Write-ScriptLog "  ${Servername}: $package"
-      }
+      if (-not $successfulPackagesByManager.ContainsKey([string]$result.Manager)) { $successfulPackagesByManager[[string]$result.Manager] = @() }
+      $successfulPackagesByManager[[string]$result.Manager] += @($result.Packages)
       $diagnosticProperty = $result.PSObject.Properties['DiagnosticOutput']
       $debugActionOutput = if ($diagnosticProperty) { [string]$diagnosticProperty.Value } else { [string]$result.ActionOutput }
       if ($DebugMode -and -not [string]::IsNullOrWhiteSpace($debugActionOutput)) {
         Write-ScriptLog "Vollständiger $($result.Manager)-Output von ${Servername}:" -IsDebug
         $debugActionOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-ScriptLog "  $_" -IsDebug }
       }
+    }
+    foreach ($manager in $successfulPackagesByManager.Keys) {
+      $managerPackages = @($successfulPackagesByManager[$manager])
+      Write-ScriptLog "$manager auf ${Servername}: $($managerPackages.Count) Paketupdates installiert"
+      foreach ($package in $managerPackages) { Write-ScriptLog "  $package" }
     }
     return $results
   }
@@ -849,7 +853,7 @@ try {
 "@
   Register-OneTimeRemoteTask -Servername $Servername -TaskName $taskName -At $at -Script $script -AuthInfo $AuthInfo
   $rebootMode = if ($Immediately) { 'sofort nach Abschluss' } else { $at.ToString('dd.MM.yyyy HH:mm') }
-  Write-ScriptLog "Neustartaufgabe auf $Servername geplant: $rebootMode (selbstlöschend; entfällt bei zwischenzeitlichem manuellem Neustart)."
+  Write-ScriptLog "Neustart auf $Servername geplant: $rebootMode"
 }
 
 function Request-RebootTask {
@@ -1304,6 +1308,12 @@ $LinuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Propert
 $HAConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
 $UpdateSettings = $Settings.UpdateSettings
 $MailSettings = $Settings.MailSettings
+# Zurückstellungen einmalig und nur für tatsächlich konfigurierte Auswahlwerte anzeigen.
+$configuredDeferredCategories = @($UpdateSettings.DeferredUpdateCategories | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+$configuredDeferredKBs = @($UpdateSettings.DeferredUpdateKBs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+if ($configuredDeferredCategories.Count -gt 0) { Write-ScriptLog "Zurückgestellte Kategorien: $($configuredDeferredCategories -join ', ')" }
+if ($configuredDeferredKBs.Count -gt 0) { Write-ScriptLog "Zurückgestellte KBs: $($configuredDeferredKBs -join ', ')" }
+if ([bool]$UpdateSettings.InstallDeferredUpdates) { Write-ScriptLog 'Nachinstallation aktiviert' }
 $TargetComputers = $UpdateSettings.TargetComputers
 if ([string]::IsNullOrWhiteSpace($TargetComputers)) {
     $TargetComputers = "Server"
@@ -1328,6 +1338,7 @@ if ($IsWindowsOnlyRun) {
   Write-ScriptLog "Eingeschränkter Windows-Testlauf: Linux-Updates werden übersprungen."
 } elseif ($LinuxConfigured -and (Test-Path $LinuxUpdateScript)) {
   $LinuxScriptExecuted = $true
+  Write-ScriptLog ''
   Write-ScriptLog "Führe Linux-Updates Skript aus: $LinuxUpdateScript"
   try {
     & $LinuxUpdateScript -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
@@ -1387,6 +1398,7 @@ if ($IsWindowsOnlyRun) {
   Write-ScriptLog "Eingeschränkter Windows-Testlauf: Home-Assistant-Updates werden übersprungen."
 } elseif ($HAConfigured -and (Test-Path $HAUpdateScript)) {
   $HAScriptExecuted = $true
+  Write-ScriptLog ''
   Write-ScriptLog "Führe Home Assistant-Updates Skript aus: $HAUpdateScript"
   try {
     & $HAUpdateScript -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
@@ -1629,6 +1641,7 @@ if ($ServerADList -ne $null) {
       Write-Progress -Activity "Verarbeite AD-Serverliste" -Status "Verarbeite Server [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
 
       Try {
+        Write-ScriptLog ''
         Write-ScriptLog "Starte Update-Installation auf AD-Server $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
@@ -1665,7 +1678,13 @@ if ($ServerADList -ne $null) {
           $PackageUpdateCount += $packages.Count
           if ($packageResult.Manager -eq 'Winget') { $WingetUpdateCount += $packages.Count }
           if ($packageResult.Manager -eq 'Chocolatey') { $ChocolateyUpdateCount += $packages.Count }
-          $PackageUpdateDetails += [PSCustomObject]@{ Server = $Servername; Manager = $packageResult.Manager; Packages = $packages }
+          # Ein gemeinsamer Mailabschnitt pro Server und Paketmanager statt Einträgen pro Paket.
+          $existingPackageInfo = @($PackageUpdateDetails | Where-Object { $_.Server -ieq $Servername -and $_.Manager -ieq [string]$packageResult.Manager } | Select-Object -First 1)
+          if ($existingPackageInfo.Count -gt 0) {
+            $existingPackageInfo[0].Packages = @($existingPackageInfo[0].Packages) + $packages
+          } else {
+            $PackageUpdateDetails += [PSCustomObject]@{ Server = $Servername; Manager = [string]$packageResult.Manager; Packages = @($packages) }
+          }
         }
 
         # Zurückgestellte Kategorien + Zeitpunkte aus Settings lesen
@@ -1683,8 +1702,6 @@ if ($ServerADList -ne $null) {
         if ($UpdateSettings.DeferredUpdateKBs -and $UpdateSettings.DeferredUpdateKBs.Count -gt 0) {
           $deferredKBs = [string[]]$UpdateSettings.DeferredUpdateKBs
         }
-        Write-ScriptLog "Zurückgestellte Kategorien: $($deferredCategories -join ', '); KBs: $($deferredKBs -join ', '); Nachinstallation aktiviert: $installDeferred"
-
         # Windows-Updates installieren (ohne zurückgestellte Kategorien)
         $UpdResult = Invoke-WindowsUpdates -Servername $Servername -SucheOnline $SucheOnline -AuthInfo $svcCredential -DeferredCategories $deferredCategories -DeferredKBs $deferredKBs -DeferredOnly $false
 

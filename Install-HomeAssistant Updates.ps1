@@ -131,7 +131,10 @@ function Write-HostLog {
         $script:OutputEncoding    = [System.Text.Encoding]::UTF8
     } catch { }
 
-    Write-Host $Message -ForegroundColor $fgColor
+    # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
+    if ($Level -in @('Warning', 'Error') -or (Test-WindowsUpdateConsoleMessage -Message $Message)) {
+        Write-Host $Message -ForegroundColor $fgColor
+    }
     if ($script:WriteExecutionLog) {
         Add-Content -LiteralPath $LogFile -Value $Message -Encoding utf8
     }
@@ -210,7 +213,7 @@ function Register-HAReboot {
     if ($null -eq $scheduled) { Write-HostLog -Message 'Kein automatischer Neustart für Home Assistant konfiguriert.' -RemoteHost $HAHost -LogFile $LogFile; return $false }
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($scheduled - (Get-Date)).TotalMinutes))
     $Script:UpdateStats.RebootStartsImmediately = ($delayMinutes -le 1)
-    Write-HostLog -Message "Home-Assistant-Neustart geplant für $($scheduled.ToString('dd.MM.yyyy HH:mm')) (manueller Neustart hebt ihn auf)." -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+    Write-HostLog -Message "Neustart auf $HAHost geplant: $($scheduled.ToString('dd.MM.yyyy HH:mm'))" -RemoteHost $HAHost -LogFile $LogFile -Level Warning
     # Home Assistant OS kennt den dokumentierten Neustart über die ha-CLI.
     # Ein manueller Neustart beendet einen eventuell wartenden Hintergrundprozess.
     if ($delayMinutes -le 1) {
@@ -671,7 +674,6 @@ if ($Script:UpdateStats.OSUpdated) {
 }
 
 Write-HostLog -Message "=== Alle Updates abgeschlossen ===" -RemoteHost $HAHost -LogFile $LogFile -Level Success
-Write-Host ("Logdatei: {0}" -f $LogFile)
 
 # ============================================
 # Statistiken für Hauptskript exportieren (MIT HostStatus und Details)
@@ -769,18 +771,6 @@ $HAStats = @{
 $StatsFile = Join-Path $PSScriptRoot "ha_update_stats.json"
 $HAStats | ConvertTo-Json -Depth 5 | Set-Content $StatsFile
 
-Write-Host "`n📊 Statistiken gespeichert: $StatsFile"
-Write-Host "   • Home Assistant Host: $HAHost"
-Write-Host "   • Status: $($HostStatus.Status)"
-Write-Host "   • Komponenten aktualisiert: $TotalUpdates"
-Write-Host "     - Core: $($Script:UpdateStats.CoreUpdated) $(if($Script:UpdateStats.CoreVersionNew){"($($Script:UpdateStats.CoreVersionOld) → $($Script:UpdateStats.CoreVersionNew))"})"
-Write-Host "     - Supervisor: $($Script:UpdateStats.SupervisorUpdated) $(if($Script:UpdateStats.SupervisorVersionNew){"($($Script:UpdateStats.SupervisorVersionOld) → $($Script:UpdateStats.SupervisorVersionNew))"})"
-Write-Host "     - OS: $($Script:UpdateStats.OSUpdated) $(if($Script:UpdateStats.OSVersionNew){"($($Script:UpdateStats.OSVersionOld) → $($Script:UpdateStats.OSVersionNew))"})"
-Write-Host "     - Add-ons: $($Script:UpdateStats.AddonsUpdated)"
-if ($Script:UpdateStats.AddonsUpdateList.Count -gt 0) {
-    foreach ($addon in $Script:UpdateStats.AddonsUpdateList) {
-        Write-Host "       * $($addon.Name): $($addon.VersionOld) → $($addon.VersionNew)"
-    }
+if ($TotalUpdates -gt 0 -or $Script:UpdateStats.ErrorCount -gt 0) {
+    Write-Host "Home Assistant auf ${HAHost}: $TotalUpdates Komponente(n) aktualisiert, $($Script:UpdateStats.ErrorCount) Fehler." -ForegroundColor Cyan
 }
-Write-Host "   • Backup erstellt: $($Script:UpdateStats.BackupCreated)"
-Write-Host "   • Fehler: $($Script:UpdateStats.ErrorCount)"

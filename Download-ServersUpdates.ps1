@@ -247,6 +247,7 @@ if ($ServerADList -ne $null) {
       Write-Progress -Activity "Verarbeite AD-Serverliste" -Status "Verarbeite Server [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
 
       Try {
+        Write-ScriptLog ''
         Write-ScriptLog "Starte Update-Download auf AD-Server $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
