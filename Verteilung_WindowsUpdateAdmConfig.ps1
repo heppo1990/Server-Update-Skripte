@@ -84,7 +84,7 @@ function Write-DeployLog {
     if ($LogOnly) { return }
 
     $show = [string]::IsNullOrWhiteSpace($Message) -or $Level -in @('Warning', 'Error') -or
-        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Erfolg|FEHLER|Verbindung vorbereitet)|Ergebnis:|Erfolgreich:|Fehler:|Gesamt:|Logdatei:)'
+        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe Setup|Warte|Teste|Erfolg|FEHLER|Verbindung vorbereitet|Linux-Hosts|Home Assistant)|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|Home-Assistant-Instanzen:|Gesamt Systeme:|Gesamt:|Logdatei:|\s{2,}[^:]+: \d+ (Paketupdates|Updates? verfügbar)|\s{2,}(Linux-Paket|Core|Supervisor|OS|Add-on))'
     if (-not $show) { return }
 
     $color = switch ($Level) {
@@ -94,7 +94,7 @@ function Write-DeployLog {
         default   {
             if ($Message -match '(?i)^\s*(WARNUNG|WARNING)') { 'Yellow' }
             elseif ($Message -match '(?i)^\s*(FEHLER|ERROR)') { 'Red' }
-            elseif ($Message -match '(?i)^\s*(WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] Deployment gestartet|Ergebnis:|Erfolgreich:|Fehler:|Gesamt:)') { 'Cyan' }
+            elseif ($Message -match '(?i)^\s*(WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe Setup|Warte|Teste|Linux-Hosts|Home Assistant)|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|Home-Assistant-Instanzen:|Gesamt Systeme:|Gesamt:)') { 'Cyan' }
             else { 'Gray' }
         }
     }
@@ -175,6 +175,12 @@ if ($nonAdTargets.Count -gt 0) {
 $Results      = @()
 $SuccessCount = 0
 $FailCount    = 0
+$LinuxSystemCount = 0
+$LinuxUpdateCount = 0
+$HASystemCount = 0
+$HAUpdateCount = 0
+$LinuxConnectionErrors = 0
+$HAConnectionErrors = 0
 $script:BootstrapCredential = $null
 
 function Add-TrustedWinRMServerCertificate {
@@ -276,7 +282,7 @@ function Invoke-WinRMDeployment {
                     $script:BootstrapCredential = Get-Credential -Message "Einmalige WinRM-Einrichtung für Nicht-AD-Geräte (z. B. .\Administrator)"
                 }
                 $bootstrapCredential = $script:BootstrapCredential
-                Write-DeployLog "Verbinde per WinRM mit $Servername ($DeployType)." -LogOnly
+                Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
                 try {
                     $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
                         -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
@@ -284,7 +290,7 @@ function Invoke-WinRMDeployment {
                 catch {
                     # Vor der Einrichtung existiert bei manchen Geräten noch kein
                     # HTTPS-Listener. HTTP ist ausschließlich der einmalige Fallback.
-                    Write-DeployLog "WinRM/HTTPS auf $Servername nicht verfügbar; einmaliger HTTP-Fallback." -LogOnly
+                    Write-DeployLog "[$Servername] WinRM/HTTPS nicht verfügbar; HTTP-Fallback."
                     try {
                         $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
                     }
@@ -307,7 +313,7 @@ function Invoke-WinRMDeployment {
                 }
             }
         } else {
-            Write-DeployLog "Verbinde per WinRM mit $Servername ($DeployType)." -LogOnly
+            Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
             $session = New-PSSession -ComputerName $Servername -ErrorAction Stop
         }
 
@@ -414,7 +420,7 @@ function Invoke-WinRMDeployment {
             New-Item -ItemType Directory -Path $path -Force | Out-Null
         } -ArgumentList $remoteTemp -ErrorAction Stop
 
-        Write-DeployLog "Übertrage Setup an $Servername." -LogOnly
+        Write-DeployLog "[$Servername] Übertrage Setup."
         Copy-Item -Path (Join-Path $RootDirectory $PSSCfgSkriptFile) `
                   -Destination (Join-Path $remoteTemp $PSSCfgSkriptFile) `
                   -ToSession $session -Force -ErrorAction Stop
@@ -441,7 +447,7 @@ function Invoke-WinRMDeployment {
             $setupParameters.PreserveExistingCertificateMapping = $true
         }
 
-        Write-DeployLog "Führe Setup auf $Servername aus ($DeployType)." -LogOnly
+        Write-DeployLog "[$Servername] Führe Setup aus ($DeployType)."
         $remoteSetupOutput = @(Invoke-Command -Session $session -ScriptBlock {
             param($path, $scriptName, $parameters)
             # Die zentrale Richtlinie des Zielsystems bleibt unverändert:
@@ -483,7 +489,7 @@ function Invoke-WinRMDeployment {
                 } -ErrorAction Stop
                 if ([int]$versionProbe -gt 17763) { $requiresJeaEndpointTest = $true }
                 else {
-                    Write-DeployLog 'Windows Server 2016/2019 erkannt; JEA-Endpunkttest entfällt.' -LogOnly
+                    Write-DeployLog "[$Servername] Windows Server 2016/2019: JEA-Test entfällt."
                 }
             }
             catch {
@@ -501,7 +507,7 @@ function Invoke-WinRMDeployment {
             }
         }
 
-        Write-DeployLog "Warte auf WinRM-Neustart auf $Servername." -LogOnly
+        Write-DeployLog "[$Servername] Warte auf WinRM-Neustart."
         Start-Sleep -Seconds 30
 
         $testParams = @{
@@ -522,7 +528,7 @@ function Invoke-WinRMDeployment {
             $testParams.CertificateThumbprint = $clientCert.Thumbprint
         }
 
-        Write-DeployLog "Teste WindowsUpdateAdm-Endpunkt auf $Servername." -LogOnly
+        Write-DeployLog "[$Servername] Teste WindowsUpdateAdm-Endpunkt."
         $endpointCommand = Invoke-WindowsUpdateWithRetry -OperationName "WindowsUpdateAdm-Endpunkt auf $Servername" -RetryCount 5 -RetryDelaySeconds 30 -WriteLog {
             param($message)
             if ($message -like 'Wiederhole *') {
@@ -535,7 +541,7 @@ function Invoke-WinRMDeployment {
             }
             return $command
         }
-        Write-DeployLog "WindowsUpdateAdm-Endpunkt auf $Servername erfolgreich getestet." -Level Success
+        Write-DeployLog "[$Servername] WindowsUpdateAdm-Endpunkt erfolgreich getestet." -Level Success
 
         return [PSCustomObject]@{
             Status = 'Success'
@@ -677,6 +683,7 @@ function Invoke-ServerDeployment {
 
     # Lokales Setup direkt aus dem gemeinsamen Skriptordner ausführen.
     try {
+        Write-DeployLog "[$Servername] Führe lokales Setup aus."
         $localParameters = @{}
         # Ausführliche Setup-Ausgaben abfangen und nur ins Log schreiben;
         # auf der Konsole erscheint anschließend ausschließlich das Ergebnis.
@@ -712,7 +719,7 @@ ForEach ($Server in $Serverlist) {
 
     $deployTypeLabel = if ($Server.DeployType) { $Server.DeployType } else { "AD" }
     Write-DeployLog ''
-    Write-DeployLog "[$Servername] Deployment gestartet ($deployTypeLabel)" -LogOnly
+    Write-DeployLog "[$Servername] Deployment gestartet ($deployTypeLabel)"
 
     $deployResult = Invoke-ServerDeployment `
         -Servername                $Servername `
@@ -757,24 +764,79 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
     $haSettings = if ($Settings.PSObject.Properties['HomeAssistantSettings']) { $Settings.HomeAssistantSettings } else { $null }
     $linuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Properties['Hosts'] -and @($linuxSettings.Hosts | Where-Object { $_ }).Count -gt 0
     $haConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
+    if ($linuxConfigured) { $LinuxSystemCount = @($linuxSettings.Hosts | Where-Object { $_ }).Count }
+    if ($haConfigured) { $HASystemCount = 1 }
     $connectionSetups = @()
     if ($linuxConfigured) { $connectionSetups += [PSCustomObject]@{ Name = 'Linux'; Script = 'Install-Linux Updates.ps1' } }
     if ($haConfigured) { $connectionSetups += [PSCustomObject]@{ Name = 'Home Assistant'; Script = 'Install-HomeAssistant Updates.ps1' } }
     foreach ($connectionSetup in $connectionSetups) {
         $connectionScript = Join-Path $PSScriptRoot $connectionSetup.Script
+        $statsFileName = if ($connectionSetup.Name -eq 'Linux') { 'linux_update_check_stats.json' } else { 'ha_update_check_stats.json' }
+        $statsPath = Join-Path $PSScriptRoot $statsFileName
+        Remove-Item -LiteralPath $statsPath -Force -ErrorAction SilentlyContinue
         if (-not (Test-Path -LiteralPath $connectionScript)) {
+            if ($connectionSetup.Name -eq 'Linux') { $LinuxConnectionErrors++ } else { $HAConnectionErrors++ }
             Write-DeployLog "$($connectionSetup.Name)-Einrichtung übersprungen: Skript nicht gefunden." -Level Warning
             continue
         }
         Write-DeployLog "[$($connectionSetup.Name)] Verbindungseinrichtung gestartet."
         try {
             $connectionOutput = @(& $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -CheckOnly *>&1)
+            $connectionExitCode = $LASTEXITCODE
             foreach ($entry in $connectionOutput) { Write-DeployLog ([string]$entry) -LogOnly }
-            if ($LASTEXITCODE -ne 0) { throw "Exit-Code $LASTEXITCODE" }
-            Write-DeployLog "[$($connectionSetup.Name)] Verbindung vorbereitet." -Level Success
+            if (-not (Test-Path -LiteralPath $statsPath -PathType Leaf)) {
+                throw "Das Einrichtungsskript lieferte keine Statusdatei (Exit-Code $connectionExitCode)."
+            }
+            $connectionStats = Get-Content -LiteralPath $statsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($connectionSetup.Name -eq 'Linux') {
+                $linuxHosts = @($connectionStats.HostStatus)
+                $LinuxSystemCount = [int]$connectionStats.TotalHosts
+                $LinuxUpdateCount = [int]$connectionStats.UpdatesInstalled
+                $LinuxConnectionErrors = [int]$connectionStats.FailedHosts
+                $linuxLevel = if ($LinuxConnectionErrors -gt 0) { 'Warning' } else { 'Success' }
+                Write-DeployLog "[Linux] Hosts geprüft: $LinuxSystemCount; Updates verfügbar: $LinuxUpdateCount; Fehler: $LinuxConnectionErrors" -Level $linuxLevel
+                foreach ($hostResult in $linuxHosts) {
+                    if ($hostResult.Status -eq 'Fehler') {
+                        Write-DeployLog "  $($hostResult.Host): Verbindung/Einrichtung fehlgeschlagen; Details im Log." -Level Warning
+                        continue
+                    }
+                    if ([int]$hostResult.UpdateCount -gt 0) {
+                        Write-DeployLog "  $($hostResult.Host): $($hostResult.UpdateCount) Paketupdates verfügbar."
+                        foreach ($package in @($hostResult.PackageList)) {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$package)) { Write-DeployLog "    Linux-Paket: $package" }
+                        }
+                    } else {
+                        Write-DeployLog "  $($hostResult.Host): keine Paketupdates verfügbar."
+                    }
+                }
+            }
+            else {
+                $HASystemCount = 1
+                $HAUpdateCount = [int]$connectionStats.AvailableUpdates
+                if (-not $connectionStats.Success) {
+                    $HAConnectionErrors = 1
+                    Write-DeployLog '[Home Assistant] Verbindung/Einrichtung fehlgeschlagen; Details im Log.' -Level Warning
+                } else {
+                    $haStatus = if ($HAUpdateCount -eq 1) { 'Update' } else { 'Updates' }
+                    Write-DeployLog "[Home Assistant] $($connectionStats.Host): $HAUpdateCount $haStatus verfügbar." -Level Success
+                    foreach ($detail in @($connectionStats.UpdateDetails)) {
+                        Write-DeployLog "  $($detail.Component): $($detail.Current) → $($detail.Available)"
+                    }
+                }
+            }
+            if ($connectionExitCode -ne 0) {
+                if ($connectionSetup.Name -eq 'Linux' -and $LinuxConnectionErrors -eq 0) { $LinuxConnectionErrors++ }
+                if ($connectionSetup.Name -eq 'Home Assistant' -and $HAConnectionErrors -eq 0) { $HAConnectionErrors++ }
+                Write-DeployLog "$($connectionSetup.Name)-Prüfung endete mit Exit-Code $connectionExitCode; Details im Log." -Level Warning
+            }
         }
         catch {
-            Write-DeployLog "$($connectionSetup.Name)-Einrichtung nicht abgeschlossen: $($_.Exception.Message)" -Level Warning
+            if ($connectionSetup.Name -eq 'Linux') { $LinuxConnectionErrors++ } else { $HAConnectionErrors++ }
+            Write-DeployLog "$($connectionSetup.Name)-Einrichtung nicht abgeschlossen; Details im Log." -Level Warning
+            Write-DeployLog "$($connectionSetup.Name)-Einrichtungsfehler: $($_.Exception.Message)" -LogOnly
+        }
+        finally {
+            Remove-Item -LiteralPath $statsPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -782,9 +844,17 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
 # Zusammenfassung
 Write-DeployLog ''
 Write-DeployLog 'Ergebnis:'
+Write-DeployLog "Windows-Ziele: $($Results.Count)"
 Write-DeployLog "Erfolgreich: $SuccessCount" -Level Success
 Write-DeployLog "Fehler: $FailCount" -Level $(if ($FailCount -eq 0) { 'Success' } else { 'Error' })
-Write-DeployLog "Gesamt: $($Results.Count)"
+if ($LinuxSystemCount -gt 0 -or $LinuxConnectionErrors -gt 0) {
+    Write-DeployLog "Linux-Hosts: $LinuxSystemCount ($LinuxUpdateCount Updates verfügbar; $LinuxConnectionErrors Fehler)"
+}
+if ($HASystemCount -gt 0 -or $HAConnectionErrors -gt 0) {
+    Write-DeployLog "Home-Assistant-Instanzen: $HASystemCount ($HAUpdateCount Updates verfügbar; $HAConnectionErrors Fehler)"
+}
+$totalSystems = $Results.Count + $LinuxSystemCount + $HASystemCount
+Write-DeployLog "Gesamt Systeme: $totalSystems"
 
 # Fehlerhafte Server anzeigen
 if ($script:DeployLogEnabled) { Write-DeployLog "Logdatei: $script:DeployLogFile" }
