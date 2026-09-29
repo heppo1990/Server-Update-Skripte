@@ -242,14 +242,22 @@ function Convert-ServerUpdateLegacySettings {
     if ($settingsFileName -match '(?i)^Check-ServersUpdates') { $actionNames = @('Check') }
     elseif ($settingsFileName -match '(?i)^Download-ServersUpdates') { $actionNames = @('Download') }
     elseif ($settingsFileName -match '(?i)^Install-ServersUpdates') { $actionNames = @('Install') }
-    $isGeneralSettings = $settingsFileName -ieq 'settings.json'
+    $settingsDirectory = Split-Path -Parent $Path
+    $canonicalGeneralSettingsPath = Join-Path $settingsDirectory 'settings.json'
+    $legacyGeneralSettingsPath = Join-Path $settingsDirectory 'default.settings.json'
+    $isLegacyGeneralSettings = $settingsFileName -ieq 'default.settings.json' -and
+        -not (Test-Path -LiteralPath $canonicalGeneralSettingsPath -PathType Leaf)
+    $isGeneralSettings = $settingsFileName -ieq 'settings.json' -or $isLegacyGeneralSettings
     if ($isGeneralSettings) { $actionNames = @('Check', 'Download', 'Install') }
     elseif ($actionNames.Count -eq 0) { $actionNames = @() }
 
     # Bei einer skriptspezifischen Datei ohne allgemeine settings.json werden
     # die anderen Mailberichte ausdrücklich deaktiviert. Gibt es eine allgemeine
     # Datei, kommen deren Werte für die übrigen Läufe über fileDefaults hinzu.
-    $actionsToInitialize = if ($isGeneralSettings -or (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) 'settings.json') -PathType Leaf)) {
+    $hasGeneralSettings = (Test-Path -LiteralPath $canonicalGeneralSettingsPath -PathType Leaf) -or
+        (-not (Test-Path -LiteralPath $canonicalGeneralSettingsPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $legacyGeneralSettingsPath -PathType Leaf))
+    $actionsToInitialize = if ($isGeneralSettings -or $hasGeneralSettings) {
         $actionNames
     }
     elseif ($actionNames.Count -gt 0) {
@@ -271,7 +279,7 @@ function Convert-ServerUpdateLegacySettings {
             Add-Member -InputObject $actionProperty.Value -NotePropertyName 'SendMail' -NotePropertyValue $legacySendMail.Value -Force
             $migrated++
         }
-        elseif ($legacySendMail -and $actionNames.Count -gt 0 -and -not (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) 'settings.json') -PathType Leaf)) {
+        elseif ($legacySendMail -and $actionNames.Count -gt 0 -and -not $hasGeneralSettings) {
             Add-Member -InputObject $actionProperty.Value -NotePropertyName 'SendMail' -NotePropertyValue $false -Force
             $migrated++
         }
@@ -298,10 +306,16 @@ function Update-ServerUpdateSettingsDefaults {
     }
 
     $generalSettingsPath = Join-Path $ScriptRoot 'settings.json'
+    $legacyGeneralSettingsPath = Join-Path $ScriptRoot 'default.settings.json'
+    if (-not (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $legacyGeneralSettingsPath -PathType Leaf)) {
+        $generalSettingsPath = $legacyGeneralSettingsPath
+    }
     $settingsPaths = [System.Collections.Generic.List[string]]::new()
     if (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) { $settingsPaths.Add($generalSettingsPath) }
     foreach ($scriptSettingsFile in @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.settings.json' -File -ErrorAction SilentlyContinue)) {
-        $settingsPaths.Add($scriptSettingsFile.FullName)
+        if ($scriptSettingsFile.Name -ieq 'default.settings.json' -and $generalSettingsPath -ine $legacyGeneralSettingsPath) { continue }
+        if (-not $settingsPaths.Contains($scriptSettingsFile.FullName)) { $settingsPaths.Add($scriptSettingsFile.FullName) }
     }
 
     foreach ($settingsPath in $settingsPaths) {
@@ -357,6 +371,30 @@ function Update-ServerUpdateSettingsDefaults {
             if ($temporaryPath -and (Test-Path -LiteralPath $temporaryPath -PathType Leaf)) {
                 Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
             }
+        }
+    }
+
+    # Eine alleinstehende alte default.settings.json war die allgemeine
+    # Kundeneinstellungsdatei. Nach erfolgreicher Migration wird sie zur heute
+    # verwendeten settings.json; eine bestehende settings.json bleibt unberührt.
+    if ($generalSettingsPath -ieq $legacyGeneralSettingsPath -and
+        (Test-Path -LiteralPath $legacyGeneralSettingsPath -PathType Leaf) -and
+        -not (Test-Path -LiteralPath (Join-Path $ScriptRoot 'settings.json') -PathType Leaf)) {
+        try {
+            $promotedSettings = Get-Content -LiteralPath $legacyGeneralSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            if ($promotedSettings -isnot [System.Management.Automation.PSCustomObject] -or
+                -not $promotedSettings.PSObject.Properties['UpdateSettings']) {
+                throw 'Die Datei enthält keine gültige UpdateSettings-Konfiguration.'
+            }
+            $promotedMailProperty = $promotedSettings.PSObject.Properties['MailSettings']
+            if ($promotedMailProperty -and ($promotedMailProperty.Value.PSObject.Properties['SendMail'] -or $promotedMailProperty.Value.PSObject.Properties['Subject'])) {
+                throw 'Die alte Mail-Konfiguration wurde nicht vollständig migriert; die Umbenennung wird ausgelassen.'
+            }
+            [System.IO.File]::Move($legacyGeneralSettingsPath, (Join-Path $ScriptRoot 'settings.json'))
+            Write-Host 'Die migrierte default.settings.json wurde in settings.json umbenannt.' -ForegroundColor Cyan
+        }
+        catch {
+            Write-Warning "Die alte default.settings.json konnte nicht sicher in settings.json umbenannt werden. Sie bleibt erhalten. Ursache: $($_.Exception.Message)"
         }
     }
 

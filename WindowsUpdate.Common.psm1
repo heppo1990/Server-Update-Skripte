@@ -150,6 +150,11 @@ function Get-WindowsUpdateSettings {
     }
     $scriptSettingsPath = Join-Path $ScriptRoot "$ScriptName.settings.json"
     $generalSettingsPath = Join-Path $ScriptRoot 'settings.json'
+    $legacyGeneralSettingsPath = Join-Path $ScriptRoot 'default.settings.json'
+    if (-not (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $legacyGeneralSettingsPath -PathType Leaf)) {
+        $generalSettingsPath = $legacyGeneralSettingsPath
+    }
     $settingsFromFiles = @()
 
     # Alle allgemeinen und skriptspezifischen Kundendateien migrieren, nicht nur
@@ -167,7 +172,7 @@ function Get-WindowsUpdateSettings {
 
     # Allgemeine Einstellungen bilden die Basis; eine gleichnamige Skript-JSON
     # überschreibt anschließend nur ihre angegebenen Werte.
-    if (Test-Path -LiteralPath $generalSettingsPath) {
+    if (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) {
         Write-CommonLog $WriteLog "Lese Einstellungen aus $generalSettingsPath"
         $settingsFromFiles += Get-Content -LiteralPath $generalSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
     }
