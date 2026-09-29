@@ -9,6 +9,11 @@ function Write-CommonLog {
     if ($WriteLog) { & $WriteLog $Message }
 }
 
+$script:WindowsUpdateConsoleTableActive = $false
+$script:WindowsUpdateConsoleSummaryActive = $false
+$script:WindowsUpdateConsoleSummaryDividerCount = 0
+$script:WindowsUpdateConsolePackageRowsActive = $false
+
 function Get-WindowsUpdateConsoleColor {
     param([AllowEmptyString()][string]$Message)
 
@@ -19,6 +24,56 @@ function Get-WindowsUpdateConsoleColor {
     if ($Message -match '(?i)\[SUCCESS\]|\berfolgreich\b|\babgeschlossen\b|Updates installiert|Update\(s\) installiert|keine .*Updates verfügbar') { return 'Green' }
     if ($Message -match '(?i)^[\s═+|\-]*$|ZUSAMMENFASSUNG|UPDATE-(CHECK|DOWNLOAD|INSTALLATION)|^\s*(Starte|Beginne|Verarbeite|Lese|Prüfe|Ergebnis|Versuche|Gesamtliste)\b') { return 'Cyan' }
     return $null
+}
+
+function Test-WindowsUpdateConsoleMessage {
+    param(
+        [AllowEmptyString()][string]$Message,
+        [switch]$IsDebug
+    )
+
+    if ($IsDebug) { return $true }
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $script:WindowsUpdateConsoleTableActive = $false
+        $script:WindowsUpdateConsolePackageRowsActive = $false
+        return $false
+    }
+
+    if ($script:WindowsUpdateConsoleSummaryActive) {
+        if ($Message -match '^\s*═+\s*$') {
+            $script:WindowsUpdateConsoleSummaryDividerCount++
+            if ($script:WindowsUpdateConsoleSummaryDividerCount -ge 2) { $script:WindowsUpdateConsoleSummaryActive = $false }
+        }
+        return $true
+    }
+    if ($Message -match '(?i)^\s*UPDATE-(CHECK|DOWNLOAD|INSTALLATION) ZUSAMMENFASSUNG\s*$') {
+        $script:WindowsUpdateConsoleSummaryActive = $true
+        $script:WindowsUpdateConsoleSummaryDividerCount = 0
+        return $true
+    }
+    if ($script:WindowsUpdateConsoleTableActive) {
+        if ($Message -match '^\s*ComputerName\s+Status\s+KB\b' -or $Message -match '^\s*-{3,}(?:\s+-{2,})+') { return $true }
+        if ($Message -match '^\s*\S+\s+[A-Za-z-]{7}\s+(?:KB\d+)?(?:\s+\S.*)?$') { return $true }
+        $script:WindowsUpdateConsoleTableActive = $false
+    }
+    if ($script:WindowsUpdateConsolePackageRowsActive) {
+        if ($Message -match '^\s{2,}\S+\s*:') { return $true }
+        $script:WindowsUpdateConsolePackageRowsActive = $false
+    }
+
+    if ($Message -match '^\s*Ergebnis (der (Update-Suche|Installation)|des Downloads)\s*:') {
+        $script:WindowsUpdateConsoleTableActive = $true
+        return $true
+    }
+    if ($Message -match '(?i)^\s*(WARNUNG|WARNING|\[WARN\]|\[ERROR\]|FEHLER\b|ERROR\b)|\bfehlgeschlagen\b|\bkonnte nicht\b|aufgetreten!|manuelle Prüfung|manuelle Aktion erforderlich') { return $true }
+    if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:') { return $true }
+    if ($Message -match '(?i)^\s*(Starte Update-(Check|Download|Installation) auf|Verarbeite (Windows|AD|Hypervisor)|Gesamtliste nach Zusammenführung|Check abgeschlossen\.|Download abgeschlossen\.|Installation abgeschlossen\.|E-Mail erfolgreich versendet|Mailkonfigurationstest erfolgreich)') { return $true }
+    if ($Message -match '(?i)(Paketupdates? verfügbar|Paketupdate\(s\) (erkannt und verarbeitet|verfügbar))') {
+        $script:WindowsUpdateConsolePackageRowsActive = $Message -notmatch '(?i)Keine Paketupdates'
+        return $true
+    }
+    if ($Message -match '(?i)(Windows-Updates installiert|Keine Windows-Updates installiert|Updates verfügbar|keine Updates verfügbar|zurückgestellte Updates|Nachinstallation|Neustart.*geplant|Neustart.*verschoben|Kein automatischer Neustart|Linux-(Check|Stats)|HA-Stats|Home-Assistant-Check)') { return $true }
+    return $false
 }
 
 function Write-PSWindowsUpdateModuleLog {
@@ -1582,15 +1637,18 @@ function Write-WindowsUpdateLog {
 
     if ($IsDebug -and -not $DebugEnabled) { return }
     $prefix = if ($IsDebug) { '[DEBUG] ' } else { '' }
+    $showInConsole = Test-WindowsUpdateConsoleMessage -Message $Message -IsDebug:$IsDebug
     $consoleColor = $null
-    if ($Host.Name -eq 'ConsoleHost') {
+    if ($showInConsole -and $Host.Name -eq 'ConsoleHost') {
         try {
             if (-not [Console]::IsOutputRedirected) {
                 $consoleColor = if ($IsDebug) { 'Cyan' } else { Get-WindowsUpdateConsoleColor -Message $Message }
             }
         } catch { $consoleColor = $null }
     }
-    if ($consoleColor) { Write-Host "$prefix$Message" -ForegroundColor $consoleColor } else { Write-Host "$prefix$Message" }
+    if ($showInConsole) {
+        if ($consoleColor) { Write-Host "$prefix$Message" -ForegroundColor $consoleColor } else { Write-Host "$prefix$Message" }
+    }
     if (-not $WriteLogFile) { return }
 
     $logDirectory = Split-Path -Path $LogFile -Parent

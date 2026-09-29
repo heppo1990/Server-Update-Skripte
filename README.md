@@ -18,7 +18,7 @@ Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen 
 - Linux- und Home-Assistant-Skripte werden nur geladen, wenn sie in den Settings konfiguriert sind.
 - Mailversand lässt sich mit `Check-ServersUpdates.ps1 -TestMail` separat prüfen.
 - Zurückgestellte Windows-Updates und Neustart-Wartungsfenster werden über `UpdateSettings` konfiguriert.
-- In interaktiven Konsolen sind Erfolge grün, Warnungen und manuelle Aktionen gelb sowie Fehler rot markiert; Logs und E-Mails bleiben unformatiert.
+- Die Konsole zeigt vor allem Ziel, Ergebnis und wichtige Hinweise. Erfolge sind grün, Warnungen gelb und Fehler rot; das Log enthält weiterhin alle Details.
 
 ## Ausführliche Dokumentation
 
