@@ -9,6 +9,184 @@ function Write-CommonLog {
     if ($WriteLog) { & $WriteLog $Message }
 }
 
+function Write-PSWindowsUpdateModuleLog {
+    param([scriptblock]$WriteLog, [string]$Message, [string]$Level = 'INFO')
+    if ($WriteLog) { & $WriteLog $Message $Level; return }
+    if ($Level -eq 'WARN') { Write-Warning $Message } else { Write-Verbose $Message }
+}
+
+function Update-PSWindowsUpdateModule {
+    <#
+    .SYNOPSIS
+    Prüft und aktualisiert PSWindowsUpdate auf dem aktuellen Rechner.
+
+    .DESCRIPTION
+    Gemeinsame Modulpflege für das Check-Skript und das WindowsUpdateAdm-Setup.
+    Die bereitgestellte Version wird in die maschinenweiten Modulpfade für
+    Windows PowerShell 5.1 und PowerShell 7 synchronisiert.
+    #>
+    param(
+        [switch]$Force,
+        [string]$OfflineModulePath,
+        [scriptblock]$WriteLog,
+        [string]$ComputerName,
+        $AuthInfo
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ComputerName) -and $ComputerName -ine $env:COMPUTERNAME) {
+        $session = $null
+        try {
+            $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
+            if (-not $AuthInfo) { $sessionParameters.SessionOption = New-PSSessionOption -IncludePortInSPN }
+            $session = New-PSSession @sessionParameters
+            $updateDefinition = (Get-Command -Name Update-PSWindowsUpdateModule -CommandType Function).Definition
+            $logDefinition = (Get-Command -Name Write-PSWindowsUpdateModuleLog -CommandType Function).Definition
+            $remoteWorker = {
+                param($UpdaterText, $LoggerText, $ForceUpdate)
+                Set-Item -Path Function:\Write-PSWindowsUpdateModuleLog -Value ([scriptblock]::Create($LoggerText))
+                Set-Item -Path Function:\Update-PSWindowsUpdateModule -Value ([scriptblock]::Create($UpdaterText))
+                $remoteLogger = { param($Message, $Level) [pscustomobject]@{ Type = 'ModuleLog'; Message = $Message; Level = $Level } }
+                $updateOutput = @(Update-PSWindowsUpdateModule -Force:$ForceUpdate -WriteLog $remoteLogger)
+                foreach ($entry in $updateOutput) {
+                    if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type -eq 'ModuleLog') {
+                        [pscustomobject]@{ Type = 'ModuleLog'; Message = [string]$entry.Message; Level = [string]$entry.Level }
+                    } elseif ($entry -is [bool]) {
+                        [pscustomobject]@{ Type = 'ModuleResult'; Success = $entry }
+                    }
+                }
+            }
+            $remoteResults = @(Invoke-Command -Session $session -ScriptBlock $remoteWorker -ArgumentList $updateDefinition, $logDefinition, [bool]$Force -ErrorAction Stop)
+            $success = $false
+            foreach ($entry in $remoteResults) {
+                if ($entry.Type -eq 'ModuleLog') { Write-PSWindowsUpdateModuleLog $WriteLog "[$ComputerName] $($entry.Message)" $entry.Level }
+                elseif ($entry.Type -eq 'ModuleResult') { $success = [bool]$entry.Success }
+            }
+            if (-not $success) { throw "PSWindowsUpdate konnte auf '$ComputerName' nicht bereitgestellt werden." }
+            return $true
+        }
+        catch {
+            Write-PSWindowsUpdateModuleLog $WriteLog "WARNUNG: PSWindowsUpdate konnte auf '$ComputerName' nicht aktualisiert werden; vorhandene Version wird verwendet. Ursache: $($_.Exception.Message)" 'WARN'
+            return $false
+        }
+        finally { if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue } }
+    }
+
+    $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending | Select-Object -First 1
+    $galleryVersion = $null
+
+    try {
+        $nugetProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+            Where-Object { $_.Version -ge [version]'2.8.5.201' } |
+            Sort-Object Version -Descending | Select-Object -First 1
+        if (-not $nugetProvider) {
+            Install-PackageProvider -Name NuGet -MinimumVersion '2.8.5.201' -Scope AllUsers `
+                -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
+        }
+
+        $galleryModule = Find-Module -Name PSWindowsUpdate -Repository PSGallery -ErrorAction Stop
+        $galleryVersion = [version]$galleryModule.Version
+        if (-not $installedModule -or $installedModule.Version -lt $galleryVersion -or $Force) {
+            $oldVersion = if ($installedModule) { [string]$installedModule.Version } else { 'nicht installiert' }
+            $action = if ($Force) { 'erzwungen aktualisiert' } elseif ($installedModule) { 'aktualisiert' } else { 'installiert' }
+            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate wird ${action}: $oldVersion -> $galleryVersion." 'UPDATE'
+
+            $installSucceeded = $false
+            for ($attempt = 1; $attempt -le 3 -and -not $installSucceeded; $attempt++) {
+                try {
+                    if ($attempt -eq 2) {
+                        Write-PSWindowsUpdateModuleLog $WriteLog 'PSWindowsUpdate-Installation wird erneut versucht.' 'WARN'
+                    }
+                    Install-Module -Name PSWindowsUpdate -Repository PSGallery -Scope AllUsers `
+                        -Force -AllowClobber -SkipPublisherCheck -Confirm:$false -ErrorAction Stop
+                    $installSucceeded = $true
+                }
+                catch {
+                    Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Installationsversuch $attempt/3 fehlgeschlagen: $($_.Exception.Message)" 'WARN'
+                    if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+                }
+            }
+            if (-not $installSucceeded) { throw "PSWindowsUpdate konnte nach drei Versuchen nicht von PSGallery installiert werden." }
+        }
+        else {
+            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate ist aktuell (Version $($installedModule.Version))." 'SUCCESS'
+        }
+    }
+    catch {
+        Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Onlineprüfung fehlgeschlagen: $($_.Exception.Message)" 'WARN'
+    }
+
+    $sourceModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $sourceModule) {
+        $fallbackModulePaths = @(
+            (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\PSWindowsUpdate'),
+            (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules\PSWindowsUpdate'),
+            (Join-Path $env:ProgramFiles 'PowerShell\Modules\PSWindowsUpdate')
+        )
+        if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+            $fallbackModulePaths += Join-Path ${env:ProgramFiles(x86)} 'WindowsPowerShell\Modules\PSWindowsUpdate'
+        }
+        foreach ($fallbackPath in $fallbackModulePaths) {
+            if (-not (Test-Path -LiteralPath $fallbackPath -PathType Container)) { continue }
+            try {
+                Import-Module $fallbackPath -ErrorAction Stop
+                $sourceModule = Get-Module -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
+                    Sort-Object Version -Descending | Select-Object -First 1
+                if ($sourceModule) { break }
+            }
+            catch { Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate konnte nicht aus '$fallbackPath' geladen werden: $($_.Exception.Message)" 'WARN' }
+        }
+    }
+
+    if (-not $sourceModule -and $OfflineModulePath -and (Test-Path -LiteralPath $OfflineModulePath -PathType Container)) {
+        try {
+            $offlineVersions = @(Get-ChildItem -LiteralPath $OfflineModulePath -Directory -ErrorAction SilentlyContinue)
+            $targetRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\PSWindowsUpdate'
+            New-Item -ItemType Directory -Path $targetRoot -Force -ErrorAction Stop | Out-Null
+            if ($offlineVersions.Count -gt 0) {
+                foreach ($version in $offlineVersions) {
+                    Copy-Item -LiteralPath $version.FullName -Destination (Join-Path $targetRoot $version.Name) -Recurse -Force -ErrorAction Stop
+                }
+            }
+            else {
+                Copy-Item -LiteralPath $OfflineModulePath -Destination $targetRoot -Recurse -Force -ErrorAction Stop
+            }
+            $sourceModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if ($sourceModule) { Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate wurde aus dem lokalen Offline-Paket bereitgestellt ($($sourceModule.Version))." 'SUCCESS' }
+        }
+        catch { Write-PSWindowsUpdateModuleLog $WriteLog "Offline-Bereitstellung von PSWindowsUpdate fehlgeschlagen: $($_.Exception.Message)" 'WARN' }
+    }
+
+    if (-not $sourceModule) {
+        Write-PSWindowsUpdateModuleLog $WriteLog 'PSWindowsUpdate ist nicht installiert und konnte nicht aktualisiert werden.' 'ERROR'
+        return $false
+    }
+
+    $moduleTargets = @(
+        [pscustomobject]@{ Name = 'Windows PowerShell 5.1'; Path = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\PSWindowsUpdate' },
+        [pscustomobject]@{ Name = 'PowerShell 7'; Path = Join-Path $env:ProgramFiles 'PowerShell\Modules\PSWindowsUpdate' }
+    )
+    foreach ($target in $moduleTargets) {
+        try {
+            $versionPath = Join-Path $target.Path ([string]$sourceModule.Version)
+            if (-not (Test-Path -LiteralPath $versionPath -PathType Container)) {
+                New-Item -ItemType Directory -Path $target.Path -Force -ErrorAction Stop | Out-Null
+                Copy-Item -LiteralPath $sourceModule.ModuleBase -Destination $versionPath -Recurse -Force -ErrorAction Stop
+                Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate $($sourceModule.Version) nach $($target.Name) kopiert." 'INFO'
+            }
+            Get-ChildItem -LiteralPath $target.Path -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ne [string]$sourceModule.Version } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop }
+        }
+        catch { Write-PSWindowsUpdateModuleLog $WriteLog "Modulpfad '$($target.Path)' konnte nicht synchronisiert werden: $($_.Exception.Message)" 'WARN' }
+    }
+
+    Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate bereit; verfügbare Version: $($sourceModule.Version)." 'SUCCESS'
+    return $true
+}
+
 function Initialize-WindowsUpdateDpapi {
     if ('System.Security.Cryptography.ProtectedData' -as [type]) { return }
     try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
@@ -1464,4 +1642,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-PSWindowsUpdateModule

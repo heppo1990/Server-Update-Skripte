@@ -251,63 +251,8 @@ function Clear-WindowsUpdateCache {
 
 function Import-PSWindowsUpdate {
   Write-ScriptLog "Versuche PSWindowsUpdate-Modul zu laden..."
-
-  # PSWindowsUpdate wird bei jedem regulären Check auf dem Verwaltungsrechner
-  # mit der PSGallery-Version abgeglichen und für PS 5.1 sowie PS 7 bereitgestellt.
-  try {
-    $nugetProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-      Where-Object { $_.Version -ge [version]'2.8.5.201' } |
-      Sort-Object Version -Descending |
-      Select-Object -First 1
-    if (-not $nugetProvider) {
-      Install-PackageProvider -Name NuGet -MinimumVersion '2.8.5.201' -Force -Confirm:$false -ErrorAction Stop | Out-Null
-    }
-
-    $galleryModule = Find-Module -Name PSWindowsUpdate -Repository PSGallery -ErrorAction Stop
-    $availableModules = @(Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
-      Sort-Object Version -Descending)
-    $installedModule = $availableModules | Select-Object -First 1
-
-    if (-not $installedModule -or $installedModule.Version -lt $galleryModule.Version) {
-      $oldVersion = if ($installedModule) { [string]$installedModule.Version } else { 'nicht installiert' }
-      Write-ScriptLog "PSWindowsUpdate wird aktualisiert: $oldVersion -> $($galleryModule.Version)."
-      if (Get-Module -Name PSWindowsUpdate) {
-        Remove-Module -Name PSWindowsUpdate -Force -ErrorAction SilentlyContinue
-      }
-      Install-Module -Name PSWindowsUpdate -Repository PSGallery -Scope AllUsers -Force -AllowClobber -SkipPublisherCheck -Confirm:$false -ErrorAction Stop
-    }
-    else {
-      Write-ScriptLog "PSWindowsUpdate ist aktuell (Version $($installedModule.Version)); prüfe beide PowerShell-Modulpfade."
-    }
-
-    $sourceModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
-      Sort-Object Version -Descending |
-      Select-Object -First 1
-    if (-not $sourceModule) { throw 'PSWindowsUpdate ist nach der Versionsprüfung nicht auffindbar.' }
-
-    $moduleTargets = @(
-      [pscustomobject]@{ Name = 'PowerShell 5.1'; Path = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\PSWindowsUpdate' },
-      [pscustomobject]@{ Name = 'PowerShell 7'; Path = Join-Path $env:ProgramFiles 'PowerShell\Modules\PSWindowsUpdate' }
-    )
-    foreach ($target in $moduleTargets) {
-      $versionPath = Join-Path $target.Path ([string]$sourceModule.Version)
-      if (-not (Test-Path -LiteralPath $versionPath -PathType Container)) {
-        New-Item -Path $target.Path -ItemType Directory -Force -ErrorAction Stop | Out-Null
-        Copy-Item -LiteralPath $sourceModule.ModuleBase -Destination $versionPath -Recurse -Force -ErrorAction Stop
-        Write-ScriptLog "PSWindowsUpdate $($sourceModule.Version) nach $($target.Name) kopiert."
-      }
-
-      Get-ChildItem -LiteralPath $target.Path -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -ne [string]$sourceModule.Version } |
-        ForEach-Object {
-          Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
-          Write-ScriptLog "Alte PSWindowsUpdate-Version $($_.Name) aus $($target.Name) entfernt."
-        }
-    }
-  }
-  catch {
-    Write-ScriptLog "WARNUNG: PSWindowsUpdate konnte nicht online aktualisiert/synchronisiert werden; vorhandene Version wird verwendet. Ursache: $($_.Exception.Message)"
-  }
+  $moduleReady = Update-PSWindowsUpdateModule -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
+  if (-not $moduleReady) { return $false }
   
   if (Get-Module -Name PSWindowsUpdate) {
     Write-ScriptLog "PSWindowsUpdate ist bereits geladen."
@@ -651,6 +596,10 @@ if ($ServerADList -ne $null) {
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.
         $remoting = Initialize-WindowsUpdateRemoting -UpdateSettings $UpdateSettings -TargetComputer $Servername -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
         $svcCredential = $remoting.AuthInfo
+
+        if ($Servername -ne $env:COMPUTERNAME) {
+          $null = Update-PSWindowsUpdateModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
+        }
 
         # Cache leeren UND DetectNow auslösen VOR dem Update-Check
         Clear-WindowsUpdateCache -Servername $Servername -AuthInfo $svcCredential

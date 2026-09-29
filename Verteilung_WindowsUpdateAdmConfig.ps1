@@ -63,6 +63,7 @@ Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -Erro
 
 # Konfiguration
 $PSSCfgSkriptFile = "New-WindowsUpdateAdmConfig.ps1"
+$CommonModuleFile = 'WindowsUpdate.Common.psm1'
 $ScriptName = [IO.Path]::GetFileNameWithoutExtension($PSCommandPath)
 
 function Write-DeployLog {
@@ -83,9 +84,11 @@ Write-Host "|  WindowsUpdateAdm Config Verteilung   |" -ForegroundColor Cyan
 Write-Host "+=======================================+`n" -ForegroundColor Cyan
 
 # Voraussetzungen pruefen
-if (-not (Test-Path "$PSScriptRoot\$PSSCfgSkriptFile")) {
-    Write-Host "FEHLER: Setup-Skript nicht gefunden: $PSScriptRoot\$PSSCfgSkriptFile" -ForegroundColor Red
-    exit 1
+foreach ($requiredSetupFile in @($PSSCfgSkriptFile, $CommonModuleFile)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $requiredSetupFile) -PathType Leaf)) {
+        Write-Host "FEHLER: Für das Setup benötigte Datei nicht gefunden: $(Join-Path $PSScriptRoot $requiredSetupFile)" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # Die zentrale Zielermittlung liefert exakt dieselbe Zielmenge wie Check,
@@ -377,6 +380,9 @@ function Invoke-WinRMDeployment {
         Write-Host "  +- Übertrage Setup per WinRM..." -ForegroundColor Gray
         Copy-Item -Path (Join-Path $RootDirectory $PSSCfgSkriptFile) `
                   -Destination (Join-Path $remoteTemp $PSSCfgSkriptFile) `
+                  -ToSession $session -Force -ErrorAction Stop
+        Copy-Item -Path (Join-Path $RootDirectory $CommonModuleFile) `
+                  -Destination (Join-Path $remoteTemp $CommonModuleFile) `
                   -ToSession $session -Force -ErrorAction Stop
 
         # AD-Geräte erhalten weder Client-Zertifikat noch Zertifikats-Mapping.

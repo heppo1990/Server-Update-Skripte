@@ -63,6 +63,7 @@ param(
 # Dieses Setup wird auf Zielservern nur vorübergehend in %TEMP% ausgeführt.
 # Es lädt dort keine weiteren Repository-Skripte aus GitHub nach.
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
 
 # === TLS-KONFIGURATION GANZ AM ANFANG ===
 try {
@@ -98,75 +99,6 @@ function Write-SetupLog {
         }
     } else {
         Write-Host $LogMessage
-    }
-}
-
-# Funktion: Verfügbare Version von PSGallery abrufen
-function Get-LatestModuleVersion {
-    param([string]$ModuleName)
-    try {
-        Write-SetupLog "Pruefe neueste verfuegbare Version von $ModuleName..." "INFO"
-        $LatestModule = Find-Module -Name $ModuleName -ErrorAction Stop
-        Write-SetupLog "Neueste Version auf PSGallery: $($LatestModule.Version)" "INFO"
-        return $LatestModule.Version
-    }
-    catch {
-        Write-SetupLog "Konnte neueste Version nicht abrufen: $($_.Exception.Message)" "WARN"
-        return $null
-    }
-}
-
-# Funktion: Installierte Version abrufen
-function Get-InstalledModuleVersion {
-    param([string]$ModuleName)
-    $Module = Get-Module -ListAvailable -Name $ModuleName -ErrorAction SilentlyContinue | 
-              Sort-Object Version -Descending | 
-              Select-Object -First 1
-    if ($Module) { return $Module.Version }
-    return $null
-}
-
-# Funktion: Modul installieren oder aktualisieren
-function Install-OrUpdateModule {
-    param([string]$ModuleName, [switch]$Force)
-    
-    $InstalledVersion = Get-InstalledModuleVersion -ModuleName $ModuleName
-    $LatestVersion    = Get-LatestModuleVersion    -ModuleName $ModuleName
-    
-    # Neueste Version nicht ermittelbar
-    if (-not $LatestVersion) {
-        if (-not $InstalledVersion) {
-            Write-SetupLog "Kann $ModuleName nicht installieren - keine Verbindung zu PSGallery" "ERROR"
-            return $false
-        } else {
-            Write-SetupLog "$ModuleName ist installiert (Version: $InstalledVersion) - kann Update nicht pruefen" "WARN"
-            return $true
-        }
-    }
-    
-    # Nicht installiert oder veraltet oder Force
-    if (-not $InstalledVersion -or $InstalledVersion -lt $LatestVersion -or $Force) {
-        if ($Force) {
-            Write-SetupLog "$ModuleName Update erzwungen - aktualisiere auf $LatestVersion..." "UPDATE"
-        } elseif (-not $InstalledVersion) {
-            Write-SetupLog "$ModuleName nicht installiert - installiere Version $LatestVersion..." "UPDATE"
-        } else {
-            Write-SetupLog "$ModuleName ist veraltet ($InstalledVersion) - aktualisiere auf $LatestVersion..." "UPDATE"
-        }
-        
-        try {
-            Install-Module -Name $ModuleName -Scope AllUsers -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
-            Write-SetupLog "$ModuleName erfolgreich bereitgestellt (Version $LatestVersion)" "SUCCESS"
-            return $true
-        }
-        catch {
-            Write-SetupLog "Installation fehlgeschlagen: $($_.Exception.Message)" "ERROR"
-            return $false
-        }
-    }
-    else {
-        Write-SetupLog "$ModuleName ist aktuell (Version: $InstalledVersion)" "SUCCESS"
-        return $true
     }
 }
 
@@ -316,78 +248,9 @@ try {
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== PSWindowsUpdate Installation/Update ===" "INFO"
     
-    $MaxRetries = 3
-    $RetryCount = 0
-    $Success    = $false
-    
-    while (-not $Success -and $RetryCount -lt $MaxRetries) {
-        $RetryCount++
-        
-        if ($RetryCount -gt 1) {
-            Write-SetupLog "Installationsversuch $RetryCount von $MaxRetries..." "INFO"
-            # Beim 2. Versuch: Zertifikatsvalidierung temporär deaktivieren
-            if ($RetryCount -eq 2) {
-                Write-SetupLog "Deaktiviere Zertifikatspruefung temporaer..." "WARN"
-                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
-            }
-            Start-Sleep -Seconds 5
-        }
-        
-        try {
-            $Success = Install-OrUpdateModule -ModuleName "PSWindowsUpdate" -Force:$ForceUpdate
-        }
-        catch {
-            Write-SetupLog "Versuch $RetryCount fehlgeschlagen: $($_.Exception.Message)" "WARN"
-        }
-    }
-    
-    # Zertifikatsvalidierung wiederherstellen
-    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $OriginalCertificateCallback
-    
-    if (-not $Success) {
-        # Fallback 1: PSWindowsUpdate vom lokalen Server kopieren (bereits installiert auf diesem Server)
-        Write-SetupLog "Online-Installation fehlgeschlagen - suche PSWindowsUpdate auf lokalem Server..." "WARN"
-        $localPSWUPaths = @(
-            "$env:ProgramFiles\WindowsPowerShell\Modules\PSWindowsUpdate",
-            "$env:ProgramFiles\PowerShell\Modules\PSWindowsUpdate",
-            "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules\PSWindowsUpdate"
-        )
-        foreach ($localPath in $localPSWUPaths) {
-            if (Test-Path $localPath) {
-                $destPath = "$env:ProgramFiles\WindowsPowerShell\Modules\PSWindowsUpdate"
-                if ($localPath -ne $destPath) {
-                    try {
-                        Copy-Item $localPath $destPath -Recurse -Force
-                        Write-SetupLog "PSWindowsUpdate vom lokalen Pfad kopiert: $localPath" "SUCCESS"
-                    } catch { }
-                }
-                try {
-                    Import-Module PSWindowsUpdate -ErrorAction Stop
-                    Write-SetupLog "PSWindowsUpdate erfolgreich geladen." "SUCCESS"
-                    $Success = $true
-                    break
-                } catch { }
-            }
-        }
-    }
-
-    if (-not $Success) {
-        # Fallback 2: PSWindowsUpdate-Ordner im Skriptordner suchen
-        $offlinePSWU = Join-Path $PSScriptRoot "PSWindowsUpdate"
-        $psWUDest    = "$env:ProgramFiles\WindowsPowerShell\Modules\PSWindowsUpdate"
-        if (Test-Path $offlinePSWU) {
-            Write-SetupLog "Offline-Paket gefunden: $offlinePSWU - installiere..." "INFO"
-            try {
-                Copy-Item $offlinePSWU $psWUDest -Recurse -Force
-                Import-Module PSWindowsUpdate -ErrorAction Stop
-                Write-SetupLog "PSWindowsUpdate offline installiert." "SUCCESS"
-                $Success = $true
-            }
-            catch {
-                Write-SetupLog "Offline-Installation fehlgeschlagen: $($_.Exception.Message)" "WARN"
-            }
-        }
-    }
+    $offlinePSWU = Join-Path $PSScriptRoot 'PSWindowsUpdate'
+    $Success = Update-PSWindowsUpdateModule -Force:$ForceUpdate -OfflineModulePath $offlinePSWU `
+        -WriteLog { param($message, $level) Write-SetupLog $message $level }
 
     if (-not $Success) {
         Write-SetupLog "" "INFO"
