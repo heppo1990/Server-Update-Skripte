@@ -856,12 +856,14 @@ function Invoke-PowerShellWingetUpdateCheck {
         # ausführen, damit dieser die aktualisierte Prozessumgebung einliest.
         $shellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{ Path = $Path; Arguments = $arguments } -Compress)))
-        $childSource = @'
-$data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
-$wingetArguments = @($data.Arguments)
-& $data.Path @wingetArguments 2>&1
-exit $LASTEXITCODE
-'@ -replace '__PAYLOAD__', $payload
+        # Kein Here-String: dieser Code liegt selbst in einem PS5-Here-String.
+        $childSource = @(
+            '$data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''__PAYLOAD__'')) | ConvertFrom-Json'
+            '$wingetArguments = @($data.Arguments)'
+            '& $data.Path @wingetArguments 2>&1'
+            'exit $LASTEXITCODE'
+        ) -join "`n"
+        $childSource = $childSource.Replace('__PAYLOAD__', $payload)
         $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childSource))
         $output = & $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedChild 2>&1
     } else {
