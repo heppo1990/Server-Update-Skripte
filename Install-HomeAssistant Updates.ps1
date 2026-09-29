@@ -1,5 +1,6 @@
 ﻿param(
     [switch]$CheckOnly,
+    [switch]$ConnectionOnly,
     [switch]$DeferPhysicalReboots,
     [string]$HAHost,
     [string]$User,
@@ -317,6 +318,13 @@ function Ensure-SSHKeyOnHA {
 }
 
 Ensure-SSHKeyOnHA -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
+
+if ($ConnectionOnly) {
+    $connectionStats = [PSCustomObject]@{ Host=$HAHost; Success=$true; AvailableUpdates=0; UpdateDetails=@(); Error=''; LogFile=$LogFile }
+    $connectionStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
+    Write-HostLog -Message "SSH-Schlüssel und Verbindung zu $HAHost funktionieren." -RemoteHost $HAHost -LogFile $LogFile -Level Success
+    exit 0
+}
 
 # ----------------------------
 # Funktionen fuer HA-Befehle

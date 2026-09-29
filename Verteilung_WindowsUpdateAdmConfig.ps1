@@ -84,7 +84,7 @@ function Write-DeployLog {
     if ($LogOnly) { return }
 
     $show = [string]::IsNullOrWhiteSpace($Message) -or $Level -in @('Warning', 'Error') -or
-        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe Setup|Warte|Teste|Erfolg|FEHLER|Verbindung vorbereitet|WindowsUpdateAdm-Endpunkt|Linux-Hosts|Home Assistant)|\[(Linux|Home Assistant)\]|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|Home-Assistant-Instanzen:|Gesamt Systeme:|Gesamt:|Logdatei:|\s{2,}[^:]+: \d+ (Paketupdates|Updates? verfügbar)|\s{2,}(Linux-Paket|Core|Supervisor|OS|Add-on))'
+        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe Setup|Warte|Teste|Erfolg|FEHLER|Verbindung vorbereitet|WindowsUpdateAdm-Endpunkt|Linux-Hosts|Home Assistant)|\[(Linux|Home Assistant)\]|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|Home-Assistant-Instanzen:|Gesamt Systeme:|Gesamt:|Logdatei:|\s{2,}[^:]+: (SSH-Schlüssel|Verbindung/Einrichtung)|\s{2,}[^:]+: \d+ (Paketupdates|Updates? verfügbar)|\s{2,}(Linux-Paket|Core|Supervisor|OS|Add-on))'
     if (-not $show) { return }
 
     $color = switch ($Level) {
@@ -148,7 +148,34 @@ if (-not [string]::IsNullOrWhiteSpace($TargetComputer)) {
     }
     Write-DeployLog "Eingeschränkter Lauf: $($Serverlist[0].Name)" -Level Warning
 }
-Write-DeployLog "Ziele: $($Serverlist.Count)"
+$linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings.LinuxSettings } else { $null }
+$haSettings = if ($Settings.PSObject.Properties['HomeAssistantSettings']) { $Settings.HomeAssistantSettings } else { $null }
+$linuxHostEntries = @()
+if ($null -ne $linuxSettings -and $linuxSettings.PSObject.Properties['Hosts']) {
+    $linuxHostEntries = @(
+      foreach ($entry in @($linuxSettings.Hosts)) {
+        if ($null -eq $entry) { continue }
+        if ($entry -is [string]) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) { $entry }
+            continue
+        }
+        $hostValue = if ($entry.PSObject.Properties['Host']) { [string]$entry.Host } elseif ($entry.PSObject.Properties['Name']) { [string]$entry.Name } else { '' }
+        $userValue = if ($entry.PSObject.Properties['User']) { [string]$entry.User } else { '' }
+        if (-not [string]::IsNullOrWhiteSpace($hostValue) -or -not [string]::IsNullOrWhiteSpace($userValue)) { $entry }
+      }
+    )
+}
+$linuxConfigured = $linuxHostEntries.Count -gt 0
+$haConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
+$includeOptionalSystems = [string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOnly
+$LinuxSystemCount = if ($includeOptionalSystems -and $linuxConfigured) { $linuxHostEntries.Count } else { 0 }
+$HASystemCount = if ($includeOptionalSystems -and $haConfigured) { 1 } else { 0 }
+$configuredSystemCount = $Serverlist.Count + $LinuxSystemCount + $HASystemCount
+if ($includeOptionalSystems) {
+    Write-DeployLog "Ziele: Windows $($Serverlist.Count), Linux $LinuxSystemCount, Home Assistant $HASystemCount; Gesamt $configuredSystemCount"
+} else {
+    Write-DeployLog "Ziele: Windows $($Serverlist.Count) (Linux und Home Assistant übersprungen)"
+}
 
 # Das Client-Zertifikat wird nur benötigt, wenn mindestens ein Nicht-AD-Gerät
 # eingerichtet wird. Es wird bei Bedarf automatisch im Skriptordner erstellt.
@@ -175,10 +202,6 @@ if ($nonAdTargets.Count -gt 0) {
 $Results      = @()
 $SuccessCount = 0
 $FailCount    = 0
-$LinuxSystemCount = 0
-$LinuxUpdateCount = 0
-$HASystemCount = 0
-$HAUpdateCount = 0
 $LinuxConnectionErrors = 0
 $HAConnectionErrors = 0
 $script:BootstrapCredential = $null
@@ -760,12 +783,6 @@ ForEach ($Server in $Serverlist) {
 if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOnly) {
     $hostPowerShell = Join-Path $PSHOME 'pwsh.exe'
     if (-not (Test-Path -LiteralPath $hostPowerShell)) { $hostPowerShell = (Get-Process -Id $PID).Path }
-    $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings.LinuxSettings } else { $null }
-    $haSettings = if ($Settings.PSObject.Properties['HomeAssistantSettings']) { $Settings.HomeAssistantSettings } else { $null }
-    $linuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Properties['Hosts'] -and @($linuxSettings.Hosts | Where-Object { $_ }).Count -gt 0
-    $haConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
-    if ($linuxConfigured) { $LinuxSystemCount = @($linuxSettings.Hosts | Where-Object { $_ }).Count }
-    if ($haConfigured) { $HASystemCount = 1 }
     $connectionSetups = @()
     if ($linuxConfigured) { $connectionSetups += [PSCustomObject]@{ Name = 'Linux'; Script = 'Install-Linux Updates.ps1' } }
     if ($haConfigured) { $connectionSetups += [PSCustomObject]@{ Name = 'Home Assistant'; Script = 'Install-HomeAssistant Updates.ps1' } }
@@ -775,13 +792,13 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
         $statsPath = Join-Path $PSScriptRoot $statsFileName
         Remove-Item -LiteralPath $statsPath -Force -ErrorAction SilentlyContinue
         if (-not (Test-Path -LiteralPath $connectionScript)) {
-            if ($connectionSetup.Name -eq 'Linux') { $LinuxConnectionErrors++ } else { $HAConnectionErrors++ }
+            if ($connectionSetup.Name -eq 'Linux') { $LinuxConnectionErrors = [Math]::Max(1, $LinuxSystemCount) } else { $HAConnectionErrors = 1 }
             Write-DeployLog "$($connectionSetup.Name)-Einrichtung übersprungen: Skript nicht gefunden." -Level Warning
             continue
         }
         Write-DeployLog "[$($connectionSetup.Name)] Verbindungseinrichtung gestartet."
         try {
-            $connectionOutput = @(& $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -CheckOnly *>&1)
+            $connectionOutput = @(& $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -ConnectionOnly *>&1)
             $connectionExitCode = $LASTEXITCODE
             foreach ($entry in $connectionOutput) { Write-DeployLog ([string]$entry) -LogOnly }
             if (-not (Test-Path -LiteralPath $statsPath -PathType Leaf)) {
@@ -791,37 +808,24 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
             if ($connectionSetup.Name -eq 'Linux') {
                 $linuxHosts = @($connectionStats.HostStatus)
                 $LinuxSystemCount = [int]$connectionStats.TotalHosts
-                $LinuxUpdateCount = [int]$connectionStats.UpdatesInstalled
                 $LinuxConnectionErrors = [int]$connectionStats.FailedHosts
                 $linuxLevel = if ($LinuxConnectionErrors -gt 0) { 'Warning' } else { 'Success' }
-                Write-DeployLog "[Linux] Hosts geprüft: $LinuxSystemCount; Updates verfügbar: $LinuxUpdateCount; Fehler: $LinuxConnectionErrors" -Level $linuxLevel
+                $linuxConnectedCount = [Math]::Max(0, $LinuxSystemCount - $LinuxConnectionErrors)
+                Write-DeployLog "[Linux] Hosts geprüft: $LinuxSystemCount; SSH-Schlüssel/Verbindung erfolgreich: $linuxConnectedCount; Fehler: $LinuxConnectionErrors" -Level $linuxLevel
                 foreach ($hostResult in $linuxHosts) {
                     if ($hostResult.Status -eq 'Fehler') {
                         Write-DeployLog "  $($hostResult.Host): Verbindung/Einrichtung fehlgeschlagen; Details im Log." -Level Warning
-                        continue
-                    }
-                    if ([int]$hostResult.UpdateCount -gt 0) {
-                        Write-DeployLog "  $($hostResult.Host): $($hostResult.UpdateCount) Paketupdates verfügbar."
-                        foreach ($package in @($hostResult.PackageList)) {
-                            if (-not [string]::IsNullOrWhiteSpace([string]$package)) { Write-DeployLog "    Linux-Paket: $package" }
-                        }
                     } else {
-                        Write-DeployLog "  $($hostResult.Host): keine Paketupdates verfügbar."
+                        Write-DeployLog "  $($hostResult.Host): SSH-Schlüssel und Verbindung funktionieren."
                     }
                 }
             }
             else {
-                $HASystemCount = 1
-                $HAUpdateCount = [int]$connectionStats.AvailableUpdates
                 if (-not $connectionStats.Success) {
                     $HAConnectionErrors = 1
                     Write-DeployLog '[Home Assistant] Verbindung/Einrichtung fehlgeschlagen; Details im Log.' -Level Warning
                 } else {
-                    $haStatus = if ($HAUpdateCount -eq 1) { 'Update' } else { 'Updates' }
-                    Write-DeployLog "[Home Assistant] $($connectionStats.Host): $HAUpdateCount $haStatus verfügbar." -Level Success
-                    foreach ($detail in @($connectionStats.UpdateDetails)) {
-                        Write-DeployLog "  $($detail.Component): $($detail.Current) → $($detail.Available)"
-                    }
+                    Write-DeployLog "[Home Assistant] SSH-Verbindung zu $($connectionStats.Host) funktioniert." -Level Success
                 }
             }
             if ($connectionExitCode -ne 0) {
@@ -831,7 +835,7 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
             }
         }
         catch {
-            if ($connectionSetup.Name -eq 'Linux') { $LinuxConnectionErrors++ } else { $HAConnectionErrors++ }
+            if ($connectionSetup.Name -eq 'Linux') { $LinuxConnectionErrors = [Math]::Max(1, $LinuxSystemCount) } else { $HAConnectionErrors = 1 }
             Write-DeployLog "$($connectionSetup.Name)-Einrichtung nicht abgeschlossen; Details im Log." -Level Warning
             Write-DeployLog "$($connectionSetup.Name)-Einrichtungsfehler: $($_.Exception.Message)" -LogOnly
         }
@@ -848,10 +852,12 @@ Write-DeployLog "Windows-Ziele: $($Results.Count)"
 Write-DeployLog "Erfolgreich: $SuccessCount" -Level Success
 Write-DeployLog "Fehler: $FailCount" -Level $(if ($FailCount -eq 0) { 'Success' } else { 'Error' })
 if ($LinuxSystemCount -gt 0 -or $LinuxConnectionErrors -gt 0) {
-    Write-DeployLog "Linux-Hosts: $LinuxSystemCount ($LinuxUpdateCount Updates verfügbar; $LinuxConnectionErrors Fehler)"
+    $linuxConnectedCount = [Math]::Max(0, $LinuxSystemCount - $LinuxConnectionErrors)
+    Write-DeployLog "Linux-Hosts: $LinuxSystemCount; SSH-Schlüssel/Verbindung: $linuxConnectedCount erfolgreich; Fehler: $LinuxConnectionErrors"
 }
 if ($HASystemCount -gt 0 -or $HAConnectionErrors -gt 0) {
-    Write-DeployLog "Home-Assistant-Instanzen: $HASystemCount ($HAUpdateCount Updates verfügbar; $HAConnectionErrors Fehler)"
+    $haConnectedCount = [Math]::Max(0, $HASystemCount - $HAConnectionErrors)
+    Write-DeployLog "Home-Assistant-Instanzen: $HASystemCount; Verbindung: $haConnectedCount erfolgreich; Fehler: $HAConnectionErrors"
 }
 $totalSystems = $Results.Count + $LinuxSystemCount + $HASystemCount
 Write-DeployLog "Gesamt Systeme: $totalSystems"

@@ -2,6 +2,7 @@
 param(
     [switch]$DryRun,
     [switch]$CheckOnly,
+    [switch]$ConnectionOnly,
     [switch]$DeferPhysicalReboots,
     [string]$KeyPath,
     [string]$SSHPath,
@@ -449,6 +450,11 @@ foreach ($entry in $hostEntries) {
             Write-LinuxLog -Message "SSH-Schlüssel-Login für $remoteHost funktioniert bereits." -LogFile $logFile -Level Success
         }
         Set-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile
+        if ($ConnectionOnly) {
+            $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Erfolgreich'; UpdateCount=0; Packages=''; PackageList=@(); LogFile=$logFile }
+            Write-LinuxLog -Message "SSH-Schlüssel und Verbindung zu $remoteHost funktionieren." -LogFile $logFile -Level Success
+            continue
+        }
         $result = Invoke-LinuxUpdate -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile -DryRun:$DryRun
         $totalUpdatesInstalled += $result.UpdateCount
         $isVirtual = $false; $rebootScheduled = $false
@@ -475,7 +481,7 @@ foreach ($entry in $hostEntries) {
     }
 }
 $linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; VMRebootsScheduled=$vmRebootsScheduled; PendingPhysicalReboots=@($script:PendingPhysicalReboots); UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
-$statsFile = Join-Path $PSScriptRoot $(if ($CheckOnly) { 'linux_update_check_stats.json' } else { 'linux_update_stats.json' })
+$statsFile = Join-Path $PSScriptRoot $(if ($CheckOnly -or $ConnectionOnly) { 'linux_update_check_stats.json' } else { 'linux_update_stats.json' })
 $linuxStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statsFile -Encoding utf8
 $summaryVerb = if ($DryRun) { 'verfügbar' } else { 'installiert' }
 $summaryLabel = if ($CheckOnly) { 'Linux-Check' } else { 'Linux-Zusammenfassung' }
