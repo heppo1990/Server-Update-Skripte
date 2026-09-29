@@ -1112,10 +1112,17 @@ exit $LASTEXITCODE
             param([string]$Path, [string[]]$InstallerArguments)
             $powerShell51 = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
+            # Nicht nur den Pfad voraussetzen: Vor -Force und -UpdateSelf
+            # verifizieren, dass genau dieser Interpreter tatsächlich PS 5.1 ist.
+            $versionOutput = (& $powerShell51 -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()' 2>&1 | Out-String -Width 100).Trim()
+            $versionExitCode = $LASTEXITCODE
+            if ($versionExitCode -ne 0 -or $versionOutput -notmatch '^5\.1(?:\.|$)') {
+                throw "winget-install benötigt Windows PowerShell 5.1; erkannt wurde '$versionOutput' (Exitcode $versionExitCode)."
+            }
             $rawOutput = (& $powerShell51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @InstallerArguments 2>&1 | Out-String -Width 300)
             $output = Get-WingetCompactOutput -Text $rawOutput
             $exitCode = $LASTEXITCODE
-            return [PSCustomObject]@{ ExitCode = $exitCode; Output = $output.Trim() }
+            return [PSCustomObject]@{ ExitCode = $exitCode; Output = $output.Trim(); PowerShellVersion = $versionOutput }
         }
 
         function Test-WingetInstallScriptSignature {
@@ -1177,7 +1184,7 @@ exit $LASTEXITCODE
                                 throw "Die vorhandene winget-install-Datei hat keine gültige Authenticode-Signatur: $installerPath"
                             }
                             $updateResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-UpdateSelf')
-                            $wingetBootstrapMessage += " UpdateSelf ExitCode=$($updateResult.ExitCode)."
+                            $wingetBootstrapMessage += " UpdateSelf unter Windows PowerShell $($updateResult.PowerShellVersion), ExitCode=$($updateResult.ExitCode)."
                             if (-not [string]::IsNullOrWhiteSpace($updateResult.Output)) { $wingetBootstrapMessage += " $($updateResult.Output)" }
                             if ($updateResult.ExitCode -ne 0) { throw "winget-install -UpdateSelf endete mit ExitCode $($updateResult.ExitCode)." }
                             $installerPath = Find-WingetInstallScript
@@ -1215,8 +1222,9 @@ catch {
                         }
                         $repairResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-Force')
                         if ($repairResult.ExitCode -ne 0) {
-                            throw "winget-install -Force endete mit ExitCode $($repairResult.ExitCode): $($repairResult.Output)"
+                            throw "winget-install -Force unter Windows PowerShell $($repairResult.PowerShellVersion) endete mit ExitCode $($repairResult.ExitCode): $($repairResult.Output)"
                         }
+                        $wingetBootstrapMessage += " winget-install -Force lief unter Windows PowerShell $($repairResult.PowerShellVersion)."
                         $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
                         $wingetPath = Resolve-WingetExecutable
                         $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
