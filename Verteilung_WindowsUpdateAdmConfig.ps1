@@ -65,28 +65,66 @@ Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -Erro
 $PSSCfgSkriptFile = "New-WindowsUpdateAdmConfig.ps1"
 $CommonModuleFile = 'WindowsUpdate.Common.psm1'
 $ScriptName = [IO.Path]::GetFileNameWithoutExtension($PSCommandPath)
+$script:DeployLogEnabled = $true
+$script:DeployLogFile = $null
+$script:DeployLogDirectory = Join-Path $PSScriptRoot 'Logs'
+$script:DeployKeepLogFiles = 5
 
 function Write-DeployLog {
-    param([string]$Message)
-    Write-Host $Message -ForegroundColor Gray
+    param(
+        [AllowEmptyString()][string]$Message,
+        [ValidateSet('Info', 'Success', 'Warning', 'Error')][string]$Level = 'Info',
+        [switch]$LogOnly,
+        [switch]$ConsoleOnly
+    )
+
+    if (-not $ConsoleOnly -and $script:DeployLogEnabled -and $script:DeployLogFile) {
+        "$(Get-Date -Format 'dd.MM.yyyy HH:mm:ss') [$Level] $Message" | Add-Content -LiteralPath $script:DeployLogFile -Encoding UTF8
+    }
+    if ($LogOnly) { return }
+
+    $show = [string]::IsNullOrWhiteSpace($Message) -or $Level -in @('Warning', 'Error') -or
+        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Erfolg|FEHLER|Verbindung vorbereitet)|Ergebnis:|Erfolgreich:|Fehler:|Gesamt:|Logdatei:)'
+    if (-not $show) { return }
+
+    $color = switch ($Level) {
+        'Success' { 'Green' }
+        'Warning' { 'Yellow' }
+        'Error'   { 'Red' }
+        default   {
+            if ($Message -match '(?i)^\s*(WARNUNG|WARNING)') { 'Yellow' }
+            elseif ($Message -match '(?i)^\s*(FEHLER|ERROR)') { 'Red' }
+            elseif ($Message -match '(?i)^\s*(WindowsUpdateAdm-Verteilung|Ergebnis:|Erfolgreich:|Fehler:|Gesamt:)') { 'Cyan' }
+            else { 'Gray' }
+        }
+    }
+    Write-Host $Message -ForegroundColor $color
 }
 
-$Settings = Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName $ScriptName -WriteLog { param($message) Write-DeployLog $message }
+$Settings = Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName $ScriptName
 $UpdateSettings = $Settings.UpdateSettings
+$script:DeployLogEnabled = if ($UpdateSettings.PSObject.Properties['WriteLogFile']) { [bool]$UpdateSettings.WriteLogFile } else { $true }
+$script:DeployKeepLogFiles = if ($UpdateSettings.PSObject.Properties['KeepLogFiles'] -and [int]$UpdateSettings.KeepLogFiles -ge 0) { [int]$UpdateSettings.KeepLogFiles } else { 5 }
+if ($script:DeployLogEnabled) {
+    # Das Logverzeichnis wird nur angelegt, wenn Protokollierung aktiviert ist.
+    if (-not (Test-Path -LiteralPath $script:DeployLogDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:DeployLogDirectory -Force | Out-Null
+    }
+    $script:DeployLogFile = Join-Path $script:DeployLogDirectory ("{0}_{1}.log" -f $ScriptName, (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+    "Protokolldatei vom $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss') / $ScriptName" | Set-Content -LiteralPath $script:DeployLogFile -Encoding UTF8
+}
 $TargetComputers = $UpdateSettings.TargetComputers
 if ([string]::IsNullOrWhiteSpace($TargetComputers)) {
     $TargetComputers = "Server"
 }
 
 # Header
-Write-Host "`n+=======================================+" -ForegroundColor Cyan
-Write-Host "|  WindowsUpdateAdm Config Verteilung   |" -ForegroundColor Cyan
-Write-Host "+=======================================+`n" -ForegroundColor Cyan
+Write-DeployLog 'WindowsUpdateAdm-Verteilung'
 
 # Voraussetzungen pruefen
 foreach ($requiredSetupFile in @($PSSCfgSkriptFile, $CommonModuleFile)) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $requiredSetupFile) -PathType Leaf)) {
-        Write-Host "FEHLER: Für das Setup benötigte Datei nicht gefunden: $(Join-Path $PSScriptRoot $requiredSetupFile)" -ForegroundColor Red
+        Write-DeployLog "FEHLER: Für das Setup benötigte Datei nicht gefunden: $(Join-Path $PSScriptRoot $requiredSetupFile)" -Level Error
         exit 1
     }
 }
@@ -108,9 +146,9 @@ if (-not [string]::IsNullOrWhiteSpace($TargetComputer)) {
     if ($Serverlist.Count -eq 0) {
         throw "Das Ziel '$TargetComputer' wurde nicht in der ermittelten Windows-Zielliste gefunden."
     }
-    Write-Host "Eingeschränkter Lauf: $($Serverlist[0].Name)" -ForegroundColor Yellow
+    Write-DeployLog "Eingeschränkter Lauf: $($Serverlist[0].Name)" -Level Warning
 }
-Write-Host "Gesamtliste: $($Serverlist.Count) Gerät(e)`n" -ForegroundColor Green
+Write-DeployLog "Ziele: $($Serverlist.Count)"
 
 # Das Client-Zertifikat wird nur benötigt, wenn mindestens ein Nicht-AD-Gerät
 # eingerichtet wird. Es wird bei Bedarf automatisch im Skriptordner erstellt.
@@ -122,11 +160,12 @@ if ($nonAdTargets.Count -gt 0) {
         throw "Das Zertifikat-Setup-Skript wurde nicht gefunden: $certificateSetup"
     }
     if (-not (Test-Path $clientCertificate)) {
-        Write-Host "Client-Zertifikat fehlt – erstelle es automatisch..." -ForegroundColor Yellow
+        Write-DeployLog 'Client-Zertifikat fehlt; richte es ein.'
     } else {
-        Write-Host "Client-Zertifikat vorhanden – synchronisiere Konfigurationen..." -ForegroundColor Gray
+        Write-DeployLog 'Client-Zertifikat vorhanden; synchronisiere Konfigurationen.'
     }
-    & $certificateSetup -NonInteractive
+    $certificateSetupOutput = @(& $certificateSetup -NonInteractive *>&1)
+    foreach ($entry in $certificateSetupOutput) { Write-DeployLog ([string]$entry) -LogOnly }
     if (-not (Test-Path $clientCertificate)) {
         throw "Das automatische Erstellen des Client-Zertifikats ist fehlgeschlagen."
     }
@@ -165,9 +204,9 @@ function Add-TrustedWinRMServerCertificate {
         $known = $store.Certificates | Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } | Select-Object -First 1
         if (-not $known) {
             $store.Add($certificate)
-            Write-Host "  +- WinRM-Serverzertifikat von $Servername als vertrauenswürdig hinterlegt ($($certificate.Thumbprint))." -ForegroundColor Green
+            Write-DeployLog "WinRM-Serverzertifikat für $Servername als vertrauenswürdig hinterlegt." -Level Success
         } else {
-            Write-Host "  +- WinRM-Serverzertifikat von $Servername ist bereits vertrauenswürdig." -ForegroundColor Gray
+            Write-DeployLog "WinRM-Serverzertifikat für $Servername ist bereits vertrauenswürdig." -LogOnly
         }
     }
     finally {
@@ -208,36 +247,36 @@ function Invoke-WinRMDeployment {
                 Select-Object -First 1
             if ($clientCert) {
                 try {
-                    Write-Host "  +- Prüfe bestehende WinRM-Zertifikatsverbindung..." -ForegroundColor Gray
+                    Write-DeployLog "Prüfe Client-Zertifikatsverbindung zu $Servername." -LogOnly
                     $session = New-PSSession -ComputerName $Servername -UseSSL `
                         -CertificateThumbprint $clientCert.Thumbprint `
                         -ErrorAction Stop
                     $usedCertificate = $true
-                    Write-Host "  +- Zertifikatsverbindung erfolgreich – keine Zugangsdaten erforderlich." -ForegroundColor Green
+                    Write-DeployLog "Client-Zertifikatsverbindung zu $Servername erfolgreich." -LogOnly
                 }
                 catch {
-                    Write-Host "  +- Strenge Zertifikatsprüfung noch nicht verfügbar – stelle Vertrauenskette einmalig her." -ForegroundColor Yellow
+                    Write-DeployLog "Vertrauenskette für $Servername wird einmalig eingerichtet." -LogOnly
                     try {
                         $session = New-PSSession -ComputerName $Servername -UseSSL `
                             -CertificateThumbprint $clientCert.Thumbprint `
                             -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) `
                             -ErrorAction Stop
                         $usedCertificate = $true
-                        Write-Host "  +- Bestehende Client-Zertifikatsverbindung für die einmalige Vertrauensmigration verwendet." -ForegroundColor Gray
+                        Write-DeployLog "Vorhandenes Client-Zertifikat für die Vertrauensmigration auf $Servername verwendet." -LogOnly
                     }
                     catch {
-                        Write-Host "  +- Client-Zertifikatsverbindung nicht verfügbar – verwende Einrichtungsdaten." -ForegroundColor Yellow
+                        Write-DeployLog "Client-Zertifikat für $Servername nicht verfügbar; verwende Einrichtungsdaten." -LogOnly
                     }
                 }
             }
 
             if (-not $session) {
                 if ($null -eq $script:BootstrapCredential) {
-                    Write-Host "  +- Einmalig lokale Administrator-Anmeldedaten für Nicht-AD-Geräte eingeben..." -ForegroundColor Yellow
+                    Write-DeployLog "Einmalige Anmeldedaten für $Servername werden benötigt." -Level Warning
                     $script:BootstrapCredential = Get-Credential -Message "Einmalige WinRM-Einrichtung für Nicht-AD-Geräte (z. B. .\Administrator)"
                 }
                 $bootstrapCredential = $script:BootstrapCredential
-                Write-Host "  +- Verbinde per WinRM ($DeployType)..." -ForegroundColor Gray
+                Write-DeployLog "Verbinde per WinRM mit $Servername ($DeployType)." -LogOnly
                 try {
                     $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
                         -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
@@ -245,7 +284,7 @@ function Invoke-WinRMDeployment {
                 catch {
                     # Vor der Einrichtung existiert bei manchen Geräten noch kein
                     # HTTPS-Listener. HTTP ist ausschließlich der einmalige Fallback.
-                    Write-Host "  +- WinRM/HTTPS noch nicht verfügbar; versuche einmalig WinRM/HTTP..." -ForegroundColor Yellow
+                    Write-DeployLog "WinRM/HTTPS auf $Servername nicht verfügbar; einmaliger HTTP-Fallback." -LogOnly
                     try {
                         $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
                     }
@@ -253,14 +292,14 @@ function Invoke-WinRMDeployment {
                         # Ein lokales Administratorkonto kann je Nicht-AD-Gerät
                         # unterschiedlich heißen. Werden zwischengespeicherte
                         # Daten abgelehnt, fragen wir genau für dieses Ziel neu.
-                        Write-Host "  +- Vorherige Einrichtungsdaten wurden von $Servername abgelehnt." -ForegroundColor Yellow
+                        Write-DeployLog "Einrichtungsdaten für $Servername wurden abgelehnt." -Level Warning
                         $bootstrapCredential = Get-Credential -Message "Lokale Administrator-Anmeldedaten für $Servername (z. B. .\Administrator)"
                         try {
                             $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
                                 -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
                         }
                         catch {
-                            Write-Host "  +- WinRM/HTTPS noch nicht verfügbar; versuche $Servername einmalig per HTTP..." -ForegroundColor Yellow
+                            Write-DeployLog "WinRM/HTTPS auf $Servername nicht verfügbar; einmaliger HTTP-Fallback." -LogOnly
                             $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
                         }
                         $script:BootstrapCredential = $bootstrapCredential
@@ -268,7 +307,7 @@ function Invoke-WinRMDeployment {
                 }
             }
         } else {
-            Write-Host "  +- Verbinde per WinRM ($DeployType)..." -ForegroundColor Gray
+            Write-DeployLog "Verbinde per WinRM mit $Servername ($DeployType)." -LogOnly
             $session = New-PSSession -ComputerName $Servername -ErrorAction Stop
         }
 
@@ -354,9 +393,7 @@ function Invoke-WinRMDeployment {
 
             return @($removed)
         } -ErrorAction Stop
-        foreach ($removedPath in @($removedLegacyPaths)) {
-            Write-Host "  +- Veraltete, eindeutig markierte Temp-Ablage bereinigt: $removedPath" -ForegroundColor DarkYellow
-        }
+        foreach ($removedPath in @($removedLegacyPaths)) { Write-DeployLog "Veraltete Temp-Ablage bereinigt: $removedPath" -LogOnly }
         if ($CleanupLegacyTempOnly) {
             return [PSCustomObject]@{
                 Status = 'Success'
@@ -377,7 +414,7 @@ function Invoke-WinRMDeployment {
             New-Item -ItemType Directory -Path $path -Force | Out-Null
         } -ArgumentList $remoteTemp -ErrorAction Stop
 
-        Write-Host "  +- Übertrage Setup per WinRM..." -ForegroundColor Gray
+        Write-DeployLog "Übertrage Setup an $Servername." -LogOnly
         Copy-Item -Path (Join-Path $RootDirectory $PSSCfgSkriptFile) `
                   -Destination (Join-Path $remoteTemp $PSSCfgSkriptFile) `
                   -ToSession $session -Force -ErrorAction Stop
@@ -404,15 +441,27 @@ function Invoke-WinRMDeployment {
             $setupParameters.PreserveExistingCertificateMapping = $true
         }
 
-        Write-Host "  +- Fuehre Setup aus ($DeployType)..." -ForegroundColor Gray
-        $null = Invoke-Command -Session $session -ScriptBlock {
+        Write-DeployLog "Führe Setup auf $Servername aus ($DeployType)." -LogOnly
+        $remoteSetupOutput = @(Invoke-Command -Session $session -ScriptBlock {
             param($path, $scriptName, $parameters)
             # Die zentrale Richtlinie des Zielsystems bleibt unverändert:
             # Bypass gilt nur für diesen kurzlebigen WinRM-Prozess, damit das
             # vertrauenswürdige Setup aus dem temporären Ablageordner starten kann.
             Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
             & (Join-Path $path $scriptName) @parameters
-        } -ArgumentList $remoteTemp, $PSSCfgSkriptFile, $setupParameters -ErrorAction Stop
+        } -ArgumentList $remoteTemp, $PSSCfgSkriptFile, $setupParameters -ErrorAction Stop *>&1)
+        foreach ($entry in $remoteSetupOutput) {
+            $entryText = if ($entry -is [System.Management.Automation.InformationRecord]) { [string]$entry.MessageData } else { [string]$entry }
+            Write-DeployLog $entryText -LogOnly
+        }
+        $setupErrors = @($remoteSetupOutput | Where-Object {
+            $_ -is [System.Management.Automation.ErrorRecord] -or
+            ([string]$_ -match '(?i)\[ERROR\]|FEHLER beim Setup')
+        })
+        if ($setupErrors.Count -gt 0) {
+            $setupErrorText = if ($setupErrors[0] -is [System.Management.Automation.ErrorRecord]) { $setupErrors[0].Exception.Message } else { [string]$setupErrors[0] }
+            throw "Setup auf $Servername meldete einen Fehler: $setupErrorText"
+        }
 
         if ($DeployType -ne 'AD') {
             Add-TrustedWinRMServerCertificate -Session $session -Servername $Servername
@@ -431,7 +480,7 @@ function Invoke-WinRMDeployment {
                 } -ErrorAction Stop
                 if ([int]$versionProbe -gt 17763) { $requiresJeaEndpointTest = $true }
                 else {
-                    Write-Host "  +- Windows Server 2016/2019 erkannt – JEA-Endpunkttest wird übersprungen (Updates laufen später als SYSTEM-Aufgabe)." -ForegroundColor Gray
+                    Write-DeployLog 'Windows Server 2016/2019 erkannt; JEA-Endpunkttest entfällt.' -LogOnly
                 }
             }
             catch {
@@ -449,7 +498,7 @@ function Invoke-WinRMDeployment {
             }
         }
 
-        Write-Host "  +- Warte 30 Sekunden auf WinRM-Neustart und Endpoint-Aktivierung..." -ForegroundColor Gray
+        Write-DeployLog "Warte auf WinRM-Neustart auf $Servername." -LogOnly
         Start-Sleep -Seconds 30
 
         $testParams = @{
@@ -470,11 +519,11 @@ function Invoke-WinRMDeployment {
             $testParams.CertificateThumbprint = $clientCert.Thumbprint
         }
 
-        Write-Host "  +- Teste neue Verbindung zum WindowsUpdateAdm-Endpunkt..." -ForegroundColor Gray
+        Write-DeployLog "Teste WindowsUpdateAdm-Endpunkt auf $Servername." -LogOnly
         $endpointCommand = Invoke-WindowsUpdateWithRetry -OperationName "WindowsUpdateAdm-Endpunkt auf $Servername" -RetryCount 5 -RetryDelaySeconds 30 -WriteLog {
             param($message)
             if ($message -like 'Wiederhole *') {
-                Write-Host '  +- Endpunkt noch nicht bereit – erneuter Test in 30 Sekunden...' -ForegroundColor DarkYellow
+                Write-DeployLog "WindowsUpdateAdm-Endpunkt auf $Servername noch nicht bereit; erneuter Versuch folgt." -LogOnly
             }
         } -ScriptBlock {
             $command = Invoke-Command @testParams
@@ -483,7 +532,7 @@ function Invoke-WinRMDeployment {
             }
             return $command
         }
-        Write-Host "  +- WindowsUpdateAdm-Endpunkt erfolgreich getestet." -ForegroundColor Green
+        Write-DeployLog "WindowsUpdateAdm-Endpunkt auf $Servername erfolgreich getestet." -Level Success
 
         return [PSCustomObject]@{
             Status = 'Success'
@@ -561,11 +610,11 @@ function Invoke-WinRMDeployment {
                         } -ArgumentList $remoteTemp -ErrorAction Stop
                     }
                     if (-not $remoteTempRemoved) {
-                        Write-Warning "Temporärer Setup-Ordner auf $Servername konnte nicht bestätigt entfernt werden: $remoteTemp"
+                        Write-DeployLog "Temporärer Setup-Ordner auf $Servername konnte nicht bestätigt entfernt werden: $remoteTemp" -Level Warning
                     }
                 }
                 catch {
-                    Write-Warning "Temporärer Setup-Ordner auf $Servername konnte nicht entfernt werden: $remoteTemp. Ursache: $($_.Exception.Message)"
+                    Write-DeployLog "Temporärer Setup-Ordner auf $Servername konnte nicht entfernt werden: $remoteTemp. Ursache: $($_.Exception.Message)" -Level Warning
                 }
                 finally {
                     if ($cleanupSession -and $cleanupSession -ne $session) {
@@ -655,9 +704,9 @@ ForEach ($Server in $Serverlist) {
         continue
     }
 
-    Write-Host "[$Servername] " -NoNewline -ForegroundColor Yellow
     $deployTypeLabel = if ($Server.DeployType) { $Server.DeployType } else { "AD" }
-    Write-Host "Starte Deployment ($deployTypeLabel)..." -ForegroundColor Gray
+    Write-DeployLog ''
+    Write-DeployLog "[$Servername] Deployment gestartet ($deployTypeLabel)"
 
     $deployResult = Invoke-ServerDeployment `
         -Servername                $Servername `
@@ -681,7 +730,17 @@ ForEach ($Server in $Serverlist) {
     }
 
     $Results += $ServerResult
-    Write-Host ""
+    $fullResultMessage = "[$Servername] $($deployResult.Status): $($deployResult.Message)"
+    Write-DeployLog $fullResultMessage -LogOnly
+    if ($deployResult.Status -eq 'Success') {
+        Write-DeployLog "[$Servername] Erfolg – $($deployResult.Message)" -Level Success -ConsoleOnly
+    } elseif ($deployResult.Status -eq 'Failed') {
+        $shortResultMessage = ([string]$deployResult.Message -replace '\s+', ' ').Trim()
+        if ($shortResultMessage.Length -gt 180) { $shortResultMessage = $shortResultMessage.Substring(0, 177) + '...' }
+        Write-DeployLog "[$Servername] FEHLER – $shortResultMessage" -Level Error -ConsoleOnly
+    } else {
+        Write-DeployLog "[$Servername] Übersprungen – $($deployResult.Message)" -Level Warning -ConsoleOnly
+    }
 }
 
 # Beim regulären Gesamtlauf werden SSH-Schlüssel, Schlüssel-Login und die
@@ -700,42 +759,31 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
     foreach ($connectionSetup in $connectionSetups) {
         $connectionScript = Join-Path $PSScriptRoot $connectionSetup.Script
         if (-not (Test-Path -LiteralPath $connectionScript)) {
-            Write-Warning "$($connectionSetup.Name)-Einrichtung übersprungen: Skript nicht gefunden."
+            Write-DeployLog "$($connectionSetup.Name)-Einrichtung übersprungen: Skript nicht gefunden." -Level Warning
             continue
         }
-        Write-Host "[$($connectionSetup.Name)] Prüfe Verbindung und führe Ersteinrichtung aus ..." -ForegroundColor Cyan
+        Write-DeployLog "[$($connectionSetup.Name)] Verbindungseinrichtung gestartet."
         try {
-            & $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -CheckOnly
+            $connectionOutput = @(& $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -CheckOnly *>&1)
+            foreach ($entry in $connectionOutput) { Write-DeployLog ([string]$entry) -LogOnly }
             if ($LASTEXITCODE -ne 0) { throw "Exit-Code $LASTEXITCODE" }
-            Write-Host "  +- $($connectionSetup.Name)-Verbindung vorbereitet." -ForegroundColor Green
+            Write-DeployLog "[$($connectionSetup.Name)] Verbindung vorbereitet." -Level Success
         }
         catch {
-            Write-Warning "$($connectionSetup.Name)-Einrichtung nicht abgeschlossen: $($_.Exception.Message)"
+            Write-DeployLog "$($connectionSetup.Name)-Einrichtung nicht abgeschlossen: $($_.Exception.Message)" -Level Warning
         }
     }
 }
 
 # Zusammenfassung
-Write-Host "+=======================================+" -ForegroundColor Cyan
-Write-Host "|         ZUSAMMENFASSUNG               |" -ForegroundColor Cyan
-Write-Host "+=======================================+`n" -ForegroundColor Cyan
-
-$Results | Format-Table ServerName, Status, Message -AutoSize
-
-Write-Host "Ergebnis:" -ForegroundColor Cyan
-Write-Host "  Erfolgreich: $SuccessCount" -ForegroundColor Green
-Write-Host "  Fehler:      $FailCount" -ForegroundColor $(if ($FailCount -eq 0) { "Green" } else { "Red" })
-Write-Host "  Gesamt:      $($Results.Count)" -ForegroundColor Gray
+Write-DeployLog ''
+Write-DeployLog 'Ergebnis:'
+Write-DeployLog "Erfolgreich: $SuccessCount" -Level Success
+Write-DeployLog "Fehler: $FailCount" -Level $(if ($FailCount -eq 0) { 'Success' } else { 'Error' })
+Write-DeployLog "Gesamt: $($Results.Count)"
 
 # Fehlerhafte Server anzeigen
-if ($FailCount -gt 0) {
-    Write-Host "`nFehlerhafte Server (manuelle Nachbearbeitung erforderlich):" -ForegroundColor Yellow
-    $Results | Where-Object { $_.Status -eq "Failed" } | ForEach-Object {
-        Write-Host "  - $($_.ServerName): $($_.Message)" -ForegroundColor Red
-    }
+if ($script:DeployLogEnabled) { Write-DeployLog "Logdatei: $script:DeployLogFile" }
+if ($script:DeployLogEnabled) {
+    $null = Invoke-WindowsUpdateRetentionWithLog -Directory $script:DeployLogDirectory -Filter ("{0}_*.log" -f $ScriptName) -KeepFiles $script:DeployKeepLogFiles -Description 'Verteilungs-Logs' -WriteLog { param($message) Write-DeployLog $message }
 }
-
-Write-Host "`nNaechster Schritt:" -ForegroundColor Cyan
-Write-Host "Teste die Configuration mit:" -ForegroundColor Gray
-Write-Host "Invoke-Command -ComputerName <SERVERNAME> -ConfigurationName 'WindowsUpdateAdm' -ScriptBlock { Get-WindowsUpdate }" -ForegroundColor Yellow
-Write-Host ""

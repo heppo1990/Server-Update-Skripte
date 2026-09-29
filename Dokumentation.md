@@ -73,8 +73,8 @@ Die folgenden Tabellen beschreiben alle Felder aus `default_settings.json`. Opti
 | `SucheOnline` | Bestimmt, ob PSWindowsUpdate auch die Quelle Microsoft Update statt nur der konfigurierten Windows-Update-Quelle durchsucht. |
 | `WriteReport` | Aktiviert oder deaktiviert das Speichern des HTML-Berichts. Ein Mailversand wird separat durch `MailSettings.<Skript>.SendMail` gesteuert. |
 | `KeepReportFiles` | Maximale Anzahl gespeicherter HTML-Berichte je Skript; ältere Berichte werden entfernt. |
-| `WriteLogFile` | Aktiviert oder deaktiviert die ausführliche lokale Logdatei. |
-| `KeepLogFiles` | Maximale Anzahl gespeicherter Logdateien je Skript; ältere Logs werden entfernt. |
+| `WriteLogFile` | Aktiviert oder deaktiviert lokale Logdateien, einschließlich der Verteilung. |
+| `KeepLogFiles` | Maximale Anzahl gespeicherter Logdateien je Skript, einschließlich der Verteilung; ältere Logs werden entfernt. |
 | `DetectNowWaitSeconds` | Wartezeit nach dem Anstoßen einer Windows-Update-Erkennung, bevor das Skript mit der Suche fortfährt. |
 | `ClearUpdateCacheBeforeCheck` | Bei `true` werden vor dem Check Download- und DataStore-Cache bereinigt und eine neue Erkennung angestoßen; `false` überspringt diese Bereinigung. |
 | `EnableWingetUpdates` | Bei `true` werden Winget-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Winget. |
@@ -230,6 +230,7 @@ Richtet die sichere Update-Verbindung auf den Windows-Zielen ein oder aktualisie
 - Da Windows Update auf diesen Nicht-AD-Server-2016-Systemen im Kompatibilitätsmodus keine Downloads/Installationen zulässt, führen Check, Download und Installation dort die Update-Befehle automatisch über die geprüfte WinRM-HTTPS-Clientzertifikatsverbindung aus; für alle anderen Ziele bleibt JEA aktiv.
 - Im normalen Gesamtlauf werden zusätzlich Linux und Home Assistant im Check-Modus kontaktiert. Dadurch erfolgen SSH-Schlüssel-, Schlüssel-Login- und NOPASSWD-Ersteinrichtung bereits bei der Verteilung. Sie bleiben aus Sicherheitsgründen auch bei Check, Download und Installation erhalten.
 - Nach der JEA-Registrierung testet die Verteilung den Endpunkt bis zu fünfmal im Abstand von 30 Sekunden. Die Konsole meldet nur noch den kompakten Wiederholungsstatus; die Zusammenfassung enthält bei einem endgültigen Fehler die Ursache in Kurzform.
+- Die Konsole zeigt je Ziel nur Start und Ergebnis sowie eine Gesamtsumme. Vollständige Remote-Setupausgaben landen bei `WriteLogFile: true` in `Logs`; `KeepLogFiles` begrenzt deren Anzahl wie bei den übrigen Skripten. Das Logverzeichnis wird bei Bedarf angelegt.
 
 Aufruf:
 
@@ -374,7 +375,7 @@ Beide Skripte werden bei einem normalen Aufruf von `Install-ServersUpdates.ps1` 
 
 ## Protokolle und Berichte
 
-Unter `Logs` werden – abhängig von den Einstellungen – Protokolle und HTML-Berichte gespeichert. Die Anzahl aufbewahrter Dateien wird über `KeepLogFiles` und `KeepReportFiles` gesteuert. Die Windows-Hauptskripte verwenden dafür dieselbe zentrale Aufbewahrungslogik. Linux und Home Assistant schreiben ausführliche eigene `.log`-Dateien ausschließlich bei der Installation; bei Check und Download werden nur die für den Gesamtbericht benötigten Statusdateien erzeugt. Auch die Ausgabe in Konsole und Logdatei sowie der SMTP-Versand sind für die drei Windows-Hauptskripte zentral im Modul umgesetzt.
+Unter `Logs` werden – abhängig von den Einstellungen – Protokolle und HTML-Berichte gespeichert. Die Anzahl aufbewahrter Dateien wird über `KeepLogFiles` und `KeepReportFiles` gesteuert. Die Windows-Hauptskripte verwenden dafür dieselbe zentrale Aufbewahrungslogik; die Verteilung wendet dieselben Settings für ihre eigenen Logs an. Linux und Home Assistant schreiben ausführliche eigene `.log`-Dateien ausschließlich bei der Installation; bei Check und Download werden nur die für den Gesamtbericht benötigten Statusdateien erzeugt. Auch die Ausgabe in Konsole und Logdatei sowie der SMTP-Versand sind für die drei Windows-Hauptskripte zentral im Modul umgesetzt.
 
 Die Konsole zeigt in den Windows-, Linux- und Home-Assistant-Läufen kompakt Ziele, Update-Ergebnisse, geplante Neustarts/Nachinstallationen, Warnungen, Fehler und Zusammenfassung. Konfigurierte Kategorien für zurückgestellte Updates und der Aktivierungsstatus der Nachinstallation erscheinen jeweils einmal am Anfang, nicht pro Server. Nicht nötige Neustarts und nicht vorhandene Nachinstallationen werden ausgeblendet; geplante Neustarts stehen kurz unter den Ergebnissen des betroffenen Systems. Paketupdates werden je Server und Paketmanager zusammengefasst. Detaillierte Statusmeldungen bleiben im Log. Leerzeilen trennen die Zielsysteme. In einer interaktiven Konsole erscheinen Erfolge grün, Warnungen und manuelle Aktionen gelb, Fehler rot und Statusüberschriften cyan. Bei umgeleiteter oder nicht interaktiver Ausgabe wird normaler Text ausgegeben; Logdateien und HTML-Berichte bleiben vollständig und enthalten keine Farbcodes.
 
