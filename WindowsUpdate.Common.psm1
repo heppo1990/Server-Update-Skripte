@@ -37,7 +37,6 @@ function Update-PSWindowsUpdateModule {
         $session = $null
         try {
             $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
-            if (-not $AuthInfo) { $sessionParameters.SessionOption = New-PSSessionOption -IncludePortInSPN }
             $session = New-PSSession @sessionParameters
             $updateDefinition = (Get-Command -Name Update-PSWindowsUpdateModule -CommandType Function).Definition
             $logDefinition = (Get-Command -Name Write-PSWindowsUpdateModuleLog -CommandType Function).Definition
@@ -46,7 +45,24 @@ function Update-PSWindowsUpdateModule {
                 Set-Item -Path Function:\Write-PSWindowsUpdateModuleLog -Value ([scriptblock]::Create($LoggerText))
                 Set-Item -Path Function:\Update-PSWindowsUpdateModule -Value ([scriptblock]::Create($UpdaterText))
                 $remoteLogger = { param($Message, $Level) [pscustomobject]@{ Type = 'ModuleLog'; Message = $Message; Level = $Level } }
-                $updateOutput = @(Update-PSWindowsUpdateModule -Force:$ForceUpdate -WriteLog $remoteLogger)
+                # ArgumentList-Werte können bei älteren Remoting-Endpunkten als
+                # String zurückkommen. Switches deshalb nur als echte Switch-
+                # Parameter über eine Splat-Hashtable weitergeben.
+                $forceEnabled = $false
+                if ($ForceUpdate -is [bool]) {
+                    $forceEnabled = $ForceUpdate
+                } elseif ($ForceUpdate -is [string]) {
+                    $parsedForce = $false
+                    if ([bool]::TryParse($ForceUpdate, [ref]$parsedForce)) { $forceEnabled = $parsedForce }
+                } elseif ($null -ne $ForceUpdate) {
+                    $forceEnabled = [bool]$ForceUpdate
+                }
+                if ($ForceUpdate -isnot [bool] -and $null -ne $ForceUpdate) {
+                    [pscustomobject]@{ Type = 'ModuleLog'; Message = "Force-Argument remote als $($ForceUpdate.GetType().FullName) empfangen; sicher normalisiert."; Level = 'INFO' }
+                }
+                $updateParameters = @{ WriteLog = $remoteLogger }
+                if ($forceEnabled) { $updateParameters.Force = $true }
+                $updateOutput = @(Update-PSWindowsUpdateModule @updateParameters)
                 foreach ($entry in $updateOutput) {
                     if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type -eq 'ModuleLog') {
                         [pscustomobject]@{ Type = 'ModuleLog'; Message = [string]$entry.Message; Level = [string]$entry.Level }
