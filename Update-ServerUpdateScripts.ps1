@@ -201,6 +201,64 @@ function Convert-ServerUpdateJsonToDefaultOrder {
     return $Value
 }
 
+function Format-ServerUpdateJsonArrays {
+    param([Parameter(Mandatory)][string]$Json)
+    $pattern = '(?m)^(?<indent>[ \t]*)(?<property>"[^"\r\n]+"\s*:\s*)\[(?<items>[^\[\]\r\n]*)\](?<comma>\s*,?)$'
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
+        param($match)
+        $indent = $match.Groups['indent'].Value
+        $property = $match.Groups['property'].Value
+        $itemsText = $match.Groups['items'].Value.Trim()
+        $comma = $match.Groups['comma'].Value.Trim()
+        if ([string]::IsNullOrWhiteSpace($itemsText)) {
+            return $indent + $property + '[' + [Environment]::NewLine + $indent + ']' + $comma
+        }
+        $items = @()
+        $itemStart = 0
+        $insideString = $false
+        $escaped = $false
+        for ($characterIndex = 0; $characterIndex -lt $itemsText.Length; $characterIndex++) {
+            $character = $itemsText[$characterIndex]
+            if ($escaped) { $escaped = $false; continue }
+            if ($insideString -and $character -eq '\') { $escaped = $true; continue }
+            if ($character -eq '"') { $insideString = -not $insideString; continue }
+            if ($character -eq ',' -and -not $insideString) {
+                $items += $itemsText.Substring($itemStart, $characterIndex - $itemStart).Trim()
+                $itemStart = $characterIndex + 1
+            }
+        }
+        $items += $itemsText.Substring($itemStart).Trim()
+        $childIndent = $indent + '  '
+        $formattedItems = @(
+            for ($index = 0; $index -lt $items.Count; $index++) {
+                $itemComma = if ($index -lt ($items.Count - 1)) { ',' } else { '' }
+                $childIndent + $items[$index] + $itemComma
+            }
+        )
+        return $indent + $property + '[' + [Environment]::NewLine + ($formattedItems -join [Environment]::NewLine) + [Environment]::NewLine + $indent + ']' + $comma
+    }
+    return [regex]::Replace($Json, $pattern, $evaluator)
+}
+function Remove-ServerUpdateObsoleteJsonProperties {
+    param([Parameter(Mandatory)][AllowNull()][object]$Value, [int]$RemovedCount = 0)
+    if ($null -eq $Value) { return $RemovedCount }
+    $obsoleteNames = @('DeferredUpdateDelayMinutes', 'ServiceAccountName', 'ServiceAccountPassword', 'HypervisorAccountName', 'HypervisorAccountPassword')
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in @($Value.PSObject.Properties)) {
+            if ($property.Name -in $obsoleteNames) {
+                $Value.PSObject.Properties.Remove($property.Name)
+                $RemovedCount++
+                continue
+            }
+            $RemovedCount = Remove-ServerUpdateObsoleteJsonProperties -Value $property.Value -RemovedCount $RemovedCount
+        }
+    }
+    elseif ($Value -is [array]) {
+        foreach ($item in $Value) { $RemovedCount = Remove-ServerUpdateObsoleteJsonProperties -Value $item -RemovedCount $RemovedCount }
+    }
+    return $RemovedCount
+}
+
 function Remove-ServerUpdateJsonProperty {
     param(
         [Parameter(Mandatory)][object]$Destination,
@@ -305,6 +363,19 @@ function Update-ServerUpdateSettingsDefaults {
         return
     }
 
+    $modulePath = Join-Path $ScriptRoot 'WindowsUpdate.Common.psm1'
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+        Write-Warning 'WindowsUpdate.Common.psm1 fehlt; Settings werden zur Sicherheit nicht migriert.'
+        return
+    }
+    try {
+        Import-Module -Name $modulePath -Force -ErrorAction Stop
+        $settingsPasswordProtector = Get-Command -Name Protect-WindowsUpdateSettingsObjectPassword -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "DPAPI-Schutz konnte nicht geladen werden; Settings bleiben unverändert. Ursache: $($_.Exception.Message)"
+        return
+    }
     $generalSettingsPath = Join-Path $ScriptRoot 'settings.json'
     $legacyGeneralSettingsPath = Join-Path $ScriptRoot 'default.settings.json'
     if (-not (Test-Path -LiteralPath $generalSettingsPath -PathType Leaf) -and
@@ -325,6 +396,10 @@ function Update-ServerUpdateSettingsDefaults {
             if ($settings -isnot [System.Management.Automation.PSCustomObject] -or
                 $defaults -isnot [System.Management.Automation.PSCustomObject]) { continue }
 
+            # Klartextpasswort zuerst nur im Speicher schützen. Die einzelne
+            # Sicherung entsteht anschließend gemeinsam mit der Migration.
+            $passwordWasProtected = [bool](& $settingsPasswordProtector -Document $settings)
+            $backupSettings = Copy-ServerUpdateJsonValue -Value $settings
             # Skriptspezifische Dateien erhalten fehlende Werte aus der effektiven
             # gemeinsamen Konfiguration; ihre bereits gesetzten Werte bleiben maßgeblich.
             $fileDefaults = $defaults
@@ -334,14 +409,9 @@ function Update-ServerUpdateSettingsDefaults {
                 Merge-ServerUpdateJsonProperties -Destination $fileDefaults -Overrides $generalSettings
             }
 
-            # Veraltete Optionen werden bei der Settings-Migration entfernt.
-            # Die Sicherung enthält vor der Änderung weiterhin den vollständigen alten Stand.
-            $removedCount = 0
-            if ($settings.UpdateSettings) {
-                if (Remove-ServerUpdateJsonProperty -Destination $settings.UpdateSettings -PropertyName 'DeferredUpdateDelayMinutes') {
-                    $removedCount++
-                }
-            }
+            # Veraltete Optionen und entfernte Dienstkontoangaben kommen nicht
+            # in die migrierte Datei zurück.
+            $removedCount = Remove-ServerUpdateObsoleteJsonProperties -Value $settings
 
             $legacyMigrationCount = Convert-ServerUpdateLegacySettings -Settings $settings -Path $settingsPath
             $addedCount = Add-ServerUpdateMissingJsonProperties -Destination $settings -Defaults $fileDefaults
@@ -349,15 +419,20 @@ function Update-ServerUpdateSettingsDefaults {
             $currentCompactJson = ConvertTo-Json -InputObject $settings -Depth 100 -Compress
             $orderedCompactJson = ConvertTo-Json -InputObject $orderedSettings -Depth 100 -Compress
             $orderChanged = $currentCompactJson -cne $orderedCompactJson
-            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged) { continue }
+            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
             $backupPath = '{0}.bak.{1}_{2}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $temporaryPath = '{0}.{1}.tmp' -f $settingsPath, [guid]::NewGuid().ToString('N')
-            $updatedJson = ConvertTo-Json -InputObject $orderedSettings -Depth 100
+            $backupJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $backupSettings -Depth 100)
+            $updatedJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $orderedSettings -Depth 100)
+            [System.IO.File]::WriteAllText($backupPath, $backupJson, ([System.Text.UTF8Encoding]::new($false)))
             [System.IO.File]::WriteAllText($temporaryPath, $updatedJson, ([System.Text.UTF8Encoding]::new($false)))
-            # Replace erstellt die Sicherung als Teil des atomaren Dateiaustauschs.
-            [System.IO.File]::Replace($temporaryPath, $settingsPath, $backupPath)
+            # Die geschützte Sicherung wurde bereits angelegt. Der atomare
+            # Austausch erzeugt keine zweite Sicherung mit Klartextpasswort.
+            $moveWithOverwrite = [System.IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
+            if ($null -ne $moveWithOverwrite) { [System.IO.File]::Move($temporaryPath, $settingsPath, $true) }
+            else { [System.IO.File]::Replace($temporaryPath, $settingsPath, $null) }
             $temporaryPath = $null
             if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
                 throw 'Einstellungsdatei oder Sicherung fehlt nach dem atomaren Austausch.'
@@ -414,28 +489,6 @@ function Update-ServerUpdateSettingsDefaults {
 
 # Schützt Klartextpasswörter vor jeder Settings-Migration, damit weder die
 # geänderte Datei noch eine dabei erzeugte Sicherung ein Klartextpasswort enthält.
-function Protect-ServerUpdateSettingsPasswords {
-    param([Parameter(Mandatory)][string]$ScriptRoot)
-
-    $modulePath = Join-Path $ScriptRoot 'WindowsUpdate.Common.psm1'
-    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
-        throw 'WindowsUpdate.Common.psm1 fehlt; Settings werden zur Sicherheit nicht migriert.'
-    }
-    Import-Module -Name $modulePath -Force -ErrorAction Stop
-    $protector = Get-Command -Name Protect-WindowsUpdateSettingsFilePassword -CommandType Function -ErrorAction Stop
-
-    $settingsPaths = [System.Collections.Generic.List[string]]::new()
-    $generalPath = Join-Path $ScriptRoot 'settings.json'
-    if (Test-Path -LiteralPath $generalPath -PathType Leaf) { $settingsPaths.Add($generalPath) }
-    foreach ($settingsFile in @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.settings.json' -File -ErrorAction SilentlyContinue)) {
-        if (-not $settingsPaths.Contains($settingsFile.FullName)) { $settingsPaths.Add($settingsFile.FullName) }
-    }
-
-    foreach ($settingsPath in $settingsPaths) {
-        & $protector -Path $settingsPath
-    }
-}
-
 function Invoke-ServerUpdateScripts {
     [CmdletBinding()]
     param(
@@ -499,7 +552,6 @@ function Invoke-ServerUpdateScripts {
             (Get-ServerUpdateGitBlobSha1 -Path $localPath) -ne $_.Sha
         })
         if ($filesToFetch.Count -eq 0) {
-            Protect-ServerUpdateSettingsPasswords -ScriptRoot $scriptRoot
             Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot
             try {
                 New-Item -Path $cacheDirectory -ItemType Directory -Force | Out-Null
@@ -565,7 +617,6 @@ function Invoke-ServerUpdateScripts {
                     }
                     Copy-Item -LiteralPath (Join-Path $stageDirectory $relativePath) -Destination $localPath -Force -ErrorAction Stop
                 }
-                Protect-ServerUpdateSettingsPasswords -ScriptRoot $scriptRoot
                 Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot
             }
             catch {

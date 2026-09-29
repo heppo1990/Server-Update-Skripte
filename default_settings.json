@@ -1,4 +1,4 @@
-﻿{
+{
 	"UpdateSettings": {
 		"SucheOnline": false,
 		"WriteReport": true,
@@ -10,11 +10,18 @@
 		"EnableWingetUpdates": true,
 		"EnableChocolateyUpdates": true,
 		"TargetComputers": "Server",
-		"AdditionalComputers": [],
-		"HypervisorComputers": ["SrvHV01"],
+		"AdditionalComputers": [
+		],
+		"HypervisorComputers": [
+			"SrvHV01"
+		],
 		"ClientCertThumbprint": "",
-		"DeferredUpdateCategories": ["Exchange Server", "SQL Server"],
-		"DeferredUpdateKBs": [],
+		"DeferredUpdateCategories": [
+			"Exchange Server",
+			"SQL Server"
+		],
+		"DeferredUpdateKBs": [
+		],
 		"InstallDeferredUpdates": true,
 		"PhysicalRebootTime": "03:00",
 		"PhysicalRebootWindowEndTime": "4:00",
@@ -24,7 +31,8 @@
 		"VMRebootIntervalMinutes": 30
 	},
 	"LinuxSettings": {
-		"Hosts": [],
+		"Hosts": [
+		],
 		"ConnectTimeoutSeconds": 15,
 		"LockWaitMinutes": 5
 	},

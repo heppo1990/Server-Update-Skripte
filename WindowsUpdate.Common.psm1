@@ -40,6 +40,18 @@ function Unprotect-WindowsUpdateMailPassword {
     finally { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
 }
 
+function Protect-WindowsUpdateSettingsObjectPassword {
+    param([Parameter(Mandatory)][object]$Document)
+    if ($Document -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+    $mailProperty = @($Document.PSObject.Properties | Where-Object { $_.Name -ieq 'MailSettings' } | Select-Object -First 1)
+    if ($mailProperty.Count -eq 0 -or $null -eq $mailProperty[0].Value) { return $false }
+    $passwordProperty = $mailProperty[0].Value.PSObject.Properties['AuthPass']
+    if (-not $passwordProperty -or [string]::IsNullOrEmpty([string]$passwordProperty.Value) -or
+        ([string]$passwordProperty.Value).StartsWith('DPAPI:', [StringComparison]::Ordinal)) { return $false }
+    $protectedPassword = Protect-WindowsUpdateMailPassword -Password ([string]$passwordProperty.Value)
+    Add-Member -InputObject $mailProperty[0].Value -NotePropertyName AuthPass -NotePropertyValue $protectedPassword -Force
+    return $true
+}
 function Write-WindowsUpdateJsonAtomically {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Value)
     $temporaryPath = '{0}.{1}.tmp' -f $Path, [guid]::NewGuid().ToString('N')
@@ -74,51 +86,31 @@ function Write-WindowsUpdateJsonAtomically {
 
 function Protect-WindowsUpdateSettingsFilePassword {
     param([Parameter(Mandatory)][string]$Path, [scriptblock]$WriteLog)
-    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-    $document = $raw | ConvertFrom-Json -ErrorAction Stop
-    $mailProperty = $document.PSObject.Properties['MailSettings']
-    $passwordProperty = if ($mailProperty -and $mailProperty.Value) { $mailProperty.Value.PSObject.Properties['AuthPass'] } else { $null }
-    if ($passwordProperty -and -not [string]::IsNullOrEmpty([string]$passwordProperty.Value) -and
-        -not ([string]$passwordProperty.Value).StartsWith('DPAPI:', [StringComparison]::Ordinal)) {
-        $protectedPassword = Protect-WindowsUpdateMailPassword -Password ([string]$passwordProperty.Value)
-        Add-Member -InputObject $mailProperty.Value -NotePropertyName AuthPass -NotePropertyValue $protectedPassword -Force
-
-        # Sicherungen bleiben gültige JSON-Dateien, enthalten aber ebenfalls nur
-        # das maschinengebundene DPAPI-Geheimnis und keinen Klartext des Passworts.
+    $document = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    if (Protect-WindowsUpdateSettingsObjectPassword -Document $document) {
+        # Ein direkter Settings-Aufruf ohne Updater erhält ebenfalls eine
+        # geschützte Sicherung; im regulären Update erledigt dies der gemeinsame
+        # Migrationsschritt, sodass nur eine Sicherung pro Änderung entsteht.
         $backupPath = '{0}.bak.{1}_{2}' -f $Path, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
         Write-WindowsUpdateJsonAtomically -Path $backupPath -Value $document
         Write-WindowsUpdateJsonAtomically -Path $Path -Value $document
         Write-CommonLog $WriteLog "Mailpasswort in '$([IO.Path]::GetFileName($Path))' automatisch mit DPAPI geschützt."
     }
-
-    # Ältere automatisch erzeugte Sicherungen derselben Datei ebenfalls
-    # schützen, damit nach der Migration keine Klartextkopie liegen bleibt.
+    # Ältere automatische Sicherungen aus früheren Skriptständen schützen,
+    # falls sie noch ein Klartextpasswort enthalten. Dafür keine weitere
+    # Sicherung erstellen.
     $directory = Split-Path -Parent $Path
     $leaf = Split-Path -Leaf $Path
     foreach ($oldBackup in @(Get-ChildItem -LiteralPath $directory -Filter ($leaf + '.bak.*') -File -ErrorAction SilentlyContinue)) {
         try {
             $oldDocument = Get-Content -LiteralPath $oldBackup.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-            $oldMail = $oldDocument.PSObject.Properties['MailSettings']
-            $oldPassword = if ($oldMail -and $oldMail.Value) { $oldMail.Value.PSObject.Properties['AuthPass'] } else { $null }
-            if ($oldPassword -and -not [string]::IsNullOrEmpty([string]$oldPassword.Value) -and
-                -not ([string]$oldPassword.Value).StartsWith('DPAPI:', [StringComparison]::Ordinal)) {
-                $oldCipher = Protect-WindowsUpdateMailPassword -Password ([string]$oldPassword.Value)
-                Add-Member -InputObject $oldMail.Value -NotePropertyName AuthPass -NotePropertyValue $oldCipher -Force
+            if (Protect-WindowsUpdateSettingsObjectPassword -Document $oldDocument) {
                 Write-WindowsUpdateJsonAtomically -Path $oldBackup.FullName -Value $oldDocument
             }
         }
         catch { throw "Eine ältere Settings-Sicherung konnte nicht geschützt werden ('$($oldBackup.Name)'). Der Lauf wird abgebrochen, damit kein Klartextpasswort zurückbleibt." }
     }
-
-    # Die bestehende Aufbewahrungsregel gilt auch für die Migrationssicherung.
-    $allBackups = @(Get-ChildItem -LiteralPath $directory -Filter '*.json.bak.*' -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^(?:settings|.+\.settings)\.json\.bak\.\d{8}_\d{6}_\d{3}(?:_[a-f0-9]{8})?$' } |
-        Sort-Object -Property LastWriteTimeUtc, Name -Descending)
-    foreach ($oldBackup in @($allBackups | Select-Object -Skip 3)) {
-        Remove-Item -LiteralPath $oldBackup.FullName -Force -ErrorAction SilentlyContinue
-    }
 }
-
 function Get-WindowsUpdateSettings {
     param(
         [Parameter(Mandatory)][string]$ScriptRoot,
@@ -1409,4 +1401,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost
