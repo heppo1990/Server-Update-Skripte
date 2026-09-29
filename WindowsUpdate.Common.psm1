@@ -783,6 +783,21 @@ function Invoke-WindowsUpdatePackageManagers {
             return [PSCustomObject]@{ Allowed = $allowed; Directory = $sourceStateDirectory; MarkerPath = $markerPath }
         }
 
+        function Get-WingetCompactOutput {
+            param([AllowNull()][string]$Text, [int]$MaximumLength = 500)
+            if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+            $clean = [regex]::Replace($Text, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+            $lines = @($clean -split "`r?`n" | ForEach-Object { ([string]$_).Trim() } | Where-Object {
+                $_ -and
+                $_ -notmatch '[\u2580-\u259F]' -and
+                $_ -notmatch '\u00e2\u2013' -and
+                $_ -notmatch '^[-\\|/](?:\s*[-\\|/]){2,}' -and
+                $_ -notmatch '(?i)\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)'
+            })
+            $summary = $lines -join ' '
+            if ($summary.Length -gt $MaximumLength) { $summary = $summary.Substring(0, $MaximumLength - 3) + '...' }
+            return $summary
+        }
         function Reset-WingetDefaultSources {
             param([Parameter(Mandatory)][string]$WingetPath)
             # Der vollständige Reset hat sich als notwendig erwiesen. Vorher
@@ -791,7 +806,7 @@ function Invoke-WindowsUpdatePackageManagers {
             $sourceListOutput = & $WingetPath source list --disable-interactivity 2>&1 | Out-String
             $sourceListExitCode = $LASTEXITCODE
             if ($sourceListExitCode -ne 0) {
-                throw "WinGet-Quellen konnten vor dem Reset nicht aufgelistet werden (Exitcode $sourceListExitCode): $($sourceListOutput.Trim())"
+                throw "WinGet-Quellen konnten vor dem Reset nicht aufgelistet werden (Exitcode $sourceListExitCode)."
             }
             $defaultSources = @('msstore', 'winget', 'winget-font')
             $configuredSources = @($sourceListOutput -split "`r?`n" | ForEach-Object {
@@ -815,7 +830,7 @@ function Invoke-WindowsUpdatePackageManagers {
             $resetOutput = & $WingetPath source reset --force --disable-interactivity 2>&1 | Out-String
             $resetExitCode = $LASTEXITCODE
             if ($resetExitCode -ne 0) {
-                throw "Vollständiger WinGet-Quellenreset fehlgeschlagen (Exitcode $resetExitCode): $($resetOutput.Trim())"
+                throw "Vollständiger WinGet-Quellenreset fehlgeschlagen (Exitcode $resetExitCode)."
             }
         }
 
@@ -864,7 +879,8 @@ function Invoke-WindowsUpdatePackageManagers {
             param([string]$Path, [string[]]$InstallerArguments)
             $powerShell51 = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
-            $output = (& $powerShell51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @InstallerArguments 2>&1 | Out-String -Width 300)
+            $rawOutput = (& $powerShell51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @InstallerArguments 2>&1 | Out-String -Width 300)
+            $output = Get-WingetCompactOutput -Text $rawOutput
             $exitCode = $LASTEXITCODE
             return [PSCustomObject]@{ ExitCode = $exitCode; Output = $output.Trim() }
         }
@@ -1013,7 +1029,9 @@ catch {
                         })
                     }
                     else {
-                        $sourceFailureLines += "Aktualisieren der WinGet-Quelle winget fehlgeschlagen (ExitCode $sourceRefreshExitCode): $($wingetSourceRefreshOutput.Trim())"
+                        $refreshSummary = Get-WingetCompactOutput -Text $wingetSourceRefreshOutput
+                        $refreshDetail = if ($refreshSummary) { ": $refreshSummary" } else { '' }
+                        $sourceFailureLines += "Aktualisieren der WinGet-Quelle winget fehlgeschlagen (ExitCode $sourceRefreshExitCode)$refreshDetail"
                     }
                     if ($sourceFailureLines.Count -gt 0) {
                         $sourceResetState = Get-WingetSourceResetState
@@ -1188,8 +1206,11 @@ catch {
                     if ($sourceFailureLines.Count -gt 0) {
                         $wingetFailureDetails = @()
                         if (-not [string]::IsNullOrWhiteSpace($wingetBootstrapMessage)) { $wingetFailureDetails += $wingetBootstrapMessage.Trim() }
-                        if (-not [string]::IsNullOrWhiteSpace($availableOutput)) { $wingetFailureDetails += $availableOutput.Trim() }
-                        $actionOutput = $wingetFailureDetails -join "`n"
+                        foreach ($failureLine in $sourceFailureLines) {
+                            $compactFailure = Get-WingetCompactOutput -Text ([string]$failureLine)
+                            if ($compactFailure -and $wingetFailureDetails -notcontains $compactFailure) { $wingetFailureDetails += $compactFailure }
+                        }
+                        $actionOutput = $wingetFailureDetails -join ' '
                     }
                     $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($sourceFailureLines.Count -eq 0); Skipped=$false; SkipReason=''; ExitCode=$(if ($sourceFailureLines.Count -gt 0) { 1 } else { 0 }); Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
                 }
