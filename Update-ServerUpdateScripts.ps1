@@ -801,15 +801,50 @@ function Invoke-WingetRepair {
 
 function Resolve-WingetPath {
     $command = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
-    if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
-    $aliasPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
-    if (Test-Path -LiteralPath $aliasPath -PathType Leaf) { return $aliasPath }
+    $candidates = @()
+    if ($command -and $command.Source) { $candidates += [string]$command.Source }
+    if ($env:LOCALAPPDATA) { $candidates += Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe' }
+    foreach ($programFilesRoot in (@('C:\Program Files', $env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique)) {
+        $candidates += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe'
+        # Das Paketlayout kann WinGet ohne WindowsApps-Alias bereitstellen.
+        $candidates += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller\*\winget.exe'
+        $candidates += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller\*\*\winget.exe'
+    }
+    foreach ($candidate in $candidates) {
+        $paths = if ($candidate -match '[*?]') {
+            Get-ChildItem -Path $candidate -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+        } elseif (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction SilentlyContinue) {
+            @($candidate)
+        }
+        foreach ($path in $paths) {
+            try {
+                & $path --version *> $null
+                if ($LASTEXITCODE -eq 0) { return $path }
+            } catch { }
+        }
+    }
     return $null
 }
 
 function Invoke-PowerShellWingetUpdateCheck {
-    param([Parameter(Mandatory)][string]$Path)
-    $output = & $Path upgrade --id Microsoft.PowerShell --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1
+    param([Parameter(Mandatory)][string]$Path, [switch]$FreshPowerShell)
+    $arguments = @('upgrade', '--id', 'Microsoft.PowerShell', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+    if ($FreshPowerShell) {
+        # Nach einer WinGet-Reparatur die Abfrage in einem neuen PowerShell-Prozess
+        # ausführen, damit dieser die aktualisierte Prozessumgebung einliest.
+        $shellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{ Path = $Path; Arguments = $arguments } -Compress)))
+        $childSource = @'
+$data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
+$wingetArguments = @($data.Arguments)
+& $data.Path @wingetArguments 2>&1
+exit $LASTEXITCODE
+'@ -replace '__PAYLOAD__', $payload
+        $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childSource))
+        $output = & $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedChild 2>&1
+    } else {
+        $output = & $Path @arguments 2>&1
+    }
     return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output }
 }
 
@@ -833,7 +868,7 @@ try {
                 if (-not $wingetPath) { throw 'winget.exe wurde nach der Reparatur nicht gefunden.' }
                 $wingetVersionOutput = & $wingetPath --version 2>&1
                 if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
-                $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath
+                $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath -FreshPowerShell
                 $packageOutput = $wingetCheck.Output
                 $packageExitCode = $wingetCheck.ExitCode
                 if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
@@ -853,7 +888,7 @@ try {
         if (-not $wingetPath) { throw 'winget.exe wurde nach der Installation nicht gefunden.' }
         $wingetVersionOutput = & $wingetPath --version 2>&1
         if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Installation weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
-        $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath
+        $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath -FreshPowerShell
         $packageOutput = $wingetCheck.Output
         $packageExitCode = $wingetCheck.ExitCode
         if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }

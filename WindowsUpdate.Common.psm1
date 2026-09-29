@@ -677,33 +677,60 @@ function Invoke-WindowsUpdatePackageManagers {
         $isSystemContext = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
 
         function Resolve-WingetExecutable {
-            # Zuerst den für den aktuellen Benutzer registrierten Befehl
-            # verwenden. Der direkte Zugriff auf Program Files\WindowsApps
-            # scheitert in Remoting-Sitzungen häufig mit "Zugriff verweigert".
+            # WinGet kann nach einer Installation in derselben Sitzung noch
+            # ohne App-Ausführungsalias im PATH liegen. Deshalb zusätzlich
+            # den tatsächlich installierten Paketpfad durchsuchen.
             $command = Get-Command winget -ErrorAction SilentlyContinue
-            if ($command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source) -and (Test-Path -LiteralPath $command.Source)) {
-                return $command.Source
+            $patterns = @()
+            if ($command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) { $patterns += [string]$command.Source }
+            if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { $patterns += Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe' }
+            $programFilesRoots = @('C:\Program Files', $env:ProgramFiles) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+            foreach ($programFilesRoot in $programFilesRoots) {
+                $patterns += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe'
+                # Neuere bzw. paketierte Layouts verwenden Unterordner für Version und Architektur.
+                $patterns += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller\*\winget.exe'
+                $patterns += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller\*\*\winget.exe'
             }
-            $patterns = @(
-                "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe",
-                'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe',
-                "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe"
-            )
+            $candidates = @()
             foreach ($pattern in $patterns) {
-                $candidate = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                if ($candidate) { return $candidate.FullName }
+                if ($pattern -match '[*?]') {
+                    $candidates += Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+                } elseif (Test-Path -LiteralPath $pattern -PathType Leaf -ErrorAction SilentlyContinue) {
+                    $candidates += $pattern
+                }
+            }
+            foreach ($candidatePath in @($candidates | Select-Object -Unique)) {
+                # Nicht nur den Alias finden: eine funktionsfähige EXE bevorzugen.
+                $health = Test-WingetExecutable -Path $candidatePath
+                if ($health.Works) { return $candidatePath }
             }
             return $null
         }
 
         function Test-WingetExecutable {
-            param([string]$Path)
+            param([string]$Path, [switch]$FreshPowerShell)
             if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
                 return [PSCustomObject]@{ Works = $false; Output = 'winget.exe wurde nicht gefunden.' }
             }
             try {
-                $output = (& $Path --version 2>&1 | Out-String -Width 300).Trim()
-                $exitCode = $LASTEXITCODE
+                if ($FreshPowerShell) {
+                    # Ein Kindprozess liest nach einer Reparatur die aktualisierte
+                    # Umgebung neu ein; der Pfad wird dabei trotzdem explizit übergeben.
+                    $shellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+                    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{ Path = $Path } -Compress)))
+                    $childSource = @'
+$data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
+$wingetArguments = @($data.Arguments)
+& $data.Path --version 2>&1
+exit $LASTEXITCODE
+'@ -replace '__PAYLOAD__', $payload
+                    $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childSource))
+                    $output = (& $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedChild 2>&1 | Out-String -Width 300).Trim()
+                    $exitCode = $LASTEXITCODE
+                } else {
+                    $output = (& $Path --version 2>&1 | Out-String -Width 300).Trim()
+                    $exitCode = $LASTEXITCODE
+                }
                 $works = $exitCode -eq 0 -and $output -match '(?m)^\s*v?\d+\.\d+'
                 if ($works) { return [PSCustomObject]@{ Works = $true; Output = "ExitCode=$exitCode; Ausgabe=$output" } }
                 $failureSummary = if ($output -match '(?i)(Zugriff verweigert|Access is denied|access denied)') {
@@ -978,7 +1005,7 @@ catch {
                         }
                         $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
                         $wingetPath = Resolve-WingetExecutable
-                        $wingetHealth = Test-WingetExecutable -Path $wingetPath
+                        $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
                         if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }
                         $wingetBootstrapMessage += " Reparatur erfolgreich; $($wingetHealth.Output)"
                     }
