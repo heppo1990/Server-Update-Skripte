@@ -230,7 +230,7 @@ Richtet die sichere Update-Verbindung auf den Windows-Zielen ein oder aktualisie
 - Da Windows Update auf diesen Nicht-AD-Server-2016-Systemen im Kompatibilitätsmodus keine Downloads/Installationen zulässt, führen Check, Download und Installation dort die Update-Befehle automatisch über die geprüfte WinRM-HTTPS-Clientzertifikatsverbindung aus; für alle anderen Ziele bleibt JEA aktiv.
 - Im normalen Gesamtlauf werden zusätzlich Linux und Home Assistant im Check-Modus kontaktiert. Dadurch erfolgen SSH-Schlüssel-, Schlüssel-Login- und NOPASSWD-Ersteinrichtung bereits bei der Verteilung. Sie bleiben aus Sicherheitsgründen auch bei Check, Download und Installation erhalten.
 - Nach der JEA-Registrierung testet die Verteilung den Endpunkt bis zu fünfmal im Abstand von 30 Sekunden. Die Konsole meldet nur noch den kompakten Wiederholungsstatus; die Zusammenfassung enthält bei einem endgültigen Fehler die Ursache in Kurzform.
-- Die Konsole zeigt je Ziel nur Start und Ergebnis sowie eine Gesamtsumme. Vollständige Remote-Setupausgaben landen bei `WriteLogFile: true` in `Logs`; `KeepLogFiles` begrenzt deren Anzahl wie bei den übrigen Skripten. Das Logverzeichnis wird bei Bedarf angelegt.
+- Die Konsole zeigt pro Ziel nur das Ergebnis und am Ende die Gesamtsumme. Wiederholte Start- und Fortschrittsmeldungen des lokalen und entfernten Setups werden nur ins Log geschrieben. Bei `WriteLogFile: true` liegen die vollständigen Details in `Logs`; `KeepLogFiles` begrenzt deren Anzahl wie bei den übrigen Skripten. Das Logverzeichnis wird bei Bedarf angelegt. Erfolg, Warnung und Fehler sind farblich markiert.
 
 Aufruf:
 

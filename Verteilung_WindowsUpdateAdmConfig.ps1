@@ -94,7 +94,7 @@ function Write-DeployLog {
         default   {
             if ($Message -match '(?i)^\s*(WARNUNG|WARNING)') { 'Yellow' }
             elseif ($Message -match '(?i)^\s*(FEHLER|ERROR)') { 'Red' }
-            elseif ($Message -match '(?i)^\s*(WindowsUpdateAdm-Verteilung|Ergebnis:|Erfolgreich:|Fehler:|Gesamt:)') { 'Cyan' }
+            elseif ($Message -match '(?i)^\s*(WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] Deployment gestartet|Ergebnis:|Erfolgreich:|Fehler:|Gesamt:)') { 'Cyan' }
             else { 'Gray' }
         }
     }
@@ -448,7 +448,10 @@ function Invoke-WinRMDeployment {
             # Bypass gilt nur für diesen kurzlebigen WinRM-Prozess, damit das
             # vertrauenswürdige Setup aus dem temporären Ablageordner starten kann.
             Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
-            & (Join-Path $path $scriptName) @parameters
+            # Sämtliche Setup-Ausgaben als Daten zurückgeben. Sonst werden
+            # Write-Host- und Warnungszeilen trotz LogOnly live in die Konsole
+            # des Verwaltungsrechners durchgereicht.
+            & (Join-Path $path $scriptName) @parameters *>&1
         } -ArgumentList $remoteTemp, $PSSCfgSkriptFile, $setupParameters -ErrorAction Stop *>&1)
         foreach ($entry in $remoteSetupOutput) {
             $entryText = if ($entry -is [System.Management.Automation.InformationRecord]) { [string]$entry.MessageData } else { [string]$entry }
@@ -675,10 +678,13 @@ function Invoke-ServerDeployment {
     # Lokales Setup direkt aus dem gemeinsamen Skriptordner ausführen.
     try {
         $localParameters = @{}
-        # Das Setup schreibt bewusst seinen Fortschritt auf den Host. Sonstige
-        # Pipeline-Ausgaben dürfen jedoch nicht als zweites Deployment-Ergebnis
-        # an den Aufrufer zurückfließen.
-        $null = & (Join-Path $RootDirectory $PSSCfgSkriptFile) @localParameters
+        # Ausführliche Setup-Ausgaben abfangen und nur ins Log schreiben;
+        # auf der Konsole erscheint anschließend ausschließlich das Ergebnis.
+        $localSetupOutput = @(& (Join-Path $RootDirectory $PSSCfgSkriptFile) @localParameters *>&1)
+        foreach ($entry in $localSetupOutput) {
+            $entryText = if ($entry -is [System.Management.Automation.InformationRecord]) { [string]$entry.MessageData } else { [string]$entry }
+            Write-DeployLog $entryText -LogOnly
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "Lokales Setup auf $Servername wurde mit Exit-Code $LASTEXITCODE beendet."
         }
@@ -706,7 +712,7 @@ ForEach ($Server in $Serverlist) {
 
     $deployTypeLabel = if ($Server.DeployType) { $Server.DeployType } else { "AD" }
     Write-DeployLog ''
-    Write-DeployLog "[$Servername] Deployment gestartet ($deployTypeLabel)"
+    Write-DeployLog "[$Servername] Deployment gestartet ($deployTypeLabel)" -LogOnly
 
     $deployResult = Invoke-ServerDeployment `
         -Servername                $Servername `
@@ -735,9 +741,7 @@ ForEach ($Server in $Serverlist) {
     if ($deployResult.Status -eq 'Success') {
         Write-DeployLog "[$Servername] Erfolg – $($deployResult.Message)" -Level Success -ConsoleOnly
     } elseif ($deployResult.Status -eq 'Failed') {
-        $shortResultMessage = ([string]$deployResult.Message -replace '\s+', ' ').Trim()
-        if ($shortResultMessage.Length -gt 180) { $shortResultMessage = $shortResultMessage.Substring(0, 177) + '...' }
-        Write-DeployLog "[$Servername] FEHLER – $shortResultMessage" -Level Error -ConsoleOnly
+        Write-DeployLog "[$Servername] FEHLER – Einrichtung fehlgeschlagen; Details im Log." -Level Error -ConsoleOnly
     } else {
         Write-DeployLog "[$Servername] Übersprungen – $($deployResult.Message)" -Level Warning -ConsoleOnly
     }
