@@ -376,6 +376,8 @@ Beide Skripte werden bei einem normalen Aufruf von `Install-ServersUpdates.ps1` 
 
 Unter `Logs` werden – abhängig von den Einstellungen – Protokolle und HTML-Berichte gespeichert. Die Anzahl aufbewahrter Dateien wird über `KeepLogFiles` und `KeepReportFiles` gesteuert. Die Windows-Hauptskripte verwenden dafür dieselbe zentrale Aufbewahrungslogik. Linux und Home Assistant schreiben ausführliche eigene `.log`-Dateien ausschließlich bei der Installation; bei Check und Download werden nur die für den Gesamtbericht benötigten Statusdateien erzeugt. Auch die Ausgabe in Konsole und Logdatei sowie der SMTP-Versand sind für die drei Windows-Hauptskripte zentral im Modul umgesetzt.
 
+In einer interaktiven Konsole erscheinen Erfolge grün, Warnungen und manuelle Aktionen gelb, Fehler rot und Statusüberschriften cyan. Bei umgeleiteter oder nicht interaktiver Ausgabe wird normaler Text ausgegeben. Logdateien und HTML-Berichte enthalten keine Farbcodes.
+
 Die selbstlöschende Nachinstallationsaufgabe protokolliert zusätzlich direkt auf dem jeweiligen Zielsystem in `C:\ProgramData\WindowsUpdateAdm\DeferredUpdates.log`. Dort stehen die erkannte Neustartzeit, die Nachinstallationsauswahl sowie jeder Mailversuch oder SMTP-Fehler.
 
 ## Test einer verzögerten Nachinstallation

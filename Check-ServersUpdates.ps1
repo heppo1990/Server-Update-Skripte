@@ -300,11 +300,11 @@ function Import-PSWindowsUpdate {
 $ScriptStartTime = Get-Date
 $psVersion = $PSVersionTable.PSVersion.Major
 
-Write-Host "═══════════════════════════════════════════════════════════════"
-Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
-Write-Host "Betriebssystem: $([System.Environment]::OSVersion.VersionString)"
-Write-Host "Ausführungskontext: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-Write-Host "═══════════════════════════════════════════════════════════════"
+Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)" -ForegroundColor Gray
+Write-Host "Betriebssystem: $([System.Environment]::OSVersion.VersionString)" -ForegroundColor Gray
+Write-Host "Ausführungskontext: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -ForegroundColor Gray
+Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 
 $Settings = Get-CheckSettingsFromCommon
 $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings.LinuxSettings } else { $null }
@@ -354,7 +354,7 @@ Absender: $([System.Net.WebUtility]::HtmlEncode([string]$MailSettings.Sender))<b
 Empfänger: $([System.Net.WebUtility]::HtmlEncode([string]$MailSettings.MailTo))</p>
 </body></html>
 "@
-  Write-Host "Sende Mailkonfigurationstest an $($MailSettings.MailTo) über $($MailSettings.Host):$($MailSettings.Port)..."
+  Write-Host "Sende Mailkonfigurationstest an $($MailSettings.MailTo) über $($MailSettings.Host):$($MailSettings.Port)..." -ForegroundColor Cyan
   $testMailSent = Send-WindowsUpdateHtmlMail -MailSettings $MailSettings -Subject $testSubject -HtmlBody $testBody -RetryCount 1 -RetryDelaySeconds 0 -WriteLog { param($message) Write-ScriptLog $message }
   if (-not $testMailSent) {
     Write-Error 'Mailkonfigurationstest fehlgeschlagen. Details stehen im Check-Log.'

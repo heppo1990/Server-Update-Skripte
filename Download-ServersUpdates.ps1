@@ -96,10 +96,10 @@ function Write-ScriptLog ($Message) {
 $ScriptStartTime = Get-Date
 $psVersion = $PSVersionTable.PSVersion.Major
 
-Write-Host "═══════════════════════════════════════════════════════════════"
-Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
-Write-Host "Betriebssystem: $([System.Environment]::OSVersion.VersionString)"
-Write-Host "═══════════════════════════════════════════════════════════════"
+Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)" -ForegroundColor Gray
+Write-Host "Betriebssystem: $([System.Environment]::OSVersion.VersionString)" -ForegroundColor Gray
+Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 
 $Settings = Get-DownloadSettingsFromCommon
 $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings.LinuxSettings } else { $null }

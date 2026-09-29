@@ -9,6 +9,18 @@ function Write-CommonLog {
     if ($WriteLog) { & $WriteLog $Message }
 }
 
+function Get-WindowsUpdateConsoleColor {
+    param([AllowEmptyString()][string]$Message)
+
+    if ($Message -match '(?i)^\s*(WARNUNG|WARNING|\[WARN\])|manuelle Prüfung|manuelle Aktion erforderlich') { return 'Yellow' }
+    if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*0(?:\D|$)') { return 'Green' }
+    if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*[1-9]\d*') { return 'Red' }
+    if ($Message -match '(?i)^\s*(\[ERROR\]|FEHLER\b|ERROR\b)|\bfehlgeschlagen\b|\bkonnte nicht\b|aufgetreten!') { return 'Red' }
+    if ($Message -match '(?i)\[SUCCESS\]|\berfolgreich\b|\babgeschlossen\b|Updates installiert|Update\(s\) installiert|keine .*Updates verfügbar') { return 'Green' }
+    if ($Message -match '(?i)^[\s═+|\-]*$|ZUSAMMENFASSUNG|UPDATE-(CHECK|DOWNLOAD|INSTALLATION)|^\s*(Starte|Beginne|Verarbeite|Lese|Prüfe|Ergebnis|Versuche|Gesamtliste)\b') { return 'Cyan' }
+    return $null
+}
+
 function Write-PSWindowsUpdateModuleLog {
     param([scriptblock]$WriteLog, [string]$Message, [string]$Level = 'INFO')
     if ($WriteLog) { & $WriteLog $Message $Level; return }
@@ -1570,7 +1582,15 @@ function Write-WindowsUpdateLog {
 
     if ($IsDebug -and -not $DebugEnabled) { return }
     $prefix = if ($IsDebug) { '[DEBUG] ' } else { '' }
-    if ($IsDebug) { Write-Host "$prefix$Message" -ForegroundColor Cyan } else { Write-Host "$Message" }
+    $consoleColor = $null
+    if ($Host.Name -eq 'ConsoleHost') {
+        try {
+            if (-not [Console]::IsOutputRedirected) {
+                $consoleColor = if ($IsDebug) { 'Cyan' } else { Get-WindowsUpdateConsoleColor -Message $Message }
+            }
+        } catch { $consoleColor = $null }
+    }
+    if ($consoleColor) { Write-Host "$prefix$Message" -ForegroundColor $consoleColor } else { Write-Host "$prefix$Message" }
     if (-not $WriteLogFile) { return }
 
     $logDirectory = Split-Path -Path $LogFile -Parent
