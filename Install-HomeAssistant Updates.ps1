@@ -78,7 +78,9 @@ if (-not $PSBoundParameters.ContainsKey('SSHPath')) {
 # ----------------------------
 # Logging vorbereiten
 # ----------------------------
-$script:WriteExecutionLog = -not $CheckOnly
+$script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
+    $settings.UpdateSettings.PSObject.Properties['WriteLogFile'] -and
+    [bool]$settings.UpdateSettings.WriteLogFile
 $LogDir = Join-Path $PSScriptRoot "Logs"
 if ($script:WriteExecutionLog -and -not (Test-Path $LogDir)) {
     New-Item -Path $LogDir -ItemType Directory | Out-Null

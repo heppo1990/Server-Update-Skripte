@@ -21,7 +21,7 @@ function Get-WindowsUpdateConsoleColor {
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*0(?:\D|$)') { return 'Green' }
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*[1-9]\d*') { return 'Red' }
     if ($Message -match '(?i)^\s*(\[ERROR\]|FEHLER\b|ERROR\b)|\bfehlgeschlagen\b|\bkonnte nicht\b|aufgetreten!') { return 'Red' }
-    if ($Message -match '(?i)\[SUCCESS\]|\berfolgreich\b|\babgeschlossen\b|Updates installiert|Update\(s\) installiert|keine .*Updates verfügbar') { return 'Green' }
+    if ($Message -match '(?i)\[SUCCESS\]|\berfolgreich\b|\babgeschlossen\b|Updates installiert|Update\(s\) installiert|keine .*Updates verfügbar|Paketupdates? verfügbar|Home-Assistant-Updates verfügbar|Home Assistant auf .*Update\(s\) verfügbar') { return 'Green' }
     if ($Message -match '(?i)^[\s═+|\-]*$|ZUSAMMENFASSUNG|UPDATE-(CHECK|DOWNLOAD|INSTALLATION)|^\s*(Starte|Beginne|Verarbeite|Lese|Prüfe|Ergebnis|Versuche|Gesamtliste)\b') { return 'Cyan' }
     return $null
 }
@@ -129,11 +129,14 @@ function Test-WindowsUpdateConsoleMessage {
     if ($Message -match '(?i)^\s*(Starte (Update-(Check|Download|Installation)|Windows-Updates) auf|Verarbeite (Windows|AD|Hypervisor)|Gesamtliste nach Zusammenführung|Check abgeschlossen\.|Download abgeschlossen\.|Installation abgeschlossen\.|E-Mail erfolgreich versendet|Mailkonfigurationstest erfolgreich)') { return $true }
     if ($Message -match '(?i)^\s*(Zurückgestellte Kategorien:|Zurückgestellte KBs:|Nachinstallation aktiviert$)') { return $true }
     if ($Message -match '(?i)keine Paketupdates verfügbar\.') { return $true }
-    if ($Message -match '(?i)(Paketupdates? verfügbar|Paketupdate\(s\) (erkannt und verarbeitet|verfügbar)|\d+ Paketupdates installiert)') {
+    if ($Message -match '(?i)(Paketupdates? verfügbar|Paketupdate\(s\) (erkannt und verarbeitet|verfügbar)|\d+ Paketupdates installiert|Home-Assistant-Check: .*Update\(s\) verfügbar)') {
         $script:WindowsUpdateConsolePackageRowsActive = $Message -notmatch '(?i)Keine Paketupdates'
         return $true
     }
-    if ($Message -match '(?i)(Windows-Updates installiert|Updates verfügbar|Nachinstallation auf .* geplant|Neustart(aufgabe)? auf .* geplant|Neustart auf .* verschoben|Linux-(Check|Zusammenfassung)|Linux-Update(-Prüfung)? auf .* abgeschlossen|Home-Assistant-Check)') { return $true }
+    if ($Message -match '(?i)(Windows-Updates installiert|Updates verfügbar|Nachinstallation auf .* geplant|Neustart(aufgabe)? auf .* geplant|Neustart auf .* verschoben|Linux-(Check|Zusammenfassung)|Linux-Update(-Prüfung)? auf .* abgeschlossen|Linux auf .* (keine Paketupdates|Paketupdates verfügbar)|Home-Assistant-Check|Home Assistant auf .*(keine Updates|Update\(s\) verfügbar))') {
+        if ($Message -match '(?i)(Linux auf .* Paketupdates verfügbar|Home Assistant auf .*Update\(s\) verfügbar)') { $script:WindowsUpdateConsolePackageRowsActive = $true }
+        return $true
+    }
     return $false
 }
 

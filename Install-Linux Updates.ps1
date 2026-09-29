@@ -66,7 +66,9 @@ $script:SCPPath = if ($scpCommand) { $scpCommand.Path } else { Join-Path (Split-
 $script:ConnectTimeoutSeconds = if ([int]$linuxSettings.ConnectTimeoutSeconds -gt 0) { [int]$linuxSettings.ConnectTimeoutSeconds } else { 15 }
 $script:LockWaitIntervals = if ([int]$linuxSettings.LockWaitMinutes -gt 0) { [int]$linuxSettings.LockWaitMinutes * 2 } else { 10 }
 $script:LogDirectory = Join-Path $PSScriptRoot 'Logs'
-$script:WriteExecutionLog = -not $CheckOnly
+$script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
+    $settings.UpdateSettings.PSObject.Properties['WriteLogFile'] -and
+    [bool]$settings.UpdateSettings.WriteLogFile
 $script:VMRebootIndex = $VMRebootIndexStart
 $script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new()
 
@@ -466,7 +468,7 @@ foreach ($entry in $hostEntries) {
         }
         if ($result.UpdateCount -gt 0) { Write-LinuxLog -Message $completionText -LogFile $logFile -Level Success }
     } catch {
-        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; UpdateCount=0; Packages=''; LogFile=$logFile }
+        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; UpdateCount=0; Packages=''; Error=$_.Exception.Message; LogFile=$logFile }
         Write-LinuxLog -Message "Fehler bei ${remoteHost}: $($_.Exception.Message)" -LogFile $logFile -Level Error
     } finally {
         Invoke-LinuxLogRetention -RemoteHost $remoteHost

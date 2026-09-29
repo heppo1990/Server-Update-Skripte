@@ -778,6 +778,7 @@ if ($ServerADList -ne $null) {
         if ($updateRows.Count -gt 0) {
           ($updateRows | Select-Object ComputerName, Status, KB, Size, Title | Format-Table -AutoSize | Out-String) `
             -split "\r?\n" | ForEach-Object { if ($_) { Write-ScriptLog $_ } }
+          Write-ScriptLog ''
 
           $UpdResultFull += $updateRows
           
@@ -878,8 +879,9 @@ foreach ($staleStatsPath in @($linuxCheckStatsPath, $haCheckStatsPath)) {
 $linuxCheckScript = Join-Path $PSScriptRoot 'Install-Linux Updates.ps1'
 if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
   try {
+    Write-ScriptLog ''
     Write-ScriptLog 'Starte Linux-Update-Check...'
-    & $linuxCheckScript -CheckOnly
+    & $linuxCheckScript -CheckOnly *> $null
     if (Test-Path -LiteralPath $linuxCheckStatsPath) {
       $linuxCheckStats = Get-Content -LiteralPath $linuxCheckStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $LinuxCheckExecuted = $true
@@ -891,16 +893,22 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
       foreach ($linuxHost in @($linuxCheckStats.HostStatus)) {
         $RepBody += "<div class='server-title'>Server: $([System.Net.WebUtility]::HtmlEncode([string]$linuxHost.Host))</div>"
         if ($linuxHost.Status -eq 'Fehler') {
+          $linuxError = [string]$linuxHost.Error
+          if (-not [string]::IsNullOrWhiteSpace($linuxError)) { Write-ScriptLog "Linux-Check auf $($linuxHost.Host) fehlgeschlagen: $linuxError (Log: $($linuxHost.LogFile))" }
           $RepBody += "<div class='error-box'>Linux-Check fehlgeschlagen.</div>"
         } elseif ([int]$linuxHost.UpdateCount -gt 0) {
-          $packages = [System.Net.WebUtility]::HtmlEncode([string]$linuxHost.Packages) -replace ' ', '<br>'
+          $packageList = @(([string]$linuxHost.Packages -split ',\s*') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          $packages = [System.Net.WebUtility]::HtmlEncode(($packageList -join "`n")) -replace "`n", '<br>'
+          Write-ScriptLog "Linux auf $($linuxHost.Host): $($linuxHost.UpdateCount) Paketupdates verfügbar."
+          foreach ($package in $packageList) { Write-ScriptLog "  $($linuxHost.Host): $package" }
           $RepBody += "<div class='info-box'><strong>$($linuxHost.UpdateCount) Paketupdate(s) verfügbar:</strong><br>$packages</div>"
         } else {
+          Write-ScriptLog "Linux auf $($linuxHost.Host): keine Paketupdates verfügbar."
           $RepBody += "<div class='no-updates'>Keine Linux-Updates verfügbar.</div>"
         }
+        Write-ScriptLog ''
       }
     }
-    Write-ScriptLog "Linux-Check: $LinuxUpdateCount Paketupdate(s) verfügbar, $LinuxCheckErrors Fehler."
   }
   catch {
     $LinuxCheckErrors++
@@ -915,8 +923,9 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
 $haCheckScript = Join-Path $PSScriptRoot 'Install-HomeAssistant Updates.ps1'
 if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   try {
+    Write-ScriptLog ''
     Write-ScriptLog 'Starte Home-Assistant-Update-Check...'
-    & $haCheckScript -CheckOnly
+    & $haCheckScript -CheckOnly *> $null
     if (Test-Path -LiteralPath $haCheckStatsPath) {
       $haCheckStats = Get-Content -LiteralPath $haCheckStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $HACheckExecuted = $true
@@ -924,6 +933,16 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
       # auch für die Konsolen- und Gesamtzählung verwendet.
       $HAUpdateCount = @($haCheckStats.UpdateDetails).Count
       if (-not $haCheckStats.Success) { $HACheckErrors++ }
+      if (-not $haCheckStats.Success) {
+        Write-ScriptLog "Home-Assistant-Check auf $($haCheckStats.Host) fehlgeschlagen: $($haCheckStats.Error)"
+      } elseif ($HAUpdateCount -eq 0) {
+        Write-ScriptLog "Home Assistant auf $($haCheckStats.Host): keine Updates verfügbar."
+      } else {
+        Write-ScriptLog "Home Assistant auf $($haCheckStats.Host): $HAUpdateCount Update(s) verfügbar."
+        foreach ($detail in @($haCheckStats.UpdateDetails)) {
+          Write-ScriptLog ("  {0}: {1} → {2}" -f $detail.Component, $detail.Current, $detail.Available)
+        }
+      }
       $RepBody += "<div class='section-title'>🏠 Home-Assistant-Updates</div>"
       $RepBody += "<div class='server-title'>Server: $([System.Net.WebUtility]::HtmlEncode([string]$haCheckStats.Host))</div>"
       if (-not $haCheckStats.Success) {
@@ -934,8 +953,8 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
         $details = @($haCheckStats.UpdateDetails | ForEach-Object { "{0}: {1} → {2}" -f $_.Component, $_.Current, $_.Available })
         $RepBody += "<div class='info-box'><strong>$HAUpdateCount Update(s) verfügbar:</strong><br>$([System.Net.WebUtility]::HtmlEncode(($details -join "`n")) -replace "`n", '<br>')</div>"
       }
+      Write-ScriptLog ''
     }
-    Write-ScriptLog "Home-Assistant-Check: $HAUpdateCount Update(s) verfügbar, $HACheckErrors Fehler."
   }
   catch {
     $HACheckErrors++
