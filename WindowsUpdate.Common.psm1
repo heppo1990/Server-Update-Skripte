@@ -793,35 +793,18 @@ function Invoke-WindowsUpdatePackageManagers {
             if ($sourceListExitCode -ne 0) {
                 throw "WinGet-Quellen konnten vor dem Reset nicht aufgelistet werden (Exitcode $sourceListExitCode): $($sourceListOutput.Trim())"
             }
-            $defaultSourceUrls = @{
-                msstore = 'https://storeedge.dsx.mp.microsoft.com/v9.0'
-                winget = 'https://cdn.winget.microsoft.com/cache'
-                'winget-font' = 'https://cdn.winget.microsoft.com/fonts'
-            }
+            $defaultSources = @('msstore', 'winget', 'winget-font')
             $configuredSources = @($sourceListOutput -split "`r?`n" | ForEach-Object {
                 $line = [string]$_
-                # winget source list ist eine formatierte Tabelle; zwischen
-                # Name und URL steht je nach Spaltenbreite teils nur ein
-                # Leerzeichen. Deshalb die bekannten Microsoft-Quellen zuerst
-                # anhand von Name UND Argument erkennen.
-                if ($line -match '^\s*(?<Name>msstore|winget|winget-font)\s+(?<Argument>https?://\S+)') {
-                    $name = $Matches.Name
-                    $argument = $Matches.Argument.TrimEnd('/')
-                    $expectedArgument = $defaultSourceUrls[$name].TrimEnd('/')
-                    if ([string]::Equals($argument, $expectedArgument, [StringComparison]::OrdinalIgnoreCase)) {
-                        $name
-                    }
-                    else {
-                        "$name [$argument]"
-                    }
-                }
-                elseif ($line -match '^\s*(?<Name>.+?)\s{2,}\S+') {
+                # Nur der Quellname entscheidet. URLs variieren je nach
+                # WinGet-Version und gehören nicht in Fehlermeldungen.
+                if ($line -match '^\s*(?<Name>msstore|winget-font|winget)(?=\s|$)') { $Matches.Name }
+                elseif ($line -match '^\s*(?<Name>[^\s]+)\s+') {
                     $name = $Matches.Name.Trim()
-                    if ($name -and $name -ne 'Name') { $name }
+                    if ($name -and $name -notmatch '^(Name|[-=]+)$') { $name }
                 }
             })
-            $defaultSources = @('msstore', 'winget', 'winget-font')
-            $customSources = @($configuredSources | Where-Object { $_ -notin $defaultSources })
+            $customSources = @($configuredSources | Where-Object { $_ -notin $defaultSources } | Select-Object -Unique)
             if ($configuredSources.Count -eq 0) {
                 throw 'WinGet-Quellenliste war leer oder konnte nicht ausgewertet werden; vollständiger Reset aus Sicherheitsgründen abgebrochen.'
             }
