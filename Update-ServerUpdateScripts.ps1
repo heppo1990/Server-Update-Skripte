@@ -648,18 +648,39 @@ $noUpdateExitCodes = @(-1978335188, -1978335189, -1978335192)
 $wingetCommand = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
 $chocoPath = 'C:\ProgramData\chocolatey\bin\choco.exe'
 
+function Get-WingetTempDirectory {
+    $candidates = @($env:TEMP, $env:TMP, (Join-Path $env:WINDIR 'Temp')) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+    foreach ($candidate in $candidates) {
+        $probePath = $null
+        $stream = $null
+        try {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Container -ErrorAction SilentlyContinue)) { continue }
+            $probePath = Join-Path $candidate ('winget-temp-check-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+            $stream = [IO.File]::Open($probePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $stream.Dispose(); $stream = $null
+            Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+            return $candidate
+        }
+        catch {
+            if ($stream) { $stream.Dispose() }
+            if ($probePath) { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    throw 'Kein gültiger beschreibbarer temporärer Ordner für die WinGet-Reparatur gefunden.'
+}
 function Find-WingetInstallScript {
     $command = Get-Command -Name 'winget-install.ps1' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
-    foreach ($candidate in @(
-        (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Scripts\winget-install.ps1'),
-        (Join-Path $env:ProgramFiles 'WindowsPowerShell\Scripts\winget-install.ps1')
-    )) {
+    $candidates = @()
+    if ($env:USERPROFILE -and (Test-Path -LiteralPath $env:USERPROFILE -PathType Container -ErrorAction SilentlyContinue)) {
+        $candidates += Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Scripts\winget-install.ps1'
+    }
+    if ($env:ProgramFiles) { $candidates += Join-Path $env:ProgramFiles 'WindowsPowerShell\Scripts\winget-install.ps1' }
+    foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     }
     return $null
 }
-
 function Invoke-WingetInstallScript {
     param([string]$Path, [string[]]$InstallerArguments)
     $powerShell51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -685,7 +706,7 @@ function Invoke-WingetRepair {
         $installerPath = Find-WingetInstallScript
     }
     else {
-        $bootstrapPath = Join-Path $env:TEMP ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+        $bootstrapPath = Join-Path (Get-WingetTempDirectory) ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
         # Ein einzeiliges Skript vermeidet verschachtelte Here-Strings im
         # ebenfalls als Here-String eingebetteten PowerShell-5.1-Vorlauf.
         $bootstrapScript = '$ErrorActionPreference = ''Stop''; try { Install-Script -Name winget-install -Repository PSGallery -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop; exit 0 } catch { Write-Error $_; exit 1 }'
@@ -694,7 +715,7 @@ function Invoke-WingetRepair {
         finally { Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction SilentlyContinue }
         $installerPath = Find-WingetInstallScript
         if ($galleryResult.ExitCode -ne 0 -or -not $installerPath) {
-            $temporaryInstallerPath = Join-Path $env:TEMP ("winget-install-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+            $temporaryInstallerPath = Join-Path (Get-WingetTempDirectory) ("winget-install-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -UseBasicParsing -TimeoutSec 90 -OutFile $temporaryInstallerPath -ErrorAction Stop
             $installerPath = $temporaryInstallerPath

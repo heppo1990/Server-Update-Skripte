@@ -827,19 +827,39 @@ function Invoke-WindowsUpdatePackageManagers {
             [IO.File]::WriteAllText($State.MarkerPath, [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
         }
 
+        function Get-WingetTempDirectory {
+            $candidates = @($env:TEMP, $env:TMP, (Join-Path $env:windir 'Temp')) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+            foreach ($candidate in $candidates) {
+                $probePath = $null
+                $stream = $null
+                try {
+                    if (-not (Test-Path -LiteralPath $candidate -PathType Container -ErrorAction SilentlyContinue)) { continue }
+                    $probePath = Join-Path $candidate ('winget-temp-check-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+                    $stream = [IO.File]::Open($probePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    $stream.Dispose(); $stream = $null
+                    Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+                    return $candidate
+                }
+                catch {
+                    if ($stream) { $stream.Dispose() }
+                    if ($probePath) { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue }
+                }
+            }
+            throw 'Kein gültiger beschreibbarer temporärer Ordner für die WinGet-Reparatur gefunden.'
+        }
         function Find-WingetInstallScript {
             $command = Get-Command winget-install.ps1 -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
-            $candidates = @(
-                (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Scripts\winget-install.ps1'),
-                (Join-Path $env:ProgramFiles 'WindowsPowerShell\Scripts\winget-install.ps1')
-            )
+            $candidates = @()
+            if ($env:USERPROFILE -and (Test-Path -LiteralPath $env:USERPROFILE -PathType Container -ErrorAction SilentlyContinue)) {
+                $candidates += Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Scripts\winget-install.ps1'
+            }
+            if ($env:ProgramFiles) { $candidates += Join-Path $env:ProgramFiles 'WindowsPowerShell\Scripts\winget-install.ps1' }
             foreach ($candidate in $candidates) {
                 if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
             }
             return $null
         }
-
         function Invoke-WingetInstallScript {
             param([string]$Path, [string[]]$InstallerArguments)
             $powerShell51 = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -916,7 +936,7 @@ function Invoke-WindowsUpdatePackageManagers {
                         else {
                             # Skript aus PSGallery installieren; bei Galerieproblemen
                             # auf die signierte GitHub-Release-Datei ausweichen.
-                            $bootstrapPath = Join-Path $env:TEMP ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+                            $bootstrapPath = Join-Path (Get-WingetTempDirectory) ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
                             $bootstrapScript = @'
 $ErrorActionPreference = 'Stop'
 try {
@@ -933,7 +953,7 @@ catch {
                             finally { Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction SilentlyContinue }
                             $installerPath = Find-WingetInstallScript
                             if ($galleryResult.ExitCode -ne 0 -or -not $installerPath) {
-                                $temporaryInstallerPath = Join-Path $env:TEMP ("winget-install-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+                                $temporaryInstallerPath = Join-Path (Get-WingetTempDirectory) ("winget-install-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
                                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                                 Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -UseBasicParsing -TimeoutSec 90 -OutFile $temporaryInstallerPath -ErrorAction Stop
                                 $installerPath = $temporaryInstallerPath
