@@ -771,10 +771,36 @@ try {
         }
         $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA' -f $PSCommandPath
         $taskName = 'WindowsUpdateAdm-Finalize'
-        $action = New-ScheduledTaskAction -Execute $localPowerShell -Argument $arguments
-        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
-        Start-ScheduledTask -TaskName $taskName
+        $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name Start-ScheduledTask -ErrorAction SilentlyContinue)
+        if ($scheduledTaskCmdletsAvailable) {
+            $action = New-ScheduledTaskAction -Execute $localPowerShell -Argument $arguments
+            $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName $taskName
+        }
+        else {
+            # Windows 7 besitzt nicht zuverlässig das ScheduledTasks-Modul;
+            # schtasks.exe kann dort dieselbe einmalige SYSTEM-Aufgabe anlegen.
+            $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
+            if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) {
+                throw 'Weder ScheduledTasks-Cmdlets noch schtasks.exe sind verfügbar.'
+            }
+            $startAt = (Get-Date).AddMinutes(1)
+            $startDate = $startAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
+            $startTime = $startAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+            $taskCommand = '"{0}" {1}' -f $localPowerShell, $arguments
+            $createOutput = & $schtasks /Create /TN $taskName /SC ONCE /SD $startDate /ST $startTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "Die JEA-Finalisierungsaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())"
+            }
+            $runOutput = & $schtasks /Run /TN $taskName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "Die JEA-Finalisierungsaufgabe konnte mit schtasks.exe nicht gestartet werden: $((@($runOutput) -join ' ').Trim())"
+            }
+        }
         Write-SetupLog 'JEA-Registrierung wurde in eine lokale SYSTEM-Task ausgelagert.' 'SUCCESS'
         exit 0
     }
@@ -1166,7 +1192,16 @@ finally {
     # bestehen bleiben.
     if ($FinalizeJEA) {
         try {
-            Unregister-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -Confirm:$false -ErrorAction SilentlyContinue
+            if (Get-Command -Name Unregister-ScheduledTask -ErrorAction SilentlyContinue) {
+                Unregister-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            else {
+                # Windows 7 bereinigt die einmalige Finalisierungsaufgabe über schtasks.exe.
+                $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
+                if (Test-Path -LiteralPath $schtasks -PathType Leaf) {
+                    & $schtasks /Delete /TN 'WindowsUpdateAdm-Finalize' /F *> $null
+                }
+            }
         } catch { }
     }
     # Zertifikatsvalidierung in jedem Fall wiederherstellen

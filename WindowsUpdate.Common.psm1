@@ -422,9 +422,23 @@ try {
     if ($config.Mode -eq 'RemoveDeferredTask') {
         $deferredTaskName = 'WindowsUpdateAdm-DeferredUpdates'
         $removed = $false
-        if (Get-ScheduledTask -TaskName $deferredTaskName -ErrorAction SilentlyContinue) {
-            Unregister-ScheduledTask -TaskName $deferredTaskName -Confirm:$false -ErrorAction Stop
-            $removed = $true
+        $scheduledTaskRemovalAvailable = (Get-Command -Name Get-ScheduledTask -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name Unregister-ScheduledTask -ErrorAction SilentlyContinue)
+        if ($scheduledTaskRemovalAvailable) {
+            if (Get-ScheduledTask -TaskName $deferredTaskName -ErrorAction SilentlyContinue) {
+                Unregister-ScheduledTask -TaskName $deferredTaskName -Confirm:$false -ErrorAction Stop
+                $removed = $true
+            }
+        } else {
+            # Windows 7 kann ohne ScheduledTasks-Modul nur über schtasks.exe bereinigen.
+            $schtasks = Join-Path $env:windir 'System32\schtasks.exe'
+            foreach ($name in @($deferredTaskName, ($deferredTaskName + '-AtStartup'))) {
+                & $schtasks /Query /TN $name *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    & $schtasks /Delete /TN $name /F *> $null
+                    if ($LASTEXITCODE -eq 0) { $removed = $true }
+                }
+            }
         }
         Remove-Item -LiteralPath (Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
         $updates = @([PSCustomObject]@{ Removed = $removed })
@@ -473,7 +487,11 @@ catch {
 finally {
     New-Item -ItemType Directory -Path (Split-Path -Parent $config.ResultPath) -Force | Out-Null
     [IO.File]::WriteAllText($config.ResultPath, ($result | ConvertTo-Json -Depth 6 -Compress), [Text.Encoding]::UTF8)
-    try { Unregister-ScheduledTask -TaskName $config.TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+    try {
+        # schtasks ist auch auf Windows 7 vorhanden und entfernt die temporäre Task plattformübergreifend.
+        $schtasks = Join-Path $env:windir 'System32\schtasks.exe'
+        & $schtasks /Delete /TN $config.TaskName /F *> $null
+    } catch { }
     Remove-Item -LiteralPath $config.WorkerPath -Force -ErrorAction SilentlyContinue
 }
 '@
@@ -484,11 +502,29 @@ finally {
         New-Item -ItemType Directory -Path (Split-Path -Parent $WorkerPath) -Force | Out-Null
         Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
         [IO.File]::WriteAllText($WorkerPath, $Worker, [Text.Encoding]::UTF8)
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$WorkerPath`""
-        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10)
-        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-        Start-ScheduledTask -TaskName $Name
+        $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name New-ScheduledTaskTrigger -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name Start-ScheduledTask -ErrorAction SilentlyContinue)
+        if ($scheduledTaskCmdletsAvailable) {
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$WorkerPath`""
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10)
+            $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName $Name
+        } else {
+            # Auf Windows 7 die temporäre SYSTEM-Aufgabe mit schtasks.exe anlegen und starten.
+            $schtasks = Join-Path $env:windir 'System32\schtasks.exe'
+            $runAt = (Get-Date).AddMinutes(10)
+            $date = $runAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
+            $time = $runAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+            $taskCommand = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $WorkerPath
+            $createOutput = & $schtasks /Create /TN $Name /SC ONCE /SD $date /ST $time /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "SYSTEM-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())" }
+            $runOutput = & $schtasks /Run /TN $Name 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "SYSTEM-Aufgabe konnte mit schtasks.exe nicht gestartet werden: $((@($runOutput) -join ' ').Trim())" }
+        }
     }
     $params = New-WindowsUpdateInvokeCommandParams -ComputerName $TargetComputer -AuthInfo $AuthInfo -OperationTimeoutSeconds $TimeoutSeconds
     $params.ScriptBlock = $register

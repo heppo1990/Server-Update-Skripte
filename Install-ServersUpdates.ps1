@@ -502,11 +502,24 @@ function Remove-DeferredUpdateTask {
     param($Name)
     $workerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
     $runnerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates-TaskRunner.cmd'
-    if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
-      Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
-      $removed = $true
+    $scheduledTaskRemovalAvailable = (Get-Command -Name Get-ScheduledTask -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name Unregister-ScheduledTask -ErrorAction SilentlyContinue)
+    if ($scheduledTaskRemovalAvailable) {
+      if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
+        $removed = $true
+      } else { $removed = $false }
     } else {
+      # Windows 7 ohne ScheduledTasks-Modul: beide legacy Trigger mit schtasks entfernen.
+      $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
       $removed = $false
+      foreach ($candidateName in @($Name, ($Name + '-AtStartup'))) {
+        & $schtasks /Query /TN $candidateName *> $null
+        if ($LASTEXITCODE -eq 0) {
+          & $schtasks /Delete /TN $candidateName /F *> $null
+          if ($LASTEXITCODE -eq 0) { $removed = $true }
+        }
+      }
     }
     Remove-Item -LiteralPath $workerPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
@@ -662,10 +675,24 @@ function Register-OneTimeRemoteTask {
     } else { $protectedPassword = '' }
     $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(
       [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Encoded)).Replace('__WINDOWSUPDATEADM_DPAPI_MAILPASS__', $protectedPassword)))
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
-    $trigger = New-ScheduledTaskTrigger -Once -At $RunAt
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name New-ScheduledTaskTrigger -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)
+    if ($scheduledTaskCmdletsAvailable) {
+      $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
+      $trigger = New-ScheduledTaskTrigger -Once -At $RunAt
+      $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+      Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    } else {
+      # Einmalige SYSTEM-Aufgabe auf Windows 7 über den eingebauten Task-Scheduler-CLI anlegen.
+      $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
+      $startDate = $RunAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
+      $startTime = $RunAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+      $taskCommand = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {0}' -f $Encoded
+      $createOutput = & $schtasks /Create /TN $Name /SC ONCE /SD $startDate /ST $startTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
+      if ($LASTEXITCODE -ne 0) { throw "SYSTEM-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())" }
+    }
   }
   if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $At $encoded $MailPassword; return }
   # Keine Erweiterung der JEA-Rechte: Aufgaben werden über die normale WinRM-Verbindung
@@ -751,17 +778,41 @@ exit /b %WORKER_EXIT%
 "@
     [System.IO.File]::WriteAllText($RunnerPath, $runnerSource, [System.Text.Encoding]::ASCII)
     Set-Acl -LiteralPath $RunnerPath -AclObject $acl -ErrorAction Stop
-    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/d /c ""{0}""' -f $RunnerPath) -WorkingDirectory (Split-Path -Parent $WorkerPath)
-    # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit und zusätzlich
-    # direkt nach dem Systemstart geprüft. So kann die Nachinstallation nach
-    # Ablauf der Mindestwartezeit noch im selben offenen Fenster beginnen.
-    $triggers = if ($RunAt -gt [datetime]::MinValue) {
-      @((New-ScheduledTaskTrigger -Daily -At $RunAt), (New-ScheduledTaskTrigger -AtStartup))
+    $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name New-ScheduledTaskTrigger -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)
+    if ($scheduledTaskCmdletsAvailable) {
+      $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/d /c ""{0}""' -f $RunnerPath) -WorkingDirectory (Split-Path -Parent $WorkerPath)
+      # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit und zusätzlich
+      # direkt nach dem Systemstart geprüft. So kann die Nachinstallation nach
+      # Ablauf der Mindestwartezeit noch im selben offenen Fenster beginnen.
+      $triggers = if ($RunAt -gt [datetime]::MinValue) {
+        @((New-ScheduledTaskTrigger -Daily -At $RunAt), (New-ScheduledTaskTrigger -AtStartup))
+      } else {
+        @((New-ScheduledTaskTrigger -AtStartup))
+      }
+      $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+      Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
     } else {
-      @((New-ScheduledTaskTrigger -AtStartup))
+      # schtasks unterstützt nur einen Trigger je Task; Windows 7 erhält deshalb
+      # getrennte Aufgaben für Wartungsfenster und Systemstart.
+      $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
+      $taskCommand = 'cmd.exe /d /c ""{0}""' -f $RunnerPath
+      $runAt = if ($RunAt -gt [datetime]::MinValue) { $RunAt } else { (Get-Date).AddMinutes(1) }
+      $startDate = $runAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
+      $startTime = $runAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+      if ($RunAt -gt [datetime]::MinValue) {
+        $windowOutput = & $schtasks /Create /TN $Name /SC DAILY /SD $startDate /ST $startTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Wartungsfenster-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($windowOutput) -join ' ').Trim())" }
+        $startupName = $Name + '-AtStartup'
+      } else { $startupName = $Name }
+      $startupOutput = & $schtasks /Create /TN $startupName /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
+      if ($LASTEXITCODE -ne 0) {
+        if ($RunAt -gt [datetime]::MinValue) { & $schtasks /Delete /TN $Name /F *> $null }
+        throw "Systemstart-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($startupOutput) -join ' ').Trim())"
+      }
     }
-    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
   }
   if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $MailPassword $At; return }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
@@ -791,10 +842,10 @@ try {
   # Der Aufrufer legt diese Aufgabe nur nach tatsächlich installierten Windows-Updates an.
   # Ein manueller Neustart zwischenzeitlich wird am Bootzeitpunkt erkannt und nicht wiederholt.
   if (`$lastBoot -le `$registeredAt) {
-    Unregister-ScheduledTask -TaskName `$taskName -Confirm:`$false -ErrorAction SilentlyContinue
+    & (Join-Path `$env:WINDIR 'System32\schtasks.exe') /Delete /TN `$taskName /F *> `$null
     shutdown.exe /r /t 15 /f | Out-Null
   }
-} finally { Unregister-ScheduledTask -TaskName `$taskName -Confirm:`$false -ErrorAction SilentlyContinue }
+} finally { & (Join-Path `$env:WINDIR 'System32\schtasks.exe') /Delete /TN `$taskName /F *> `$null }
 "@
   Register-OneTimeRemoteTask -Servername $Servername -TaskName $taskName -At $at -Script $script -AuthInfo $AuthInfo
   $rebootMode = if ($Immediately) { 'sofort nach Abschluss' } else { $at.ToString('dd.MM.yyyy HH:mm') }
@@ -872,6 +923,13 @@ function Register-DeferredUpdateTask {
   $script = @"
 `$taskName = '$taskName'
 `$workerFailed = `$false
+`$removeDeferredTask = {
+  param([string]`$Name)
+  `$schtasks = Join-Path `$env:WINDIR 'System32\schtasks.exe'
+  foreach (`$candidateName in @(`$Name, (`$Name + '-AtStartup'))) {
+    & `$schtasks /Delete /TN `$candidateName /F *> `$null
+  }
+}
 try {
   `$logDirectory = Join-Path `$env:ProgramData 'WindowsUpdateAdm'
   `$logFile = Join-Path `$logDirectory 'DeferredUpdates.log'
@@ -1089,7 +1147,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     Write-DeferredLog "Get-WURebootStatus meldet RebootRequired = `$rebootRequired."
     if (`$rebootRequired) {
       Write-DeferredLog 'Nachinstallationsmail abgeschlossen. Erforderlicher Neustart wird jetzt sofort ausgelöst.'
-      Unregister-ScheduledTask -TaskName `$taskName -Confirm:`$false -ErrorAction SilentlyContinue
+      & `$removeDeferredTask `$taskName
       Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
       shutdown.exe /r /t 0 /f | Out-Null
     }
@@ -1114,7 +1172,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
   # Während der Wartephase bleibt die Aufgabe erhalten; nach Ausführung oder Fehler wird sie entfernt.
   if (-not `$waitForReboot) {
     Write-DeferredLog 'Aufgabe wird entfernt.'
-    Unregister-ScheduledTask -TaskName `$taskName -Confirm:`$false -ErrorAction SilentlyContinue
+    & `$removeDeferredTask `$taskName
     Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
   }
 }
@@ -1211,7 +1269,7 @@ h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
 } catch {
   Write-TestMailLog "FEHLER: `$(`$_.Exception.Message)"
 } finally {
-  Unregister-ScheduledTask -TaskName `$taskName -Confirm:`$false -ErrorAction SilentlyContinue
+  & (Join-Path `$env:WINDIR 'System32\schtasks.exe') /Delete /TN `$taskName /F *> `$null
 }
 "@
   # Kurzer Abstand lässt den Aufruf sauber enden und prüft den echten SYSTEM-Kontext.
