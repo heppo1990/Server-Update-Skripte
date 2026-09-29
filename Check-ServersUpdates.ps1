@@ -95,10 +95,13 @@ $WingetUpdateCount = 0
 $ChocolateyUpdateCount = 0
 $LinuxUpdateCount = 0
 $HAUpdateCount = 0
+$Anzahl = 0
 $LinuxCheckErrors = 0
 $HACheckErrors = 0
 $LinuxCheckExecuted = $false
 $HACheckExecuted = $false
+$LinuxCheckAttempted = $false
+$HACheckAttempted = $false
 $UpdResultFull = $null
 $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
@@ -311,6 +314,7 @@ $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings
 $haSettings = if ($Settings.PSObject.Properties['HomeAssistantSettings']) { $Settings.HomeAssistantSettings } else { $null }
 $LinuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Properties['Hosts'] -and @($linuxSettings.Hosts | Where-Object { $_ }).Count -gt 0
 $HAConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
+$LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Where-Object { $_ }).Count } else { 0 }
 $UpdateSettings = $Settings.UpdateSettings
 $MailSettings = $Settings.MailSettings
 
@@ -878,6 +882,7 @@ foreach ($staleStatsPath in @($linuxCheckStatsPath, $haCheckStatsPath)) {
 
 $linuxCheckScript = Join-Path $PSScriptRoot 'Install-Linux Updates.ps1'
 if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
+  $LinuxCheckAttempted = $true
   try {
     Write-ScriptLog ''
     Write-ScriptLog 'Starte Linux-Update-Check...'
@@ -922,6 +927,7 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
 
 $haCheckScript = Join-Path $PSScriptRoot 'Install-HomeAssistant Updates.ps1'
 if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
+  $HACheckAttempted = $true
   try {
     Write-ScriptLog ''
     Write-ScriptLog 'Starte Home-Assistant-Update-Check...'
@@ -968,6 +974,10 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
 
 # Zusammenfassung
 $ScriptDuration = [math]::Round((New-TimeSpan -Start $ScriptStartTime).TotalMinutes, 2)
+$CheckedSystemCount = $Anzahl + $(if ($LinuxCheckAttempted) { $LinuxConfiguredHostCount } else { 0 }) + $(if ($HACheckAttempted) { 1 } else { 0 })
+$checkedSystemBreakdown = "Windows: $Anzahl"
+if ($LinuxCheckAttempted) { $checkedSystemBreakdown += ", Linux: $LinuxConfiguredHostCount" }
+if ($HACheckAttempted) { $checkedSystemBreakdown += ', Home Assistant: 1' }
 
 if (($UpdCount + $PackageUpdateCount + $LinuxUpdateCount + $HAUpdateCount) -eq 0) {
   $RepBody += @"
@@ -989,7 +999,7 @@ $RepBody += @"
 <div class="info-box">
     <p><strong>Statistik:</strong></p>
     <ul>
-        <li>Geprüfte Server: $Anzahl</li>
+        <li>Geprüfte Systeme: $CheckedSystemCount ($checkedSystemBreakdown)</li>
         <li>Verfügbare Windows-Updates: $UpdCount</li>
         <li>Verfügbare Anwendungsupdates: $PackageUpdateCount (Winget: $WingetUpdateCount, Chocolatey: $ChocolateyUpdateCount)</li>
         <li>Verarbeitungsdauer: $ScriptDuration Minuten</li>
@@ -1008,7 +1018,7 @@ if ($HACheckExecuted) {
 
 $checkSummaryLines = @(
   "PowerShell Version: $($PSVersionTable.PSVersion)",
-  "Geprüfte Server: $Anzahl",
+  "Geprüfte Systeme: $CheckedSystemCount ($checkedSystemBreakdown)",
   "Verfügbare Windows-Updates: $UpdCount",
   "Verfügbare Anwendungsupdates: $PackageUpdateCount (Winget: $WingetUpdateCount, Chocolatey: $ChocolateyUpdateCount)",
   "Dauer: $ScriptDuration Minuten"

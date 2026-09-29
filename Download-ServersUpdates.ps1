@@ -74,8 +74,11 @@ $ComputerFQDN = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
 $UpdCount = 0
 $LinuxAvailableUpdateCount = 0
 $HAAvailableUpdateCount = 0
+$Anzahl = 0
 $LinuxCheckExecuted = $false
 $HACheckExecuted = $false
+$LinuxCheckAttempted = $false
+$HACheckAttempted = $false
 $UpdResultFull = $null
 $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
@@ -106,6 +109,7 @@ $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings
 $haSettings = if ($Settings.PSObject.Properties['HomeAssistantSettings']) { $Settings.HomeAssistantSettings } else { $null }
 $LinuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Properties['Hosts'] -and @($linuxSettings.Hosts | Where-Object { $_ }).Count -gt 0
 $HAConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
+$LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Where-Object { $_ }).Count } else { 0 }
 $UpdateSettings = $Settings.UpdateSettings
 $MailSettings = $Settings.MailSettings
 $TargetComputers = $UpdateSettings.TargetComputers
@@ -419,13 +423,24 @@ foreach ($staleStatsPath in @($linuxStatsPath, $haStatsPath)) {
 
 $linuxCheckScript = Join-Path $PSScriptRoot 'Install-Linux Updates.ps1'
 if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
+  $LinuxCheckAttempted = $true
   try {
     Write-ScriptLog 'Linux: Kein separater Paketdownload verfügbar – prüfe Einrichtung und verfügbare Updates.'
-    & $linuxCheckScript -CheckOnly
+    & $linuxCheckScript -CheckOnly *> $null
     if (Test-Path -LiteralPath $linuxStatsPath) {
       $linuxStats = Get-Content -LiteralPath $linuxStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $LinuxAvailableUpdateCount = [int]$linuxStats.UpdatesInstalled
       $LinuxCheckExecuted = $true
+      foreach ($linuxHost in @($linuxStats.HostStatus)) {
+        if ([int]$linuxHost.UpdateCount -gt 0) {
+          $packageList = if ($linuxHost.PSObject.Properties['PackageList']) { @($linuxHost.PackageList) } else { @(([string]$linuxHost.Packages -split ',\s*') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) }
+          Write-ScriptLog "Linux auf $($linuxHost.Host): $($linuxHost.UpdateCount) Paketupdates verfügbar."
+          foreach ($package in $packageList) { Write-ScriptLog "  $($linuxHost.Host): $package" }
+        } else {
+          Write-ScriptLog "Linux auf $($linuxHost.Host): keine Paketupdates verfügbar."
+        }
+        Write-ScriptLog ''
+      }
       $RepBody += "<div class='section-title'>🐧 Linux-Updates (nicht herunterladbar)</div>"
       $RepBody += "<div class='info-box'>Verfügbare Linux-Paketupdates: $LinuxAvailableUpdateCount. Linux lädt Updates erst während der Installation herunter.</div>"
     }
@@ -441,13 +456,19 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
 
 $haCheckScript = Join-Path $PSScriptRoot 'Install-HomeAssistant Updates.ps1'
 if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
+  $HACheckAttempted = $true
   try {
     Write-ScriptLog 'Home Assistant: Kein separater Paketdownload verfügbar – prüfe Einrichtung und verfügbare Updates.'
-    & $haCheckScript -CheckOnly
+    & $haCheckScript -CheckOnly *> $null
     if (Test-Path -LiteralPath $haStatsPath) {
       $haStats = Get-Content -LiteralPath $haStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $HAAvailableUpdateCount = [int]$haStats.AvailableUpdates
       $HACheckExecuted = $true
+      foreach ($detail in @($haStats.UpdateDetails)) {
+        Write-ScriptLog ("Home Assistant auf {0}: {1} {2} → {3}" -f $haStats.Host, $detail.Component, $detail.Current, $detail.Available)
+      }
+      if ($HAAvailableUpdateCount -eq 0) { Write-ScriptLog "Home Assistant auf $($haStats.Host): keine Updates verfügbar." }
+      Write-ScriptLog ''
       $RepBody += "<div class='section-title'>🏠 Home-Assistant-Updates (nicht herunterladbar)</div>"
       $RepBody += "<div class='info-box'>Verfügbare Home-Assistant-Updates: $HAAvailableUpdateCount. Home Assistant lädt Updates erst während der Installation herunter.</div>"
     }
@@ -463,6 +484,10 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
 
 # Zusammenfassung
 $ScriptDuration = [math]::Round((New-TimeSpan -Start $ScriptStartTime).TotalMinutes, 2)
+$ProcessedSystemCount = $Anzahl + $(if ($LinuxCheckAttempted) { $LinuxConfiguredHostCount } else { 0 }) + $(if ($HACheckAttempted) { 1 } else { 0 })
+$processedSystemBreakdown = "Windows: $Anzahl"
+if ($LinuxCheckAttempted) { $processedSystemBreakdown += ", Linux: $LinuxConfiguredHostCount" }
+if ($HACheckAttempted) { $processedSystemBreakdown += ', Home Assistant: 1' }
 
 if ($UpdCount -eq 0) {
   $RepBody += @"
@@ -484,7 +509,7 @@ $RepBody += @"
 <div class="info-box">
     <p><strong>Statistik:</strong></p>
     <ul>
-        <li>Verarbeitete Server: $Anzahl</li>
+        <li>Verarbeitete Systeme: $ProcessedSystemCount ($processedSystemBreakdown)</li>
         <li>Heruntergeladene Updates: $UpdCount</li>
         <li>Verarbeitungsdauer: $ScriptDuration Minuten</li>
     </ul>
@@ -502,7 +527,7 @@ if ($HACheckExecuted) {
 
  $downloadSummaryLines = @(
   "PowerShell Version: $($PSVersionTable.PSVersion)",
-  "Verarbeitete Server: $Anzahl",
+  "Verarbeitete Systeme: $ProcessedSystemCount ($processedSystemBreakdown)",
   "Heruntergeladene Updates: $UpdCount",
   "Dauer: $ScriptDuration Minuten"
 )
