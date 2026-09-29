@@ -414,7 +414,8 @@ function Update-ServerUpdateSettingsDefaults {
     foreach ($settingsPath in $settingsPaths) {
         $temporaryPath = $null
         try {
-            $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            $originalSettingsText = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8
+            $settings = $originalSettingsText | ConvertFrom-Json -ErrorAction Stop
             if ($settings -isnot [System.Management.Automation.PSCustomObject] -or
                 $defaults -isnot [System.Management.Automation.PSCustomObject]) { continue }
 
@@ -441,13 +442,16 @@ function Update-ServerUpdateSettingsDefaults {
             $currentCompactJson = ConvertTo-Json -InputObject $settings -Depth 100 -Compress
             $orderedCompactJson = ConvertTo-Json -InputObject $orderedSettings -Depth 100 -Compress
             $orderChanged = $currentCompactJson -cne $orderedCompactJson
-            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected) { continue }
+            $backupJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $backupSettings -Depth 100)
+            $updatedJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $orderedSettings -Depth 100)
+            $originalFormatComparable = [regex]::Replace($originalSettingsText.Replace("`r`n", "`n"), "`n+\z", '')
+            $updatedFormatComparable = [regex]::Replace($updatedJson.Replace("`r`n", "`n"), "`n+\z", '')
+            $formatChanged = $originalFormatComparable -cne $updatedFormatComparable
+            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected -and -not $formatChanged) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
             $backupPath = '{0}.bak.{1}_{2}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $temporaryPath = '{0}.{1}.tmp' -f $settingsPath, [guid]::NewGuid().ToString('N')
-            $backupJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $backupSettings -Depth 100)
-            $updatedJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $orderedSettings -Depth 100)
             [System.IO.File]::WriteAllText($backupPath, $backupJson, ([System.Text.UTF8Encoding]::new($false)))
             [System.IO.File]::WriteAllText($temporaryPath, $updatedJson, ([System.Text.UTF8Encoding]::new($false)))
             # Die geschützte Sicherung wurde bereits angelegt. Der atomare
@@ -471,7 +475,11 @@ function Update-ServerUpdateSettingsDefaults {
             if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
                 throw 'Einstellungsdatei oder Sicherung fehlt nach dem atomaren Austausch.'
             }
-            Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt, {1} veraltete Einstellung(en) entfernt und {2} Legacy-Einstellung(en) konvertiert; Sicherung: {3}" -f $addedCount, $removedCount, $legacyMigrationCount, $backupPath) -ForegroundColor Cyan
+            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected) {
+                Write-Host "Einrückung der Settings vereinheitlicht; Sicherung: $backupPath" -ForegroundColor Cyan
+            } else {
+                Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt, {1} veraltete Einstellung(en) entfernt und {2} Legacy-Einstellung(en) konvertiert; Sicherung: {3}" -f $addedCount, $removedCount, $legacyMigrationCount, $backupPath) -ForegroundColor Cyan
+            }
         }
         catch {
             Write-Warning "Standardwerte konnten in '$([IO.Path]::GetFileName($settingsPath))' nicht ergänzt werden. Vorhandene Einstellungen bleiben erhalten. Ursache: $($_.Exception.Message)"
