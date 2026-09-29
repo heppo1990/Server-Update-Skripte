@@ -1368,6 +1368,21 @@ catch {
                             $packageArguments += @('--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
                             $packageActionOutput = & $wingetPath @packageArguments 2>&1 | Out-String
                             $packageExitCode = $LASTEXITCODE
+                            # WinGet kann in seiner lokalen Quelle noch auf einen
+                            # bereits entfernten Manifest-Hash zeigen. In diesem
+                            # Fall aktualisieren wir ausschließlich die winget-Quelle
+                            # und wiederholen das Paket einmal, statt einen globalen
+                            # Quellenreset auszulösen.
+                            if ($packageActionOutput -match '(?i)(0x80190194|GetUpstreamFile failed on source: https://cdn\.winget\.microsoft\.com/cache)') {
+                                $sourceUpdateOutput = & $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String
+                                $sourceUpdateExitCode = $LASTEXITCODE
+                                $packageActionOutput += "`nGezieltes Aktualisieren der WinGet-Quelle nach HTTP-404 (ExitCode $sourceUpdateExitCode):`n$($sourceUpdateOutput.Trim())"
+                                if ($sourceUpdateExitCode -eq 0) {
+                                    $retryOutput = & $wingetPath @packageArguments 2>&1 | Out-String
+                                    $packageExitCode = $LASTEXITCODE
+                                    $packageActionOutput += "`nErneuter Paketversuch nach Quellenaktualisierung:`n$($retryOutput.Trim())"
+                                }
+                            }
                             $noInstalledPackage = $packageActionOutput -match '(?i)(kein installiertes Paket gefunden|no installed package found)'
                             if ($noInstalledPackage) {
                                 # Manche WinGet-Versionen zeigen ein Upgrade in der
