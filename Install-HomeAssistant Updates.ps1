@@ -132,9 +132,7 @@ function Write-HostLog {
     } catch { }
 
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    if ($Level -in @('Warning', 'Error') -or (Test-WindowsUpdateConsoleMessage -Message $Message)) {
-        Write-Host $Message -ForegroundColor $fgColor
-    }
+    Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $fgColor
     if ($script:WriteExecutionLog) {
         Add-Content -LiteralPath $LogFile -Value $Message -Encoding utf8
     }

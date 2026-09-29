@@ -26,6 +26,65 @@ function Get-WindowsUpdateConsoleColor {
     return $null
 }
 
+function Format-WindowsUpdateConsoleError {
+    param([AllowEmptyString()][string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($Message)) { return $Message }
+    if ($Message -notmatch '(?i)^\s*(WARNUNG|WARNING|FEHLER\b|ERROR\b|\[WARN\]|\[ERROR\])|^\s*Fehler bei\b|fehlgeschlagen|konnte nicht|UnableToDownload|Access is denied|Zugriff verweigert|Exception|Fehler beim') { return $Message }
+
+    $target = $null
+    if ($Message -match "(?i)\b(?:auf|für|bei Server|von Server)\s+'?(?<Target>[A-Za-z0-9_.-]+)") {
+        $target = $Matches.Target.TrimEnd("'", '!', ':', '.')
+    }
+
+    $operation = $null
+    if ($Message -match '(?i)\b(?<Operation>WinGet|Winget|Chocolatey|PSWindowsUpdate|Paketmanager|SYSTEM-Update-Suche|Update-Suche|Cache-Bereinigung|Nachinstallationsaufgabe|Linux-Check|Home-Assistant-Check)(?:-Prüfung|-Aktualisierung|-Update)?') {
+        $operation = $Matches.Operation
+        if ($operation -ieq 'Winget') { $operation = 'WinGet' }
+    }
+
+    $prefix = if ($Message -match '(?i)WARNUNG|WARNING') { 'WARNUNG' } else { 'FEHLER' }
+    if ($operation -and $target) { return "$prefix`: $operation auf $target fehlgeschlagen; Details im Log." }
+    if ($target) { return "$prefix`: Fehler auf $target; Details im Log." }
+    if ($operation) { return "$prefix`: $operation fehlgeschlagen; Details im Log." }
+    return "$prefix`: Fehler aufgetreten; Details im Log."
+}
+
+function Write-WindowsUpdateConsoleLine {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message,
+        [string]$ForegroundColor,
+        [switch]$IsDebug,
+        [switch]$AlreadyFiltered
+    )
+
+    $wasTableActive = $script:WindowsUpdateConsoleTableActive
+    $wasPackageRowsActive = $script:WindowsUpdateConsolePackageRowsActive
+    $show = $AlreadyFiltered -or (Test-WindowsUpdateConsoleMessage -Message $Message -IsDebug:$IsDebug)
+    if (-not $show) { return }
+
+    $isTableLine = $Message -match '^\s*ComputerName\s+Status\s+KB\b|^\s*-{3,}(?:\s+-{2,})+|^\s*\S+\s+[A-Za-z-]{7}\s+(?:KB\d+)?(?:\s+\S.*)?$'
+    $isPackageRow = $Message -match '^\s{2,}\S+\s*:'
+    if (-not [string]::IsNullOrWhiteSpace($Message) -and (($wasTableActive -and -not $script:WindowsUpdateConsoleTableActive -and -not $isTableLine) -or ($wasPackageRowsActive -and -not $script:WindowsUpdateConsolePackageRowsActive -and -not $isPackageRow))) {
+        Write-Host ''
+    }
+
+    $displayMessage = if ($IsDebug) { $Message } else { Format-WindowsUpdateConsoleError -Message $Message }
+    if ([string]::IsNullOrWhiteSpace($displayMessage)) {
+        Write-Host ''
+    } elseif ($ForegroundColor) {
+        Write-Host $displayMessage -ForegroundColor $ForegroundColor
+    } else {
+        $color = if ($IsDebug) { 'Cyan' } else { Get-WindowsUpdateConsoleColor -Message $displayMessage }
+        if ($color) { Write-Host $displayMessage -ForegroundColor $color } else { Write-Host $displayMessage }
+    }
+
+    if ($Message -match '^\s*Ergebnis (der (Update-Suche|Installation)|des Downloads)\s*:' -or
+        $Message -match '(?i)(Paketupdates? verfügbar|Paketupdate\(s\) (erkannt und verarbeitet|verfügbar)|\d+ Paketupdates installiert)' -and $Message -notmatch '(?i)keine Paketupdates') {
+        Write-Host ''
+    }
+}
+
 function Test-WindowsUpdateConsoleMessage {
     param(
         [AllowEmptyString()][string]$Message,
@@ -34,12 +93,10 @@ function Test-WindowsUpdateConsoleMessage {
 
     if ($IsDebug) { return $true }
     if ([string]::IsNullOrWhiteSpace($Message)) {
-        $script:WindowsUpdateConsoleTableActive = $false
-        $script:WindowsUpdateConsolePackageRowsActive = $false
         return $true
     }
 
-    if ($Message -match '(?i)^\s*(Keine Windows-Updates installiert|Kein automatischer Neustart|Kein Neustartstatus|Get-WURebootStatus auf|Keine zurückgestellten Updates|Zurückgestellte Updates auf .* verfügbar:|.*keine Paketupdates verfügbar\.)') { return $false }
+    if ($Message -match '(?i)^\s*(Keine Windows-Updates installiert|Kein automatischer Neustart|Kein Neustartstatus|Get-WURebootStatus auf|Keine zurückgestellten Updates|Zurückgestellte Updates auf .* verfügbar:)') { return $false }
 
     if ($script:WindowsUpdateConsoleSummaryActive) {
         if ($Message -match '^\s*═+\s*$') {
@@ -71,6 +128,7 @@ function Test-WindowsUpdateConsoleMessage {
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:') { return $true }
     if ($Message -match '(?i)^\s*(Starte (Update-(Check|Download|Installation)|Windows-Updates) auf|Verarbeite (Windows|AD|Hypervisor)|Gesamtliste nach Zusammenführung|Check abgeschlossen\.|Download abgeschlossen\.|Installation abgeschlossen\.|E-Mail erfolgreich versendet|Mailkonfigurationstest erfolgreich)') { return $true }
     if ($Message -match '(?i)^\s*(Zurückgestellte Kategorien:|Zurückgestellte KBs:|Nachinstallation aktiviert$)') { return $true }
+    if ($Message -match '(?i)keine Paketupdates verfügbar\.') { return $true }
     if ($Message -match '(?i)(Paketupdates? verfügbar|Paketupdate\(s\) (erkannt und verarbeitet|verfügbar)|\d+ Paketupdates installiert)') {
         $script:WindowsUpdateConsolePackageRowsActive = $Message -notmatch '(?i)Keine Paketupdates'
         return $true
@@ -1261,7 +1319,7 @@ exit $LASTEXITCODE
             if ($serverCaption -match 'Windows Server (2019|2022)') {
                 $wingetHealth = Test-WingetExecutable -Path $wingetPath
                 if (-not $wingetHealth.Works) {
-                    $wingetBootstrapMessage = "WinGet auf $serverCaption fehlt oder ist nicht funktionsfähig ($($wingetHealth.Output)); starte Reparatur."
+                    $wingetBootstrapMessage = "WinGet auf $env:COMPUTERNAME ($serverCaption) fehlt oder ist nicht funktionsfähig ($($wingetHealth.Output)); starte Reparatur."
                     $installerPath = Find-WingetInstallScript
                     $temporaryInstallerPath = $null
                     try {
@@ -1640,18 +1698,14 @@ function Write-WindowsUpdateLog {
 
     if ($IsDebug -and -not $DebugEnabled) { return }
     $prefix = if ($IsDebug) { '[DEBUG] ' } else { '' }
-    $showInConsole = Test-WindowsUpdateConsoleMessage -Message $Message -IsDebug:$IsDebug
-    $consoleColor = $null
-    if ($showInConsole -and $Host.Name -eq 'ConsoleHost') {
+    if ($Host.Name -eq 'ConsoleHost') {
         try {
             if (-not [Console]::IsOutputRedirected) {
                 $consoleColor = if ($IsDebug) { 'Cyan' } else { Get-WindowsUpdateConsoleColor -Message $Message }
-            }
+            } else { $consoleColor = $null }
         } catch { $consoleColor = $null }
-    }
-    if ($showInConsole) {
-        if ($consoleColor) { Write-Host "$prefix$Message" -ForegroundColor $consoleColor } else { Write-Host "$prefix$Message" }
-    }
+    } else { $consoleColor = $null }
+    Write-WindowsUpdateConsoleLine -Message "$prefix$Message" -ForegroundColor $consoleColor -IsDebug:$IsDebug
     if (-not $WriteLogFile) { return }
 
     $logDirectory = Split-Path -Path $LogFile -Parent
@@ -1762,4 +1816,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-PSWindowsUpdateModule
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-PSWindowsUpdateModule

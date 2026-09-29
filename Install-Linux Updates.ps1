@@ -74,9 +74,7 @@ function Write-LinuxLog {
     param([Parameter(Mandatory)][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info')
     $color = @{ Info='White'; Success='Green'; Warning='Yellow'; Error='Red' }[$Level]
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    if ($Level -in @('Warning', 'Error') -or (Test-WindowsUpdateConsoleMessage -Message $Message)) {
-        Write-Host $Message -ForegroundColor $color
-    }
+    Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color
     if ($script:WriteExecutionLog) {
         [IO.File]::AppendAllText($LogFile, $Message + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
     }

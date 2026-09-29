@@ -98,7 +98,7 @@ function Write-DeployLog {
             else { 'Gray' }
         }
     }
-    Write-Host $Message -ForegroundColor $color
+    Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color -AlreadyFiltered
 }
 
 $Settings = Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName $ScriptName
