@@ -203,41 +203,63 @@ function Convert-ServerUpdateJsonToDefaultOrder {
 
 function Format-ServerUpdateJsonArrays {
     param([Parameter(Mandatory)][string]$Json)
-    $pattern = '(?m)^(?<indent>[ \t]*)(?<property>"[^"\r\n]+"\s*:\s*)\[(?<items>[^\[\]\r\n]*)\](?<comma>\s*,?)$'
-    $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
-        param($match)
-        $indent = $match.Groups['indent'].Value
-        $property = $match.Groups['property'].Value
-        $itemsText = $match.Groups['items'].Value.Trim()
-        $comma = $match.Groups['comma'].Value.Trim()
-        if ([string]::IsNullOrWhiteSpace($itemsText)) {
-            return $indent + $property + '[' + [Environment]::NewLine + $indent + ']' + $comma
+    # ConvertTo-Json formatiert je nach PowerShell-Version mit anderen
+    # Leerzeichen. Für migrierte Dateien wird deshalb das JSON selbst neu
+    # eingerückt: ein Tab je Verschachtelungsebene wie in default_settings.json.
+    # Zeichen innerhalb von JSON-Strings (auch Leerzeichen und Escapes) bleiben unverändert.
+    $builder = [System.Text.StringBuilder]::new()
+    $depth = 0
+    $insideString = $false
+    $escaped = $false
+    $needsIndent = $false
+    $newline = [Environment]::NewLine
+
+    for ($index = 0; $index -lt $Json.Length; $index++) {
+        $character = $Json[$index]
+        $indentWasWritten = $false
+        if ($insideString) {
+            [void]$builder.Append($character)
+            if ($escaped) { $escaped = $false }
+            elseif ($character -eq '\') { $escaped = $true }
+            elseif ($character -eq '"') { $insideString = $false }
+            continue
         }
-        $items = @()
-        $itemStart = 0
-        $insideString = $false
-        $escaped = $false
-        for ($characterIndex = 0; $characterIndex -lt $itemsText.Length; $characterIndex++) {
-            $character = $itemsText[$characterIndex]
-            if ($escaped) { $escaped = $false; continue }
-            if ($insideString -and $character -eq '\') { $escaped = $true; continue }
-            if ($character -eq '"') { $insideString = -not $insideString; continue }
-            if ($character -eq ',' -and -not $insideString) {
-                $items += $itemsText.Substring($itemStart, $characterIndex - $itemStart).Trim()
-                $itemStart = $characterIndex + 1
-            }
+
+        if ([char]::IsWhiteSpace($character)) { continue }
+        if ($needsIndent) {
+            $indentDepth = if ($character -eq ']' -or $character -eq '}') { [Math]::Max(0, $depth - 1) } else { $depth }
+            for ($tab = 0; $tab -lt $indentDepth; $tab++) { [void]$builder.Append("`t") }
+            $needsIndent = $false
+            $indentWasWritten = $true
         }
-        $items += $itemsText.Substring($itemStart).Trim()
-        $childIndent = $indent + '  '
-        $formattedItems = @(
-            for ($index = 0; $index -lt $items.Count; $index++) {
-                $itemComma = if ($index -lt ($items.Count - 1)) { ',' } else { '' }
-                $childIndent + $items[$index] + $itemComma
+
+        switch ([string]$character) {
+            '"' { $insideString = $true; [void]$builder.Append($character) }
+            '{' { [void]$builder.Append($character); $depth++; [void]$builder.Append($newline); $needsIndent = $true }
+            '[' { [void]$builder.Append($character); $depth++; [void]$builder.Append($newline); $needsIndent = $true }
+            '}' {
+                if (-not $indentWasWritten) {
+                    [void]$builder.Append($newline)
+                    for ($tab = 0; $tab -lt [Math]::Max(0, $depth - 1); $tab++) { [void]$builder.Append("`t") }
+                }
+                $depth = [Math]::Max(0, $depth - 1)
+                [void]$builder.Append($character)
             }
-        )
-        return $indent + $property + '[' + [Environment]::NewLine + ($formattedItems -join [Environment]::NewLine) + [Environment]::NewLine + $indent + ']' + $comma
+            ']' {
+                if (-not $indentWasWritten) {
+                    [void]$builder.Append($newline)
+                    for ($tab = 0; $tab -lt [Math]::Max(0, $depth - 1); $tab++) { [void]$builder.Append("`t") }
+                }
+                $depth = [Math]::Max(0, $depth - 1)
+                [void]$builder.Append($character)
+            }
+            ',' { [void]$builder.Append(','); [void]$builder.Append($newline); $needsIndent = $true }
+            ':' { [void]$builder.Append(': ') }
+            default { [void]$builder.Append($character) }
+        }
     }
-    return [regex]::Replace($Json, $pattern, $evaluator)
+    [void]$builder.Append($newline)
+    return $builder.ToString()
 }
 function Remove-ServerUpdateObsoleteJsonProperties {
     param([Parameter(Mandatory)][AllowNull()][object]$Value, [int]$RemovedCount = 0)
