@@ -1393,6 +1393,66 @@ exit $LASTEXITCODE
             }
         }
 
+        function Test-WingetModuleApi {
+            param([switch]$FreshPowerShell)
+
+            $probeScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+    Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+    $null = @(Get-WinGetPackage -Count 1 -ErrorAction Stop)
+    [Console]::Out.WriteLine("WinGet-Modulabfrage erfolgreich (Version $([string](Get-WinGetVersion))).")
+    exit 0
+}
+catch {
+    [Console]::Error.WriteLine($_.Exception.ToString())
+    exit 1
+}
+'@
+            try {
+                if ($FreshPowerShell) {
+                    $shellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                    if (-not (Test-Path -LiteralPath $shellPath -PathType Leaf)) {
+                        throw 'Windows PowerShell 5.1 wurde für die frische WinGet-Prüfung nicht gefunden.'
+                    }
+                    $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
+                    $output = (& $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedProbe 2>&1 | Out-String -Width 300).Trim()
+                    $exitCode = $LASTEXITCODE
+                }
+                else {
+                    $ErrorActionPreference = 'Stop'
+                    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+                    Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+                    $null = @(Get-WinGetPackage -Count 1 -ErrorAction Stop)
+                    $output = "WinGet-Modulabfrage erfolgreich (Version $([string](Get-WinGetVersion)))."
+                    $exitCode = 0
+                }
+                $works = $exitCode -eq 0
+                $diagnostic = [string]$output
+            }
+            catch {
+                $works = $false
+                $diagnostic = $_.Exception.ToString()
+            }
+
+            $summary = if ($works) {
+                ([string]$diagnostic -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1).Trim()
+            }
+            else {
+                ([string]$diagnostic -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1).Trim()
+            }
+            if ([string]::IsNullOrWhiteSpace($summary)) { $summary = 'WinGet-Modulabfrage fehlgeschlagen.' }
+            if ($summary.Length -gt 200) { $summary = $summary.Substring(0, 197) + '...' }
+            $rpcFailure = -not $works -and $diagnostic -match '(?i)(0x800706ba|-2147023174|Failed to create instance|RPC-Server nicht verfügbar|RPC server is unavailable)'
+            return [PSCustomObject]@{
+                Works = $works
+                RepairRequired = $rpcFailure
+                Output = $summary
+                DiagnosticOutput = $diagnostic
+            }
+        }
+
         function Test-WingetSourceFailureLine {
             param([string]$Line)
             return $Line -match '(?i)(Fehler beim Durchsuchen der Quelle|Fehler beim Versuch, die Quelle zu aktualisieren|An error occurred while searching the source|Failed when searching (?:the )?source|Failed in attempting to update the source)'
@@ -1565,8 +1625,12 @@ exit $LASTEXITCODE
             try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
             if ($serverCaption -match 'Windows Server (2019|2022)') {
                 $wingetHealth = Test-WingetExecutable -Path $wingetPath
-                if (-not $wingetHealth.Works) {
-                    $wingetBootstrapMessage = "WinGet auf $env:COMPUTERNAME ($serverCaption) fehlt oder ist nicht funktionsfähig ($($wingetHealth.Output)); starte Reparatur."
+                $wingetModuleHealth = Test-WingetModuleApi
+                if (-not $wingetHealth.Works -or $wingetModuleHealth.RepairRequired) {
+                    $healthProblems = @()
+                    if (-not $wingetHealth.Works) { $healthProblems += "winget.exe: $($wingetHealth.Output)" }
+                    if ($wingetModuleHealth.RepairRequired) { $healthProblems += "WinGet-Modul: $($wingetModuleHealth.Output)" }
+                    $wingetBootstrapMessage = "WinGet auf $env:COMPUTERNAME ($serverCaption) ist nicht funktionsfähig ($($healthProblems -join '; ')); starte Reparatur."
                     try {
                         Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
                         $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
@@ -1576,6 +1640,8 @@ exit $LASTEXITCODE
                         $wingetPath = Resolve-WingetExecutable
                         $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
                         if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }
+                        $wingetModuleHealth = Test-WingetModuleApi -FreshPowerShell
+                        if (-not $wingetModuleHealth.Works) { throw "WinGet-Modulabfrage ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetModuleHealth.Output)" }
                         $wingetBootstrapMessage += " Reparatur erfolgreich; $($wingetHealth.Output)"
                     }
                     catch {
