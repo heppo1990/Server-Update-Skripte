@@ -423,6 +423,10 @@ function Update-ServerUpdateSettingsDefaults {
             # Sicherung entsteht anschließend gemeinsam mit der Migration.
             $passwordWasProtected = [bool](& $settingsPasswordProtector -Document $settings)
             $backupSettings = Copy-ServerUpdateJsonValue -Value $settings
+            # Vergleiche das Layout mit einer kanonischen Formatierung desselben
+            # JSON-Objekts. So vermeiden unterschiedliche ConvertTo-Json-Ausgaben
+            # in PS5/PS7 wiederholte Backups bei bereits formatierten Dateien.
+            $originalCanonicalJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $settings -Depth 100)
             # Skriptspezifische Dateien erhalten fehlende Werte aus der effektiven
             # gemeinsamen Konfiguration; ihre bereits gesetzten Werte bleiben maßgeblich.
             $fileDefaults = $defaults
@@ -444,9 +448,9 @@ function Update-ServerUpdateSettingsDefaults {
             $orderChanged = $currentCompactJson -cne $orderedCompactJson
             $backupJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $backupSettings -Depth 100)
             $updatedJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $orderedSettings -Depth 100)
-            $originalFormatComparable = [regex]::Replace($originalSettingsText.Replace("`r`n", "`n"), "`n+\z", '')
-            $updatedFormatComparable = [regex]::Replace($updatedJson.Replace("`r`n", "`n"), "`n+\z", '')
-            $formatChanged = $originalFormatComparable -cne $updatedFormatComparable
+            $originalFormatComparable = [regex]::Replace($originalSettingsText.TrimStart([char]0xFEFF).Replace("`r`n", "`n"), "`n+\z", '')
+            $canonicalFormatComparable = [regex]::Replace($originalCanonicalJson.Replace("`r`n", "`n"), "`n+\z", '')
+            $formatChanged = $originalFormatComparable -cne $canonicalFormatComparable
             if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected -and -not $formatChanged) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
@@ -592,13 +596,14 @@ function Invoke-ServerUpdateScripts {
         }
 
         $requiredFiles = Get-ServerUpdateRequiredFiles -ScriptRoot $scriptRoot -ScriptPath $ScriptPath -RepositoryBlobs $repositoryBlobs -BoundParameters $BoundParameters
+        $isConnectionOnlyRun = $BoundParameters.Contains('ConnectionOnly') -and [bool]$BoundParameters['ConnectionOnly']
 
         $filesToFetch = @($requiredFiles | Where-Object {
             $localPath = Join-Path $scriptRoot $_.Path
             (Get-ServerUpdateGitBlobSha1 -Path $localPath) -ne $_.Sha
         })
         if ($filesToFetch.Count -eq 0) {
-            Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot
+            if (-not $isConnectionOnlyRun) { Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot }
             try {
                 New-Item -Path $cacheDirectory -ItemType Directory -Force | Out-Null
                 [PSCustomObject]@{ ManifestCommit = $manifestCommit; RepositoryBlobs = $repositoryBlobs } |
@@ -665,7 +670,7 @@ function Invoke-ServerUpdateScripts {
                     }
                     Copy-Item -LiteralPath (Join-Path $stageDirectory $relativePath) -Destination $localPath -Force -ErrorAction Stop
                 }
-                Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot
+                if (-not $isConnectionOnlyRun) { Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot }
             }
             catch {
                 foreach ($relativePath in $changedFiles) {

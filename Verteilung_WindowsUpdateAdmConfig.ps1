@@ -723,7 +723,6 @@ function Invoke-ServerDeployment {
                     Write-Host "[$Servername] $nugetFailureText" -ForegroundColor Yellow
                 }
                 if ($showSetupStatus) {
-                    if ($setupStatus -match '^=== ') { Write-DeployLog '' -ConsoleOnly }
                     $setupLevel = if ($setupStatus -match '^(NuGet (ist aktuell|erfolgreich aktualisiert|Provider installiert|vom lokalen Server installiert)|PSWindowsUpdate (ist aktuell|erfolgreich aktualisiert|erfolgreich installiert|bereit;)|Loopback-Verbindungstest erfolgreich|Setup erfolgreich abgeschlossen!)') { 'Success' } else { 'Info' }
                     Write-DeployLog "[$Servername] Setup: $setupStatus" -Level $setupLevel -ConsoleOnly
                 }
