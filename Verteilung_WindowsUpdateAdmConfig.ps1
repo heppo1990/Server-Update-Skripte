@@ -715,16 +715,12 @@ function Invoke-ServerDeployment {
             $entryText = if ($entry -is [System.Management.Automation.InformationRecord]) { [string]$entry.MessageData } else { [string]$entry }
             Write-DeployLog $entryText -LogOnly
             if ($entryText -match '^\[[^]]+\]\s+\[(?<Level>INFO|UPDATE|WARN|SUCCESS|ERROR)\]\s+(?<Status>.*)$') {
-                $setupLevel = $Matches.Level
                 $setupStatus = $Matches.Status
-                if ($setupLevel -ne 'INFO' -or $setupStatus -match '^=== .+ ===$') {
-                    $displayLevel = switch ($setupLevel) {
-                        'WARN' { 'Warning' }
-                        'ERROR' { 'Error' }
-                        'SUCCESS' { 'Success' }
-                        default { 'Info' }
-                    }
-                    Write-DeployLog "[$Servername] Setup: $setupStatus" -Level $displayLevel -ConsoleOnly
+                $showSetupStatus = $setupStatus -match '^(=== (NuGet Provider Check|PSWindowsUpdate Installation/Update|Dual PowerShell Support \(PS5 \+ PS7\)|PS-Remoting Konfiguration|JEA Role Capability Setup|WinRM Endpunkt Registrierung|Finaler Verbindungstest) ===|NuGet (Provider installiert|vom lokalen Server installiert)|PSWindowsUpdate (ist aktuell|erfolgreich aktualisiert|erfolgreich installiert|bereit;)|PowerShell-7-Remoting aktiviert|WinRM neu gestartet|Configuration über Windows PowerShell 5\.1 registriert|Loopback-Verbindungstest erfolgreich|Setup erfolgreich abgeschlossen!)'
+                if ($showSetupStatus) {
+                    if ($setupStatus -match '^=== ') { Write-DeployLog '' -ConsoleOnly }
+                    $setupLevel = if ($setupStatus -match '^(NuGet Provider installiert|NuGet vom lokalen Server installiert|PSWindowsUpdate (ist aktuell|erfolgreich aktualisiert|erfolgreich installiert|bereit;)|Loopback-Verbindungstest erfolgreich|Setup erfolgreich abgeschlossen!)') { 'Success' } else { 'Info' }
+                    Write-DeployLog "[$Servername] Setup: $setupStatus" -Level $setupLevel -ConsoleOnly
                 }
             }
         }
