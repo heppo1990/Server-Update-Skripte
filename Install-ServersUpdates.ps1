@@ -1341,7 +1341,7 @@ if (-not $IsWindowsOnlyRun) {
 }
 
 if ($IsWindowsOnlyRun) {
-  Write-ScriptLog "Eingeschränkter Windows-Testlauf: Linux-Updates werden übersprungen."
+  if ($LinuxConfigured) { Write-ScriptLog "Eingeschränkter Windows-Testlauf: Linux-Updates werden übersprungen." }
 } elseif ($LinuxConfigured -and (Test-Path $LinuxUpdateScript)) {
   $LinuxScriptExecuted = $true
   Write-ScriptLog ''
@@ -1401,7 +1401,7 @@ $HAUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Install-HomeAssistan
 $HAStatsFile = Join-Path $PSScriptRoot "ha_update_stats.json"
 
 if ($IsWindowsOnlyRun) {
-  Write-ScriptLog "Eingeschränkter Windows-Testlauf: Home-Assistant-Updates werden übersprungen."
+  if ($HAConfigured) { Write-ScriptLog "Eingeschränkter Windows-Testlauf: Home-Assistant-Updates werden übersprungen." }
 } elseif ($HAConfigured -and (Test-Path $HAUpdateScript)) {
   $HAScriptExecuted = $true
   Write-ScriptLog ''

@@ -179,7 +179,8 @@ if ($includeOptionalSystems) {
     $targetSummary = if ($targetCounts.Count -gt 0) { $targetCounts -join ', ' } else { 'keine' }
     Write-DeployLog "Ziele: $targetSummary; Gesamt $configuredSystemCount"
 } else {
-    Write-DeployLog "Ziele: Windows $($Serverlist.Count) (Linux und Home Assistant übersprungen)"
+    $targetSummary = if ($Serverlist.Count -gt 0) { "Windows $($Serverlist.Count)" } else { 'keine' }
+    Write-DeployLog "Ziele: $targetSummary; Gesamt $($Serverlist.Count)"
 }
 
 # Das Client-Zertifikat wird nur benötigt, wenn mindestens ein Nicht-AD-Gerät

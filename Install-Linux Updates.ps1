@@ -437,7 +437,6 @@ $hostEntries = @(
     }
 )
 $hostStatus = @(); $updateDetails = @(); $totalUpdatesInstalled = 0; $vmRebootsScheduled = 0
-if (@($hostEntries).Count -eq 0 -and -not $script:QuietMode) { Write-Host 'Keine Linux-Hosts konfiguriert – Linux-Updates werden übersprungen.' -ForegroundColor Yellow }
 foreach ($entry in $hostEntries) {
     $properties = $entry.PSObject.Properties
     $remoteHost = if ($properties['Host']) { [string]$properties['Host'].Value } elseif ($properties['Name']) { [string]$properties['Name'].Value } else { '' }
