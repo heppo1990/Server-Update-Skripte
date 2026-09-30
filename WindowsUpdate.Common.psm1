@@ -148,6 +148,98 @@ function Write-PSWindowsUpdateModuleLog {
     if ($Level -eq 'WARN') { Write-Warning $Message } else { Write-Verbose $Message }
 }
 
+function Update-PS7PackageManagementModule {
+    <# Prüft PackageManagement in PowerShell 7; aus PS5 wird dafür ein neuer pwsh-Prozess gestartet. #>
+    param([switch]$Force, [scriptblock]$WriteLog)
+
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        $pwsh = Get-Command -Name pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $pwsh) { return $true }
+
+        $updaterDefinition = (Get-Command -Name Update-PS7PackageManagementModule -CommandType Function).Definition
+        $forceArgument = if ($Force) { '-Force' } else { '' }
+        $childScript = @"
+function Update-PS7PackageManagementModule {
+$updaterDefinition
+}
+`$writeLog = { param(`$Message, `$Level) Write-Output ("__PMLOG__`$Level`t`$Message") }
+`$null = Update-PS7PackageManagementModule -WriteLog `$writeLog $forceArgument
+"@
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+        $childOutput = @(& $pwsh.Source -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1 | ForEach-Object { [string]$_ })
+        $childExitCode = $LASTEXITCODE
+        $unparsedOutput = @()
+        foreach ($line in $childOutput) {
+            if ($line -match '^__PMLOG__(INFO|WARN|SUCCESS|UPDATE)\t(.*)$') {
+                if ($WriteLog) { & $WriteLog $Matches[2] $Matches[1] }
+                continue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($line)) { $unparsedOutput += $line.Trim() }
+        }
+        if ($childExitCode -ne 0) {
+            $detail = ($unparsedOutput -join ' ' -replace '\s+', ' ').Trim()
+            if ($detail.Length -gt 400) { $detail = $detail.Substring(0, 397) + '...' }
+            $message = 'PackageManagement-Prüfung in PowerShell 7 fehlgeschlagen; vorhandener Stand bleibt aktiv.'
+            if ($detail) { $message += " Ursache: $detail" }
+            if ($WriteLog) { & $WriteLog $message 'WARN' } else { Write-Warning $message }
+        }
+        return $true
+    }
+
+    $installedModule = Get-Module -ListAvailable -Name PackageManagement -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending | Select-Object -First 1
+    try {
+        $galleryModule = Find-Module -Name PackageManagement -Repository PSGallery -ErrorAction Stop
+        $latestVersion = [version]$galleryModule.Version
+    }
+    catch {
+        $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        $currentVersion = if ($installedModule) { [string]$installedModule.Version } else { 'nicht ermittelt' }
+        $message = "PackageManagement-Version für PowerShell 7 konnte nicht geprüft werden (vorhanden: $currentVersion)."
+        if ($detail) { $message += " Ursache: $detail" }
+        if ($WriteLog) { & $WriteLog $message 'WARN' } else { Write-Warning $message }
+        return $true
+    }
+
+    if ($installedModule -and $installedModule.Version -ge $latestVersion -and -not $Force) {
+        if ($WriteLog) { & $WriteLog "PackageManagement für PowerShell 7 ist aktuell (Version $($installedModule.Version))." 'SUCCESS' }
+        return $true
+    }
+
+    $oldVersion = if ($installedModule) { [string]$installedModule.Version } else { 'nicht installiert' }
+    if ($WriteLog) { & $WriteLog "PackageManagement für PowerShell 7 wird aktualisiert: $oldVersion -> $latestVersion." 'UPDATE' }
+    $installSucceeded = $false
+    for ($attempt = 1; $attempt -le 3 -and -not $installSucceeded; $attempt++) {
+        try {
+            Install-Module -Name PackageManagement -Repository PSGallery -RequiredVersion ([string]$latestVersion) `
+                -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop | Out-Null
+            $installSucceeded = $true
+        }
+        catch {
+            $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+            if ($attempt -lt 3) {
+                if ($WriteLog) { & $WriteLog "PackageManagement-Updateversuch $attempt/3 fehlgeschlagen; neuer Versuch in 5 Sekunden. Ursache: $detail" 'WARN' }
+                Start-Sleep -Seconds 5
+            }
+            else {
+                if ($WriteLog) { & $WriteLog "PackageManagement konnte für PowerShell 7 nicht aktualisiert werden; vorhandener Stand bleibt aktiv. Ursache: $detail" 'WARN' }
+            }
+        }
+    }
+    if (-not $installSucceeded) { return $true }
+
+    $verifiedModule = Get-Module -ListAvailable -Name PackageManagement -ErrorAction SilentlyContinue |
+        Where-Object { $_.Version -ge $latestVersion } |
+        Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $verifiedModule) {
+        if ($WriteLog) { & $WriteLog "PackageManagement $latestVersion wurde installiert, ist aber im PowerShell-7-Modulpfad nicht auffindbar." 'WARN' }
+        return $true
+    }
+
+    if ($WriteLog) { & $WriteLog "PackageManagement für PowerShell 7 aktualisiert (Version $($verifiedModule.Version)); wirksam ab dem nächsten PowerShell-7-Prozess." 'SUCCESS' }
+    return $true
+}
+
 function Update-NuGetProvider {
     <# Aktualisiert den NuGet-Provider im gemeinsamen Rechnerpfad auf die neueste Bootstrap-Version. #>
     param([switch]$Force, [scriptblock]$WriteLog)
@@ -253,14 +345,15 @@ function Update-PSWindowsUpdateModule {
             $session = New-PSSession @sessionParameters
             $updateDefinition = (Get-Command -Name Update-PSWindowsUpdateModule -CommandType Function).Definition
             $nugetUpdaterDefinition = (Get-Command -Name Update-NuGetProvider -CommandType Function).Definition
+            $packageManagementUpdaterDefinition = (Get-Command -Name Update-PS7PackageManagementModule -CommandType Function).Definition
             $logDefinition = (Get-Command -Name Write-PSWindowsUpdateModuleLog -CommandType Function).Definition
             $remoteWorker = {
-                param($UpdaterText, $NuGetUpdaterText, $LoggerText, $ForceUpdate)
+                param($UpdaterText, $NuGetUpdaterText, $PackageManagementUpdaterText, $LoggerText, $ForceUpdate)
                 Set-Item -Path Function:\Write-PSWindowsUpdateModuleLog -Value ([scriptblock]::Create($LoggerText))
                 Set-Item -Path Function:\Update-NuGetProvider -Value ([scriptblock]::Create($NuGetUpdaterText))
+                Set-Item -Path Function:\Update-PS7PackageManagementModule -Value ([scriptblock]::Create($PackageManagementUpdaterText))
                 Set-Item -Path Function:\Update-PSWindowsUpdateModule -Value ([scriptblock]::Create($UpdaterText))
                 $remoteLogger = { param($Message, $Level) [pscustomobject]@{ Type = 'ModuleLog'; Message = $Message; Level = $Level } }
-                $null = Update-NuGetProvider -WriteLog $remoteLogger -Force:$ForceUpdate
                 # ArgumentList-Werte können bei älteren Remoting-Endpunkten als
                 # String zurückkommen. Switches deshalb nur als echte Switch-
                 # Parameter über eine Splat-Hashtable weitergeben.
@@ -272,6 +365,12 @@ function Update-PSWindowsUpdateModule {
                     if ([bool]::TryParse($ForceUpdate, [ref]$parsedForce)) { $forceEnabled = $parsedForce }
                 } elseif ($null -ne $ForceUpdate) {
                     $forceEnabled = [bool]$ForceUpdate
+                }
+                $null = Update-NuGetProvider -WriteLog $remoteLogger -Force:$forceEnabled
+                foreach ($entry in @(Update-PS7PackageManagementModule -WriteLog $remoteLogger -Force:$forceEnabled)) {
+                    if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type -eq 'ModuleLog') {
+                        [pscustomobject]@{ Type = 'ModuleLog'; Message = [string]$entry.Message; Level = [string]$entry.Level }
+                    }
                 }
                 if ($ForceUpdate -isnot [bool] -and $null -ne $ForceUpdate) {
                     [pscustomobject]@{ Type = 'ModuleLog'; Message = "Force-Argument remote als $($ForceUpdate.GetType().FullName) empfangen; sicher normalisiert."; Level = 'INFO' }
@@ -287,7 +386,7 @@ function Update-PSWindowsUpdateModule {
                     }
                 }
             }
-            $remoteResults = @(Invoke-Command -Session $session -ScriptBlock $remoteWorker -ArgumentList $updateDefinition, $nugetUpdaterDefinition, $logDefinition, [bool]$Force -ErrorAction Stop)
+            $remoteResults = @(Invoke-Command -Session $session -ScriptBlock $remoteWorker -ArgumentList $updateDefinition, $nugetUpdaterDefinition, $packageManagementUpdaterDefinition, $logDefinition, [bool]$Force -ErrorAction Stop)
             $success = $false
             foreach ($entry in $remoteResults) {
                 if ($entry.Type -eq 'ModuleLog') { Write-PSWindowsUpdateModuleLog $WriteLog "[$ComputerName] $($entry.Message)" $entry.Level }
@@ -309,6 +408,7 @@ function Update-PSWindowsUpdateModule {
 
     try {
         $null = Update-NuGetProvider -WriteLog $WriteLog -Force:$Force
+        $null = Update-PS7PackageManagementModule -WriteLog $WriteLog -Force:$Force
 
         $galleryModule = Find-Module -Name PSWindowsUpdate -Repository PSGallery -ErrorAction Stop
         $galleryVersion = [version]$galleryModule.Version
