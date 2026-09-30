@@ -172,7 +172,12 @@ $LinuxSystemCount = if ($includeOptionalSystems -and $linuxConfigured) { $linuxH
 $HASystemCount = if ($includeOptionalSystems -and $haConfigured) { 1 } else { 0 }
 $configuredSystemCount = $Serverlist.Count + $LinuxSystemCount + $HASystemCount
 if ($includeOptionalSystems) {
-    Write-DeployLog "Ziele: Windows $($Serverlist.Count), Linux $LinuxSystemCount, Home Assistant $HASystemCount; Gesamt $configuredSystemCount"
+    $targetCounts = @()
+    if ($Serverlist.Count -gt 0) { $targetCounts += "Windows $($Serverlist.Count)" }
+    if ($LinuxSystemCount -gt 0) { $targetCounts += "Linux $LinuxSystemCount" }
+    if ($HASystemCount -gt 0) { $targetCounts += "Home Assistant $HASystemCount" }
+    $targetSummary = if ($targetCounts.Count -gt 0) { $targetCounts -join ', ' } else { 'keine' }
+    Write-DeployLog "Ziele: $targetSummary; Gesamt $configuredSystemCount"
 } else {
     Write-DeployLog "Ziele: Windows $($Serverlist.Count) (Linux und Home Assistant übersprungen)"
 }

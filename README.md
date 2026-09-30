@@ -19,7 +19,7 @@ Beim PSWindowsUpdate-Check werden NuGet und PSWindowsUpdate auf dem Verwaltungsr
 - Kundeneinstellungen, Zertifikate und Laufzeitdaten werden nicht aus GitHub überschrieben. Fehlende Standardwerte werden in bestehende Settings ergänzt und vorher gesichert.
 - Linux- und Home-Assistant-Skripte werden nur geladen, wenn sie in den Settings konfiguriert sind.
 - Mailversand lässt sich mit `Check-ServersUpdates.ps1 -TestMail` separat prüfen.
-- Die Verteilung zeigt farbige Einrichtungsschritte, prüft bei Linux und Home Assistant nur SSH-Schlüssel und Verbindung und zählt alle Zielsysteme getrennt und gemeinsam. SSH-Rückfragen bleiben bei Check, Download, Install und Verteilung sichtbar; Details stehen gemäß `WriteLogFile` und `KeepLogFiles` im Log.
+- Die Verteilung zeigt farbige Einrichtungsschritte, prüft bei Linux und Home Assistant nur SSH-Schlüssel und Verbindung und zählt alle Zielsysteme getrennt und gemeinsam. Zielarten mit Anzahl null werden in der Kopfzeile ausgeblendet. SSH-Rückfragen bleiben bei Check, Download, Install und Verteilung sichtbar; Details stehen gemäß `WriteLogFile` und `KeepLogFiles` im Log.
 - Zurückgestellte Windows-Updates und Neustart-Wartungsfenster werden über `UpdateSettings` konfiguriert.
 - Alle Skripte zeigen Ziele, Updates und Aktionen knapp, farbig und mit Leerzeilen getrennt. Installierte Paketmanager melden auch dann ihren Status, wenn keine Updates verfügbar sind; Fehlerdetails stehen im Log.
 
