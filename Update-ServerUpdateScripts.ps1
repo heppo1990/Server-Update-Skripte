@@ -870,26 +870,40 @@ function Resolve-WingetPath {
 
 function Invoke-PowerShellWingetUpdateCheck {
     param([Parameter(Mandatory)][string]$Path, [switch]$FreshPowerShell)
-    $arguments = @('upgrade', '--id', 'Microsoft.PowerShell', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+    $scriptRoot = Split-Path -Parent $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH
+    $commonModulePath = Join-Path $scriptRoot 'WindowsUpdate.Common.psm1'
+    if (-not (Test-Path -LiteralPath $commonModulePath -PathType Leaf)) { throw 'WindowsUpdate.Common.psm1 fehlt; das WinGet-Modul kann nicht verwendet werden.' }
+    $commonModuleLiteral = "'" + $commonModulePath.Replace("'", "''") + "'"
+    $checkSource = @(
+        '$ErrorActionPreference = ''Stop'''
+        '$commonModulePath = __COMMON_MODULE_PATH__'
+        'Import-Module -Name $commonModulePath -Force -ErrorAction Stop'
+        'if (-not (Update-WinGetClientModule)) { throw ''Microsoft.WinGet.Client konnte nicht bereitgestellt werden.'' }'
+        'Import-Module Microsoft.WinGet.Client -ErrorAction Stop'
+        '$updates = @(Get-WinGetPackage -Id ''Microsoft.PowerShell'' -Source winget -MatchOption EqualsCaseInsensitive -ErrorAction Stop | Where-Object { $_.IsUpdateAvailable })'
+        'if ($updates.Count -eq 0) { [pscustomobject]@{ State = ''NoUpdate''; Output = ''Kein PowerShell-7-Update verfügbar.'' } | ConvertTo-Json -Compress; return }'
+        '$version = [string]($updates[0].AvailableVersions | Select-Object -First 1)'
+        '$updateResult = @(Update-WinGetPackage -Id ''Microsoft.PowerShell'' -Source winget -Version $version -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:$false -ErrorAction Stop)'
+        'if ($updateResult.Count -eq 0 -or [string]$updateResult[-1].Status -ne ''Ok'') { throw "Update-WinGetPackage meldete keinen erfolgreichen Abschluss (Status: $([string]$updateResult[-1].Status))." }'
+        '[pscustomobject]@{ State = ''Updated''; Output = "PowerShell 7 wurde auf Version $version aktualisiert." } | ConvertTo-Json -Compress'
+    ) -join "`n"
+    $checkSource = $checkSource.Replace('__COMMON_MODULE_PATH__', $commonModuleLiteral)
     if ($FreshPowerShell) {
-        # Nach einer WinGet-Reparatur die Abfrage in einem neuen PowerShell-Prozess
-        # ausführen, damit dieser die aktualisierte Prozessumgebung einliest.
+        # Nach einer WinGet-Reparatur Modul und WinGet in einem frischen PS5-Prozess laden.
         $shellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-        $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{ Path = $Path; Arguments = $arguments } -Compress)))
-        # Kein Here-String: dieser Code liegt selbst in einem PS5-Here-String.
-        $childSource = @(
-            '$data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''__PAYLOAD__'')) | ConvertFrom-Json'
-            '$wingetArguments = @($data.Arguments)'
-            '& $data.Path @wingetArguments 2>&1'
-            'exit $LASTEXITCODE'
-        ) -join "`n"
-        $childSource = $childSource.Replace('__PAYLOAD__', $payload)
+        $childSource = "try {`n$checkSource`n} catch { [pscustomobject]@{ State = 'Error'; Output = (`$_.Exception.Message -replace '\s+', ' ').Trim() } | ConvertTo-Json -Compress }"
         $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childSource))
-        $output = & $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedChild 2>&1
+        $rawOutput = @(& $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedChild 2>&1)
     } else {
-        $output = & $Path @arguments 2>&1
+        try { $rawOutput = @(& ([scriptblock]::Create($checkSource)) 2>&1) }
+        catch { $rawOutput = @([pscustomobject]@{ State = 'Error'; Output = $_.Exception.Message } | ConvertTo-Json -Compress) }
     }
-    return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    $jsonLine = @($rawOutput | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\s*\{.*"State"\s*:' } | Select-Object -Last 1)
+    if ($jsonLine.Count -eq 0) { return [PSCustomObject]@{ ExitCode = 1; Output = (($rawOutput -join ' ') -replace '\s+', ' ').Trim(); State = 'Error' } }
+    try { $result = $jsonLine[0] | ConvertFrom-Json -ErrorAction Stop }
+    catch { return [PSCustomObject]@{ ExitCode = 1; Output = 'Ungültige Rückgabe von Microsoft.WinGet.Client.'; State = 'Error' } }
+    $exitCode = if ($result.State -eq 'NoUpdate') { -1978335189 } elseif ($result.State -eq 'Updated') { 0 } else { 1 }
+    return [PSCustomObject]@{ ExitCode = $exitCode; Output = [string]$result.Output; State = [string]$result.State }
 }
 
 try {
