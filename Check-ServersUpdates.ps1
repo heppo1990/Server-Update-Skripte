@@ -395,6 +395,10 @@ if (-not $moduleLoaded) {
   exit 1
 }
 
+if ($enableWingetUpdates) {
+  $null = Update-WinGetClientModule -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
+}
+
 $ServerADList = Get-WindowsUpdateTargets -UpdateSettings $UpdateSettings -TargetComputers $TargetComputers -PowerShellMajor $psVersion -WriteLog { param($message) Write-ScriptLog $message }
 
 # HTML-Report initialisieren
@@ -604,6 +608,9 @@ if ($ServerADList -ne $null) {
 
         if ($Servername -ne $env:COMPUTERNAME) {
           $null = Update-PSWindowsUpdateModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
+          if ($enableWingetUpdates) {
+            $null = Update-WinGetClientModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
+          }
         }
 
         # Cache leeren UND DetectNow auslösen VOR dem Update-Check

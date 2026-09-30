@@ -58,7 +58,11 @@ param(
     # Folgeprozess aufgerufen. So darf die JEA-Registrierung WinRM neu starten,
     # ohne die ursprüngliche Einrichtungs-Remotesitzung abzubrechen.
     [Parameter(Mandatory=$false)]
-    [switch]$FinalizeJEA
+    [switch]$FinalizeJEA,
+
+    # Wird von der zentralen Verteilung gesetzt, wenn WinGet-Updates aktiviert sind.
+    [Parameter(Mandatory=$false)]
+    [switch]$InstallWinGetClientModule
 )
 # Dieses Setup wird auf Zielservern nur vorübergehend in %TEMP% ausgeführt.
 # Es lädt dort keine weiteren Repository-Skripte aus GitHub nach.
@@ -107,6 +111,17 @@ try {
     Write-SetupLog "Computer: $env:COMPUTERNAME" "INFO"
     Write-SetupLog "PowerShell Version: $($PSVersionTable.PSVersion)" "INFO"
     Write-SetupLog "TLS-Protokolle: $([Net.ServicePointManager]::SecurityProtocol)" "INFO"
+
+    if ($InstallWinGetClientModule) {
+        Write-SetupLog "=== WinGet-Client-Modul ===" "INFO"
+        $winGetClientReady = Update-WinGetClientModule -WriteLog {
+            param($message, $level)
+            Write-SetupLog $message $level
+        }
+        if (-not $winGetClientReady) {
+            Write-SetupLog "WinGet-Client-Modul konnte nicht aktualisiert werden; WindowsUpdateAdm-Setup wird fortgesetzt." "WARN"
+        }
+    }
     
     if ($ForceUpdate) { Write-SetupLog "Force-Update aktiviert" "UPDATE" }
     

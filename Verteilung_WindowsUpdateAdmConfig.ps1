@@ -103,6 +103,7 @@ function Write-DeployLog {
 
 $Settings = Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName $ScriptName
 $UpdateSettings = $Settings.UpdateSettings
+$enableWingetUpdates = if ($UpdateSettings.PSObject.Properties['EnableWingetUpdates']) { [bool]$UpdateSettings.EnableWingetUpdates } else { $true }
 $script:DeployLogEnabled = if ($UpdateSettings.PSObject.Properties['WriteLogFile']) { [bool]$UpdateSettings.WriteLogFile } else { $true }
 $script:DeployKeepLogFiles = if ($UpdateSettings.PSObject.Properties['KeepLogFiles'] -and [int]$UpdateSettings.KeepLogFiles -ge 0) { [int]$UpdateSettings.KeepLogFiles } else { 5 }
 if ($script:DeployLogEnabled) {
@@ -468,6 +469,7 @@ function Invoke-WinRMDeployment {
         }
 
         $setupParameters = @{}
+        if ($enableWingetUpdates) { $setupParameters.InstallWinGetClientModule = $true }
         if ($DeployType -eq 'Hypervisor' -and -not $usedCertificate) {
             $setupParameters.CertificateMappingCredential = $bootstrapCredential
         } elseif ($DeployType -eq 'Additional' -and -not $usedCertificate) {
@@ -714,6 +716,7 @@ function Invoke-ServerDeployment {
     try {
         Write-DeployLog "[$Servername] Führe lokales Setup aus."
         $localParameters = @{}
+        if ($enableWingetUpdates) { $localParameters.InstallWinGetClientModule = $true }
         # Alle Details protokollieren; wichtige Setup-Phasen live anzeigen,
         # damit längere lokale Einrichtungsschritte erkennbar bleiben.
         & (Join-Path $RootDirectory $PSSCfgSkriptFile) @localParameters *>&1 | ForEach-Object {

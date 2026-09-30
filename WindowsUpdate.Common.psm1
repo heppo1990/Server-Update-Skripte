@@ -513,6 +513,146 @@ function Update-PSWindowsUpdateModule {
     return $true
 }
 
+function Update-WinGetClientModule {
+    <# Installiert/aktualisiert Microsoft.WinGet.Client maschinenweit unter PowerShell 7. #>
+    [CmdletBinding()]
+    param(
+        [scriptblock]$WriteLog,
+        [string]$ComputerName,
+        $AuthInfo
+    )
+
+    $worker = {
+        param([string]$ReleaseApiUrl)
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+        $logs = [System.Collections.Generic.List[object]]::new()
+
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $pwsh = Get-Command -Name pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $pwsh) {
+                $knownPwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+                if (Test-Path -LiteralPath $knownPwsh -PathType Leaf) {
+                    $pwsh = [pscustomobject]@{ Source = $knownPwsh }
+                }
+            }
+
+            if (-not $pwsh) {
+                $logs.Add([pscustomobject]@{ Type = 'Log'; Message = 'PowerShell 7 fehlt; lade das aktuelle stabile Microsoft-MSI.'; Level = 'UPDATE' })
+                $releases = @(Invoke-RestMethod -Uri $ReleaseApiUrl -UseBasicParsing -TimeoutSec 45)
+                $release = $null
+                $asset = $null
+                foreach ($candidateRelease in $releases) {
+                    if ($candidateRelease.prerelease) { continue }
+                    $candidateAsset = @($candidateRelease.assets | Where-Object { $_.name -match '^PowerShell-\d+\.\d+\.\d+-win-x64\.msi$' } | Select-Object -First 1)
+                    if ($candidateAsset.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$candidateAsset[0].browser_download_url)) {
+                        $release = $candidateRelease
+                        $asset = $candidateAsset[0]
+                        break
+                    }
+                }
+                if (-not $release -or -not $asset) {
+                    throw 'Es wurde kein stabiles PowerShell-7-x64-MSI gefunden.'
+                }
+
+                $msiPath = Join-Path (Join-Path $env:WINDIR 'Temp') ('ServerUpdate-PowerShell7-{0}.msi' -f [guid]::NewGuid().ToString('N'))
+                try {
+                    Invoke-WebRequest -Uri $asset.browser_download_url -UseBasicParsing -TimeoutSec 180 -OutFile $msiPath
+                    $signature = Get-AuthenticodeSignature -LiteralPath $msiPath
+                    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+                        throw 'Die Signatur des PowerShell-7-Installationspakets ist ungültig.'
+                    }
+                    $installer = Join-Path $env:WINDIR 'System32\msiexec.exe'
+                    $arguments = @('/i', ('"{0}"' -f $msiPath), '/qn', '/norestart', 'ADD_PATH=1', 'USE_MU=1', 'ENABLE_MU=1', 'ENABLE_PSREMOTING=0')
+                    $install = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+                    if ($install.ExitCode -notin @(0, 3010)) { throw "PowerShell-7-Installation fehlgeschlagen (MSI-Exitcode $($install.ExitCode))." }
+                }
+                finally {
+                    Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
+                }
+
+                $pwshPath = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+                if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) { throw 'PowerShell 7 wurde installiert, aber pwsh.exe ist nicht auffindbar.' }
+                $pwsh = [pscustomobject]@{ Source = $pwshPath }
+                $logs.Add([pscustomobject]@{ Type = 'Log'; Message = "PowerShell 7 installiert ($($release.tag_name)); die aktuelle Windows-PowerShell-Sitzung bleibt unverändert."; Level = 'SUCCESS' })
+            }
+
+            $childScript = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+    $installed = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending | Select-Object -First 1
+    $latest = Find-Module -Name Microsoft.WinGet.Client -Repository PSGallery -ErrorAction Stop
+    $latestVersion = [version]$latest.Version
+    if ($installed -and $installed.Version -ge $latestVersion) {
+        "__WINGETCLIENT__SUCCESS`t$($installed.Version)`taktuell"
+        exit 0
+    }
+    $oldVersion = if ($installed) { [string]$installed.Version } else { 'nicht installiert' }
+    Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -RequiredVersion ([string]$latestVersion) `
+        -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop | Out-Null
+    $verified = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
+        Where-Object { $_.Version -ge $latestVersion } | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $verified) { throw "Microsoft.WinGet.Client $latestVersion ist im maschinenweiten Modulpfad nicht auffindbar." }
+    "__WINGETCLIENT__SUCCESS`t$($verified.Version)`t$oldVersion -> $latestVersion"
+    exit 0
+}
+catch {
+    $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+    "__WINGETCLIENT__ERROR`t$detail"
+    exit 1
+}
+'@
+            $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+            $childOutput = @(& $pwsh.Source -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1 | ForEach-Object { [string]$_ })
+            $childExitCode = $LASTEXITCODE
+            $resultLine = @($childOutput | Where-Object { $_ -match '^__WINGETCLIENT__(SUCCESS|ERROR)\t' } | Select-Object -Last 1)
+            if ($resultLine.Count -gt 0 -and $resultLine[0] -match '^__WINGETCLIENT__SUCCESS\t(?<Version>[^\t]+)\t(?<State>.+)$') {
+                if ($Matches.State -eq 'aktuell') { $logs.Add([pscustomobject]@{ Type = 'Log'; Message = "Microsoft.WinGet.Client ist aktuell (Version $($Matches.Version))."; Level = 'SUCCESS' }) }
+                else { $logs.Add([pscustomobject]@{ Type = 'Log'; Message = "Microsoft.WinGet.Client bereit (Version $($Matches.Version); $($Matches.State))."; Level = 'SUCCESS' }) }
+            }
+            else {
+                $detail = if ($resultLine.Count -gt 0 -and $resultLine[0] -match '^__WINGETCLIENT__ERROR\t(?<Detail>.*)$') { $Matches.Detail } else { ($childOutput -join ' ' -replace '\s+', ' ').Trim() }
+                if ($detail.Length -gt 350) { $detail = $detail.Substring(0, 347) + '...' }
+                throw "Microsoft.WinGet.Client konnte nicht installiert/aktualisiert werden (Exitcode $childExitCode)$(if ($detail) { ": $detail" })."
+            }
+        }
+        catch {
+            $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+            $logs.Add([pscustomobject]@{ Type = 'Log'; Message = "WinGet-Client-Modulpflege fehlgeschlagen: $detail"; Level = 'WARN' })
+        }
+        return @($logs)
+    }
+
+    $releaseApiUrl = 'https://api.github.com/repos/PowerShell/PowerShell/releases?per_page=20'
+    if ([string]::IsNullOrWhiteSpace($ComputerName) -or $ComputerName -ieq $env:COMPUTERNAME -or $ComputerName -ieq 'localhost') {
+        $results = @(& $worker $releaseApiUrl)
+    }
+    else {
+        $session = $null
+        try {
+            $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
+            $session = New-PSSession @sessionParameters
+            $results = @(Invoke-Command -Session $session -ScriptBlock $worker -ArgumentList $releaseApiUrl -ErrorAction Stop)
+        }
+        catch {
+            Write-PSWindowsUpdateModuleLog $WriteLog "WinGet-Client-Modulpflege auf $ComputerName fehlgeschlagen: $($_.Exception.Message)" 'WARN'
+            return $false
+        }
+        finally { if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue } }
+    }
+
+    foreach ($entry in $results) {
+        if ($entry -and $entry.Type -eq 'Log') {
+            $prefix = if ($ComputerName -and $ComputerName -ine $env:COMPUTERNAME) { "[$ComputerName] " } else { '' }
+            Write-PSWindowsUpdateModuleLog $WriteLog ($prefix + [string]$entry.Message) ([string]$entry.Level)
+        }
+    }
+    return -not (@($results | Where-Object { $_.Type -eq 'Log' -and $_.Level -eq 'WARN' }).Count -gt 0)
+}
+
 function Initialize-WindowsUpdateDpapi {
     if ('System.Security.Cryptography.ProtectedData' -as [type]) { return }
     try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
@@ -2028,4 +2168,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule
