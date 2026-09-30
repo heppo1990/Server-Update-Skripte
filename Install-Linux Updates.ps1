@@ -3,6 +3,7 @@ param(
     [switch]$DryRun,
     [switch]$CheckOnly,
     [switch]$ConnectionOnly,
+    [switch]$Quiet,
     [switch]$DeferPhysicalReboots,
     [string]$KeyPath,
     [string]$SSHPath,
@@ -62,6 +63,7 @@ if (-not $PSBoundParameters.ContainsKey('SSHPath')) {
 }
 
 $script:SSHPath = $SSHPath
+$script:QuietMode = $Quiet
 $scpCommand = Get-Command -Name 'scp.exe', 'scp' -ErrorAction SilentlyContinue | Select-Object -First 1
 $script:SCPPath = if ($scpCommand) { $scpCommand.Path } else { Join-Path (Split-Path -Path $script:SSHPath -Parent) 'scp.exe' }
 $script:ConnectTimeoutSeconds = if ([int]$linuxSettings.ConnectTimeoutSeconds -gt 0) { [int]$linuxSettings.ConnectTimeoutSeconds } else { 15 }
@@ -77,7 +79,7 @@ function Write-LinuxLog {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info')
     $color = @{ Info='White'; Success='Green'; Warning='Yellow'; Error='Red' }[$Level]
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color
+    if (-not $script:QuietMode) { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color }
     if ($script:WriteExecutionLog) {
         [IO.File]::AppendAllText($LogFile, $Message + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
     }
@@ -89,7 +91,7 @@ function Invoke-LinuxLogRetention {
     $keepLogFiles = if ($settings.UpdateSettings.PSObject.Properties['KeepLogFiles']) { [int]$settings.UpdateSettings.KeepLogFiles } else { 5 }
     $retention = Invoke-WindowsUpdateFileRetention -Directory $script:LogDirectory -Filter ("{0}_*.log" -f $RemoteHost) -KeepFiles $keepLogFiles
     foreach ($removedFile in @($retention.RemovedFiles)) {
-        Write-Host "Bereinige altes Linux-Log: $removedFile" -ForegroundColor DarkGray
+        if (-not $script:QuietMode) { Write-Host "Bereinige altes Linux-Log: $removedFile" -ForegroundColor DarkGray }
     }
     foreach ($failedFile in @($retention.FailedFiles)) {
         Write-Warning "Linux-Log konnte nicht entfernt werden ($($failedFile.Path)): $($failedFile.Error)"
@@ -194,7 +196,7 @@ function Ensure-LinuxSSHKey {
     if (-not (Test-Path -LiteralPath $KeyPath)) {
         & $keygen.Path -t ed25519 -f $KeyPath -N '' | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "SSH-Schlüssel konnte nicht erstellt werden: $KeyPath" }
-        Write-Host "Neuer ED25519-SSH-Schlüssel erstellt: $KeyPath" -ForegroundColor Green
+        if (-not $script:QuietMode) { Write-Host "Neuer ED25519-SSH-Schlüssel erstellt: $KeyPath" -ForegroundColor Green }
     }
     if (-not (Test-Path -LiteralPath "$KeyPath.pub")) {
         & $keygen.Path -y -f $KeyPath | Set-Content -LiteralPath "$KeyPath.pub" -Encoding utf8
@@ -435,7 +437,7 @@ $hostEntries = @(
     }
 )
 $hostStatus = @(); $updateDetails = @(); $totalUpdatesInstalled = 0; $vmRebootsScheduled = 0
-if (@($hostEntries).Count -eq 0) { Write-Host 'Keine Linux-Hosts konfiguriert – Linux-Updates werden übersprungen.' -ForegroundColor Yellow }
+if (@($hostEntries).Count -eq 0 -and -not $script:QuietMode) { Write-Host 'Keine Linux-Hosts konfiguriert – Linux-Updates werden übersprungen.' -ForegroundColor Yellow }
 foreach ($entry in $hostEntries) {
     $properties = $entry.PSObject.Properties
     $remoteHost = if ($properties['Host']) { [string]$properties['Host'].Value } elseif ($properties['Name']) { [string]$properties['Name'].Value } else { '' }
@@ -485,6 +487,6 @@ $statsFile = Join-Path $PSScriptRoot $(if ($CheckOnly -or $ConnectionOnly) { 'li
 $linuxStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statsFile -Encoding utf8
 $summaryVerb = if ($DryRun) { 'verfügbar' } else { 'installiert' }
 $summaryLabel = if ($CheckOnly) { 'Linux-Check' } else { 'Linux-Zusammenfassung' }
-if ($totalUpdatesInstalled -gt 0 -or $linuxStats.FailedHosts -gt 0) {
+if (-not $script:QuietMode -and ($totalUpdatesInstalled -gt 0 -or $linuxStats.FailedHosts -gt 0)) {
     Write-Host "${summaryLabel}: $($linuxStats.HostsProcessed)/$($linuxStats.TotalHosts) erfolgreich, $totalUpdatesInstalled Update(s) $summaryVerb, $($linuxStats.FailedHosts) Fehler." -ForegroundColor Cyan
 }

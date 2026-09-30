@@ -886,7 +886,9 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
   try {
     Write-ScriptLog ''
     Write-ScriptLog 'Starte Linux-Update-Check...'
-    & $linuxCheckScript -CheckOnly *> $null
+    # SSH-Eingabeaufforderungen müssen sichtbar bleiben; das Kinderskript ist
+    # im Quiet-Modus, damit nur echte SSH-Prompts die Konsole erreichen.
+    & $linuxCheckScript -CheckOnly -Quiet
     if (Test-Path -LiteralPath $linuxCheckStatsPath) {
       $linuxCheckStats = Get-Content -LiteralPath $linuxCheckStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $LinuxCheckExecuted = $true
@@ -931,7 +933,7 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   try {
     Write-ScriptLog ''
     Write-ScriptLog 'Starte Home-Assistant-Update-Check...'
-    & $haCheckScript -CheckOnly *> $null
+    & $haCheckScript -CheckOnly -Quiet
     if (Test-Path -LiteralPath $haCheckStatsPath) {
       $haCheckStats = Get-Content -LiteralPath $haCheckStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $HACheckExecuted = $true

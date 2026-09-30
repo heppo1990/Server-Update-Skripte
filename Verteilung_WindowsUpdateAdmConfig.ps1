@@ -798,9 +798,10 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
         }
         Write-DeployLog "[$($connectionSetup.Name)] Verbindungseinrichtung gestartet."
         try {
-            $connectionOutput = @(& $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -ConnectionOnly *>&1)
+            # Ausgabe nicht abfangen: SSH-Anmeldeprompts kommen über stderr.
+            # -Quiet hält normale Statusmeldungen aus der Konsole fern.
+            & $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -ConnectionOnly -Quiet
             $connectionExitCode = $LASTEXITCODE
-            foreach ($entry in $connectionOutput) { Write-DeployLog ([string]$entry) -LogOnly }
             if (-not (Test-Path -LiteralPath $statsPath -PathType Leaf)) {
                 throw "Das Einrichtungsskript lieferte keine Statusdatei (Exit-Code $connectionExitCode)."
             }

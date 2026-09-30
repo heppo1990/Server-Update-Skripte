@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$CheckOnly,
     [switch]$ConnectionOnly,
+    [switch]$Quiet,
     [switch]$DeferPhysicalReboots,
     [string]$HAHost,
     [string]$User,
@@ -82,6 +83,7 @@ if (-not $PSBoundParameters.ContainsKey('SSHPath')) {
 $script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
     $settings.UpdateSettings.PSObject.Properties['WriteLogFile'] -and
     [bool]$settings.UpdateSettings.WriteLogFile
+$script:QuietMode = $Quiet
 $LogDir = Join-Path $PSScriptRoot "Logs"
 if ($script:WriteExecutionLog -and -not (Test-Path $LogDir)) {
     New-Item -Path $LogDir -ItemType Directory | Out-Null
@@ -135,7 +137,7 @@ function Write-HostLog {
     } catch { }
 
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $fgColor
+    if (-not $script:QuietMode) { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $fgColor }
     if ($script:WriteExecutionLog) {
         Add-Content -LiteralPath $LogFile -Value $Message -Encoding utf8
     }
@@ -231,10 +233,10 @@ if ($script:WriteExecutionLog) {
     $keepLogFiles = if ($settings.UpdateSettings.PSObject.Properties['KeepLogFiles']) { [int]$settings.UpdateSettings.KeepLogFiles } else { 5 }
     $haLogCleanup = Invoke-WindowsUpdateFileRetention -Directory $LogDir -Filter ("{0}_*.log" -f $HAHost) -KeepFiles $keepLogFiles
     if ($haLogCleanup.RemovedFiles.Count -gt 0) {
-        Write-Host "Bereinige $($haLogCleanup.RemovedFiles.Count) alte Home-Assistant-Logdatei(en)." -ForegroundColor DarkGray
+        if (-not $script:QuietMode) { Write-Host "Bereinige $($haLogCleanup.RemovedFiles.Count) alte Home-Assistant-Logdatei(en)." -ForegroundColor DarkGray }
     }
     foreach ($failedFile in $haLogCleanup.FailedFiles) {
-        Write-Host "WARNUNG: Alte Home-Assistant-Logdatei konnte nicht entfernt werden: $($failedFile.Path)" -ForegroundColor Yellow
+        if (-not $script:QuietMode) { Write-Host "WARNUNG: Alte Home-Assistant-Logdatei konnte nicht entfernt werden: $($failedFile.Path)" -ForegroundColor Yellow }
     }
 }
 
@@ -305,7 +307,8 @@ function Ensure-SSHKeyOnHA {
                  "touch ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys; " +
                  "if ! grep -qxF '" + $pubKeyLine + "' ~/.ssh/authorized_keys 2>/dev/null; then printf '%s`n' '" + $pubKeyLine + "' >> ~/.ssh/authorized_keys; fi"
 
-    & $SSHPath -p $Port -o StrictHostKeyChecking=accept-new $target $remoteCmd
+    # Den SSH-Prompt auf stderr am Terminal belassen; nur Remote-stdout verwerfen.
+    & $SSHPath -p $Port -o StrictHostKeyChecking=accept-new $target $remoteCmd 1>$null
 
     $test2 = & $SSHPath -i $KeyPath -p $Port -o BatchMode=yes $target "echo OK" 2>$null
 
@@ -528,7 +531,7 @@ if ($CheckOnly) {
         $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; AvailableUpdates=0; UpdateDetails=@(); Error=$_.Exception.Message; LogFile=$LogFile }
     }
     $checkStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
-    Write-Host "Home-Assistant-Check: $($checkStats.AvailableUpdates) Update(s) verfügbar." -ForegroundColor Cyan
+    if (-not $script:QuietMode) { Write-Host "Home-Assistant-Check: $($checkStats.AvailableUpdates) Update(s) verfügbar." -ForegroundColor Cyan }
     exit $(if ($checkStats.Success) { 0 } else { 1 })
 }
 
