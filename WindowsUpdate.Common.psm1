@@ -154,10 +154,24 @@ function Update-NuGetProvider {
 
     $minimumVersion = [version]'2.8.5.201'
     $providerRoot = Join-Path $env:ProgramFiles 'PackageManagement\ProviderAssemblies\nuget'
-    $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+    $availableProviders = @(Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)
+    $installedProvider = $availableProviders |
         Where-Object { $_.ProviderPath -like "$providerRoot\*" } |
         Sort-Object Version -Descending | Select-Object -First 1
     $latestProvider = $null
+
+    # PowerShell 7 enthält NuGet im eigenen PackageManagement-Modul; der
+    # Bootstrap-Feed stellt diesen integrierten Provider nicht als Update bereit.
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $builtInProviderRoot = Join-Path $PSHOME 'Modules\PackageManagement\coreclr\'
+        $builtInProvider = $availableProviders |
+            Where-Object { $_.ProviderPath -like "$builtInProviderRoot*" } |
+            Sort-Object Version -Descending | Select-Object -First 1
+        if ($builtInProvider -and $builtInProvider.Version -ge $minimumVersion) {
+            if ($WriteLog) { & $WriteLog "NuGet ist in PowerShell $($PSVersionTable.PSVersion.Major) enthalten (Version $($builtInProvider.Version))." 'SUCCESS' }
+            return $true
+        }
+    }
 
     try {
         # Die Suche prüft Bootstrap-Feed und PSGallery. Ein "No match" aus PSGallery
