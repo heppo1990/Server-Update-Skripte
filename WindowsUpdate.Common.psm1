@@ -1340,9 +1340,7 @@ function Invoke-WindowsUpdatePackageManagers {
                 }
             }
             foreach ($candidatePath in @($candidates | Select-Object -Unique)) {
-                # Nicht nur den Alias finden: eine funktionsfähige EXE bevorzugen.
-                $health = Test-WingetExecutable -Path $candidatePath
-                if ($health.Works) { return $candidatePath }
+                if (Test-Path -LiteralPath $candidatePath -PathType Leaf -ErrorAction SilentlyContinue) { return $candidatePath }
             }
             return $null
         }
@@ -1755,7 +1753,7 @@ catch {
             if (-not $wingetPreparationSucceeded) {
                 $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$wingetBootstrapMessage; BootstrapMessage=$wingetBootstrapMessage }
             }
-            elseif ($wingetPath) {
+            else {
                 try {
                 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
                 $availableOutput = Get-WingetModuleUpdateOutput
@@ -1769,8 +1767,13 @@ catch {
                     # Quellcache eine Fehlermeldung ausgeben, obwohl die Quelle danach
                     # wieder funktioniert. Quelle einmal gezielt aktualisieren und
                     # die Suche wiederholen, bevor der Lauf einen Fehler meldet.
-                    $wingetSourceRefreshOutput = & $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String
-                    $sourceRefreshExitCode = $LASTEXITCODE
+                    if ($wingetPath) {
+                        $wingetSourceRefreshOutput = & $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String
+                        $sourceRefreshExitCode = $LASTEXITCODE
+                    } else {
+                        $wingetSourceRefreshOutput = 'winget.exe wurde nicht gefunden.'
+                        $sourceRefreshExitCode = 1
+                    }
                     if ($sourceRefreshExitCode -eq 0) {
                         $wingetBootstrapMessage += ' WinGet-Quelle winget wurde aktualisiert; die Paketabfrage wird wiederholt.'
                         $availableOutput = Get-WingetModuleUpdateOutput
@@ -1789,6 +1792,7 @@ catch {
                         # Sperre nicht. Der Reset prüft weiterhin, dass vorab
                         # ausschließlich die bekannten Standardquellen vorliegen.
                         try {
+                            if (-not $wingetPath) { throw 'winget.exe fehlt; Quellenreset über die CLI ist nicht verfügbar.' }
                             Reset-WingetDefaultSources -WingetPath $wingetPath
                             $sourceResetPerformed = $true
                             try { Save-WingetSourceResetState -State $sourceResetState }
@@ -1815,7 +1819,7 @@ catch {
                     # vollständige Reset erfolgt nur, wenn keine kundeneigenen
                     # Quellen vorhanden sind.
                     $sourceResetState = Get-WingetSourceResetState
-                    if ($sourceResetState.Allowed) {
+                    if ($sourceResetState.Allowed -and $wingetPath) {
                         try {
                             Reset-WingetDefaultSources -WingetPath $wingetPath
                             $sourceResetPerformed = $true
@@ -1832,7 +1836,7 @@ catch {
                             $wingetBootstrapMessage += " Zurücksetzen der WinGet-Standardquellen fehlgeschlagen: $($_.Exception.Message)"
                         }
                     }
-                    else {
+                    elseif (-not $sourceResetState.Allowed) {
                         $wingetBootstrapMessage += " Die WinGet-Suche war leer; ein Quellenreset wurde übersprungen, da auf diesem Zielsystem innerhalb der letzten 24 Stunden bereits einer ausgeführt wurde."
                     }
                 }
@@ -1879,8 +1883,13 @@ catch {
                             # und wiederholen das Paket einmal, statt einen globalen
                             # Quellenreset auszulösen.
                             if ($packageActionOutput -match '(?i)(0x80190194|GetUpstreamFile failed on source: https://cdn\.winget\.microsoft\.com/cache)') {
-                                $sourceUpdateOutput = & $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String
-                                $sourceUpdateExitCode = $LASTEXITCODE
+                                if ($wingetPath) {
+                                    $sourceUpdateOutput = & $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String
+                                    $sourceUpdateExitCode = $LASTEXITCODE
+                                } else {
+                                    $sourceUpdateOutput = 'winget.exe wurde nicht gefunden.'
+                                    $sourceUpdateExitCode = 1
+                                }
                                 $packageActionOutput += "`nGezieltes Aktualisieren der WinGet-Quelle nach HTTP-404 (ExitCode $sourceUpdateExitCode):`n$($sourceUpdateOutput.Trim())"
                                 if ($sourceUpdateExitCode -eq 0) {
                                     $retryResult = Invoke-WingetModulePackageUpdate -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
@@ -1902,7 +1911,7 @@ catch {
                                 }
                             }
                             elseif ($appxSessionFailure -or $appxRegistrationFailure) {
-                                $manualCommand = "winget upgrade --id $packageId --exact --source $packageSource --accept-package-agreements --accept-source-agreements"
+                                $manualCommand = "Import-Module Microsoft.WinGet.Client; Update-WinGetPackage -Id '$packageId' -Source '$packageSource' -Mode Interactive"
                                 $failureReason = if ($appxSessionFailure) {
                                     'Windows meldet 0x80073D19 (Benutzer abgemeldet), während WinGet eine AppX-Abhängigkeit bereitstellt.'
                                 } else {
@@ -1981,7 +1990,56 @@ catch {
     $localNames = @($env:COMPUTERNAME, [System.Net.Dns]::GetHostName()) | Where-Object { $_ }
     if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
     if ($localNames -contains $ComputerName) {
-        $packageResults = @(& $packageScript $Mode $EnableWinget $EnableChocolatey)
+        # Microsoft.WinGet.Client nutzt WinRT/COM und funktioniert auf den
+        # unterstützten Verwaltungsservern zuverlässig in Windows PowerShell
+        # 5.1. Deshalb lokale Prüfungen ebenfalls in einem frischen PS5-Prozess
+        # ausführen, unabhängig davon, ob der Aufrufer PS5 oder PS7 verwendet.
+        $powerShell51 = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) {
+            throw 'Windows PowerShell 5.1 wurde für die lokale WinGet-Modulabfrage nicht gefunden.'
+        }
+        $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('ServerUpdate-WinGet-{0}' -f [guid]::NewGuid().ToString('N'))
+        $payloadPath = Join-Path $temporaryRoot 'payload.json'
+        $runnerPath = Join-Path $temporaryRoot 'run.ps1'
+        $responsePath = Join-Path $temporaryRoot 'response.json'
+        try {
+            New-Item -ItemType Directory -Path $temporaryRoot -Force -ErrorAction Stop | Out-Null
+            $payloadJson = ConvertTo-Json -InputObject @{
+                Script = $packageScript.ToString()
+                Mode = $Mode
+                UseWinget = $EnableWinget
+                UseChocolatey = $EnableChocolatey
+            } -Depth 20 -Compress
+            [IO.File]::WriteAllText($payloadPath, $payloadJson, [Text.UTF8Encoding]::new($false))
+            $runnerSource = @'
+param([Parameter(Mandatory)][string]$PayloadPath)
+$ErrorActionPreference = 'Stop'
+try {
+    $payload = Get-Content -LiteralPath $PayloadPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $items = @(& ([scriptblock]::Create([string]$payload.Script)) ([string]$payload.Mode) ([bool]$payload.UseWinget) ([bool]$payload.UseChocolatey))
+    $response = @{ Success = $true; Results = @($items) }
+}
+catch {
+$response = @{ Success = $false; Error = $_.Exception.Message; Results = @() }
+}
+[IO.File]::WriteAllText($env:SERVER_UPDATE_WINGET_RESPONSE_PATH, (ConvertTo-Json -InputObject $response -Depth 20 -Compress), [Text.UTF8Encoding]::new($false))
+'@
+            [IO.File]::WriteAllText($runnerPath, $runnerSource, [Text.UTF8Encoding]::new($false))
+            $previousResponsePath = $env:SERVER_UPDATE_WINGET_RESPONSE_PATH
+            $env:SERVER_UPDATE_WINGET_RESPONSE_PATH = $responsePath
+            try { $runnerOutput = @(& $powerShell51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runnerPath -PayloadPath $payloadPath 2>&1) }
+            finally { $env:SERVER_UPDATE_WINGET_RESPONSE_PATH = $previousResponsePath }
+            $runnerExitCode = $LASTEXITCODE
+            if (-not (Test-Path -LiteralPath $responsePath -PathType Leaf)) {
+                throw "Windows PowerShell 5.1 lieferte keine strukturierte Paketmanager-Rückgabe (Exitcode $runnerExitCode). $((($runnerOutput | ForEach-Object { [string]$_ }) -join ' '))"
+            }
+            $runnerResult = Get-Content -LiteralPath $responsePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            if (-not $runnerResult.Success) { throw [string]$runnerResult.Error }
+            $packageResults = @($runnerResult.Results)
+        }
+        finally {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
     else {
         $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
