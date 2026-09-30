@@ -750,7 +750,6 @@ function Invoke-ServerUpdateScripts {
 $ErrorActionPreference = 'Stop'
 $statusPath = $env:SERVER_UPDATE_BOOTSTRAP_STATUS_PATH
 $noUpdateExitCodes = @(-1978335188, -1978335189, -1978335192)
-$wingetCommand = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
 $chocoPath = 'C:\ProgramData\chocolatey\bin\choco.exe'
 
 function Get-WingetTempDirectory {
@@ -859,17 +858,14 @@ function Resolve-WingetPath {
             @($candidate)
         }
         foreach ($path in $paths) {
-            try {
-                & $path --version *> $null
-                if ($LASTEXITCODE -eq 0) { return $path }
-            } catch { }
+            if (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction SilentlyContinue) { return $path }
         }
     }
     return $null
 }
 
 function Invoke-PowerShellWingetUpdateCheck {
-    param([Parameter(Mandatory)][string]$Path, [switch]$FreshPowerShell)
+    param([string]$Path, [switch]$FreshPowerShell)
     $scriptRoot = Split-Path -Parent $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH
     $commonModulePath = Join-Path $scriptRoot 'WindowsUpdate.Common.psm1'
     if (-not (Test-Path -LiteralPath $commonModulePath -PathType Leaf)) { throw 'WindowsUpdate.Common.psm1 fehlt; das WinGet-Modul kann nicht verwendet werden.' }
@@ -888,16 +884,15 @@ function Invoke-PowerShellWingetUpdateCheck {
         '[pscustomobject]@{ State = ''Updated''; Output = "PowerShell 7 wurde auf Version $version aktualisiert." } | ConvertTo-Json -Compress'
     ) -join "`n"
     $checkSource = $checkSource.Replace('__COMMON_MODULE_PATH__', $commonModuleLiteral)
-    if ($FreshPowerShell) {
-        # Nach einer WinGet-Reparatur Modul und WinGet in einem frischen PS5-Prozess laden.
-        $shellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-        $childSource = "try {`n$checkSource`n} catch { [pscustomobject]@{ State = 'Error'; Output = (`$_.Exception.Message -replace '\s+', ' ').Trim() } | ConvertTo-Json -Compress }"
-        $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childSource))
-        $rawOutput = @(& $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedChild 2>&1)
-    } else {
-        try { $rawOutput = @(& ([scriptblock]::Create($checkSource)) 2>&1) }
-        catch { $rawOutput = @([pscustomobject]@{ State = 'Error'; Output = $_.Exception.Message } | ConvertTo-Json -Compress) }
+    # Microsoft.WinGet.Client benötigt hier Windows PowerShell 5.1 (WinRT/COM).
+    # Eine frische PS5-Instanz ist daher auch beim normalen Update-Check Pflicht.
+    $shellPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $shellPath -PathType Leaf)) {
+        return [PSCustomObject]@{ ExitCode = 1; Output = 'Windows PowerShell 5.1 wurde nicht gefunden.'; State = 'Error' }
     }
+    $childSource = "try {`n$checkSource`n} catch { [pscustomobject]@{ State = 'Error'; Output = (`$_.Exception.Message -replace '\s+', ' ').Trim() } | ConvertTo-Json -Compress }"
+    $encodedChild = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childSource))
+    $rawOutput = @(& $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedChild 2>&1)
     $jsonLine = @($rawOutput | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\s*\{.*"State"\s*:' } | Select-Object -Last 1)
     if ($jsonLine.Count -eq 0) { return [PSCustomObject]@{ ExitCode = 1; Output = (($rawOutput -join ' ') -replace '\s+', ' ').Trim(); State = 'Error' } }
     try { $result = $jsonLine[0] | ConvertFrom-Json -ErrorAction Stop }
@@ -910,49 +905,25 @@ try {
     $serverCaption = ''
     try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
     $wingetRepairSupported = $serverCaption -match 'Windows Server (2019|2022)'
-    $wingetPath = Resolve-WingetPath
-    if ($wingetPath) {
-        Write-Host 'Prüfe mit Windows PowerShell 5.1, ob Winget ein PowerShell-7-Update anbietet ...'
-        $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath
-        $packageOutput = $wingetCheck.Output
-        $packageExitCode = $wingetCheck.ExitCode
-        if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
-        if ($packageExitCode -ne 0) {
-            if ($wingetRepairSupported) {
-                Write-Warning "WinGet-Prüfung für PowerShell 7 fehlgeschlagen (Exitcode $packageExitCode); repariere WinGet auf $serverCaption mit winget-install und wiederhole die Prüfung."
-                Invoke-WingetRepair -ServerCaption $serverCaption
-                $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
-                $wingetPath = Resolve-WingetPath
-                if (-not $wingetPath) { throw 'winget.exe wurde nach der Reparatur nicht gefunden.' }
-                $wingetVersionOutput = & $wingetPath --version 2>&1
-                if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
-                $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath -FreshPowerShell
-                $packageOutput = $wingetCheck.Output
-                $packageExitCode = $wingetCheck.ExitCode
-                if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
-                if ($packageExitCode -ne 0) { throw "WinGet-Prüfung schlug auch nach der Reparatur fehl (Exitcode $packageExitCode): $($packageOutput | Out-String)" }
-            }
-            else {
-                Write-Warning "PowerShell-7-Update mit Winget fehlgeschlagen (Exitcode $packageExitCode). Der Installationslauf wird fortgesetzt. $($packageOutput | Out-String)"
-                exit 0
-            }
-        }
-    }
-    elseif ($wingetRepairSupported) {
-        Write-Warning "WinGet fehlt auf $serverCaption; stelle es mit winget-install bereit und prüfe anschließend das PS7-Update."
+    Write-Host 'Prüfe mit Microsoft.WinGet.Client unter Windows PowerShell 5.1 auf ein PowerShell-7-Update ...'
+    $wingetCheck = Invoke-PowerShellWingetUpdateCheck
+    $packageOutput = $wingetCheck.Output
+    $packageExitCode = $wingetCheck.ExitCode
+    if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
+    if ($packageExitCode -ne 0 -and $wingetRepairSupported) {
+        Write-Warning "WinGet-Modulprüfung für PowerShell 7 fehlgeschlagen (Exitcode $packageExitCode); repariere WinGet auf $serverCaption und wiederhole die Prüfung."
         Invoke-WingetRepair -ServerCaption $serverCaption
         $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
         $wingetPath = Resolve-WingetPath
-        if (-not $wingetPath) { throw 'winget.exe wurde nach der Installation nicht gefunden.' }
+        if (-not $wingetPath) { throw 'winget.exe wurde nach der Reparatur nicht gefunden.' }
         $wingetVersionOutput = & $wingetPath --version 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Installation weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
+        if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
         $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath -FreshPowerShell
         $packageOutput = $wingetCheck.Output
         $packageExitCode = $wingetCheck.ExitCode
         if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }
-        if ($packageExitCode -ne 0) { throw "WinGet-Prüfung schlug nach der Installation fehl (Exitcode $packageExitCode): $($packageOutput | Out-String)" }
     }
-    elseif (Test-Path -LiteralPath $chocoPath -PathType Leaf) {
+    if ($packageExitCode -ne 0 -and (Test-Path -LiteralPath $chocoPath -PathType Leaf)) {
         Write-Host 'Winget ist nicht installiert; prüfe mit Windows PowerShell 5.1 Chocolatey auf ein PowerShell-7-Update ...'
         $outdatedOutput = & $chocoPath outdated --limit-output 2>&1
         $chocoExitCode = $LASTEXITCODE
@@ -969,7 +940,8 @@ try {
             exit 0
         }
     }
-    else {
+    elseif ($packageExitCode -ne 0) {
+        Write-Warning "PowerShell-7-Update konnte mit Microsoft.WinGet.Client nicht geprüft werden (Exitcode $packageExitCode). Der Installationslauf wird fortgesetzt. $($packageOutput | Out-String)"
         exit 0
     }
 
