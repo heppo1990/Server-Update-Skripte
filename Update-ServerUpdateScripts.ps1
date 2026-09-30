@@ -752,120 +752,23 @@ $statusPath = $env:SERVER_UPDATE_BOOTSTRAP_STATUS_PATH
 $noUpdateExitCodes = @(-1978335188, -1978335189, -1978335192)
 $chocoPath = 'C:\ProgramData\chocolatey\bin\choco.exe'
 
-function Get-WingetTempDirectory {
-    $candidates = @($env:TEMP, $env:TMP, (Join-Path $env:WINDIR 'Temp')) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
-    foreach ($candidate in $candidates) {
-        $probePath = $null
-        $stream = $null
-        try {
-            if (-not (Test-Path -LiteralPath $candidate -PathType Container -ErrorAction SilentlyContinue)) { continue }
-            $probePath = Join-Path $candidate ('winget-temp-check-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
-            $stream = [IO.File]::Open($probePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            $stream.Dispose(); $stream = $null
-            Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
-            return $candidate
-        }
-        catch {
-            if ($stream) { $stream.Dispose() }
-            if ($probePath) { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue }
-        }
-    }
-    throw 'Kein gültiger beschreibbarer temporärer Ordner für die WinGet-Reparatur gefunden.'
-}
-function Find-WingetInstallScript {
-    $command = Get-Command -Name 'winget-install.ps1' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
-    $candidates = @()
-    if ($env:USERPROFILE -and (Test-Path -LiteralPath $env:USERPROFILE -PathType Container -ErrorAction SilentlyContinue)) {
-        $candidates += Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Scripts\winget-install.ps1'
-    }
-    if ($env:ProgramFiles) { $candidates += Join-Path $env:ProgramFiles 'WindowsPowerShell\Scripts\winget-install.ps1' }
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
-    }
-    return $null
-}
-function Invoke-WingetInstallScript {
-    param([string]$Path, [string[]]$InstallerArguments)
-    $powerShell51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
-    $output = & $powerShell51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @InstallerArguments 2>&1 | Out-String -Width 300
-    return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $output.Trim() }
-}
-
 function Invoke-WingetRepair {
     param([string]$ServerCaption)
     if ($ServerCaption -notmatch 'Windows Server (2019|2022)') {
         throw "Die WinGet-Reparatur ist nur für Windows Server 2019 und 2022 vorgesehen (erkannt: $ServerCaption)."
     }
-
-    $installerPath = Find-WingetInstallScript
-    $temporaryInstallerPath = $null
-    if ($installerPath) {
-        if ((Get-AuthenticodeSignature -LiteralPath $installerPath).Status -ne 'Valid') {
-            throw "Die vorhandene winget-install-Datei hat keine gültige Authenticode-Signatur: $installerPath"
-        }
-        $updateResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-UpdateSelf')
-        if ($updateResult.ExitCode -ne 0) { throw "winget-install -UpdateSelf fehlgeschlagen: $($updateResult.Output)" }
-        $installerPath = Find-WingetInstallScript
-    }
-    else {
-        $bootstrapPath = Join-Path (Get-WingetTempDirectory) ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
-        # Ein einzeiliges Skript vermeidet verschachtelte Here-Strings im
-        # ebenfalls als Here-String eingebetteten PowerShell-5.1-Vorlauf.
-        $bootstrapScript = '$ErrorActionPreference = ''Stop''; try { Install-Script -Name winget-install -Repository PSGallery -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop; exit 0 } catch { Write-Error $_; exit 1 }'
-        [IO.File]::WriteAllText($bootstrapPath, $bootstrapScript, [Text.Encoding]::UTF8)
-        try { $galleryResult = Invoke-WingetInstallScript -Path $bootstrapPath -InstallerArguments @() }
-        finally { Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction SilentlyContinue }
-        $installerPath = Find-WingetInstallScript
-        if ($galleryResult.ExitCode -ne 0 -or -not $installerPath) {
-            $temporaryInstallerPath = Join-Path (Get-WingetTempDirectory) ("winget-install-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -UseBasicParsing -TimeoutSec 90 -OutFile $temporaryInstallerPath -ErrorAction Stop
-            $installerPath = $temporaryInstallerPath
-        }
-    }
-
-    try {
-        if (-not $installerPath -or (Get-AuthenticodeSignature -LiteralPath $installerPath).Status -ne 'Valid') {
-            throw 'Die winget-install-Datei hat keine gültige Authenticode-Signatur.'
-        }
-        $repairResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-Force')
-        if ($repairResult.ExitCode -ne 0) { throw "winget-install -Force fehlgeschlagen: $($repairResult.Output)" }
-    }
-    finally {
-        if ($temporaryInstallerPath -and (Test-Path -LiteralPath $temporaryInstallerPath -PathType Leaf)) {
-            Remove-Item -LiteralPath $temporaryInstallerPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function Resolve-WingetPath {
-    $command = Get-Command -Name 'winget.exe' -ErrorAction SilentlyContinue
-    $candidates = @()
-    if ($command -and $command.Source) { $candidates += [string]$command.Source }
-    if ($env:LOCALAPPDATA) { $candidates += Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe' }
-    foreach ($programFilesRoot in (@('C:\Program Files', $env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique)) {
-        $candidates += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe'
-        # Das Paketlayout kann WinGet ohne WindowsApps-Alias bereitstellen.
-        $candidates += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller\*\winget.exe'
-        $candidates += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller\*\*\winget.exe'
-    }
-    foreach ($candidate in $candidates) {
-        $paths = if ($candidate -match '[*?]') {
-            Get-ChildItem -Path $candidate -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-        } elseif (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction SilentlyContinue) {
-            @($candidate)
-        }
-        foreach ($path in $paths) {
-            if (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction SilentlyContinue) { return $path }
-        }
-    }
-    return $null
+    $commonModule = Join-Path (Split-Path -Parent $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH) 'WindowsUpdate.Common.psm1'
+    if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw 'WindowsUpdate.Common.psm1 für die WinGet-Reparatur fehlt.' }
+    Import-Module -Name $commonModule -Force -ErrorAction Stop
+    if (-not (Update-WinGetClientModule)) { throw 'Microsoft.WinGet.Client konnte nicht installiert oder aktualisiert werden.' }
+    Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
+    $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+    Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+    $version = [string](Get-WinGetVersion -ErrorAction Stop)
+    Write-Host "WinGet über Microsoft.WinGet.Client repariert ($version)."
 }
 
 function Invoke-PowerShellWingetUpdateCheck {
-    param([string]$Path, [switch]$FreshPowerShell)
     $scriptRoot = Split-Path -Parent $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH
     $commonModulePath = Join-Path $scriptRoot 'WindowsUpdate.Common.psm1'
     if (-not (Test-Path -LiteralPath $commonModulePath -PathType Leaf)) { throw 'WindowsUpdate.Common.psm1 fehlt; das WinGet-Modul kann nicht verwendet werden.' }
@@ -913,12 +816,9 @@ try {
     if ($packageExitCode -ne 0 -and $wingetRepairSupported) {
         Write-Warning "WinGet-Modulprüfung für PowerShell 7 fehlgeschlagen (Exitcode $packageExitCode); repariere WinGet auf $serverCaption und wiederhole die Prüfung."
         Invoke-WingetRepair -ServerCaption $serverCaption
-        $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
-        $wingetPath = Resolve-WingetPath
-        if (-not $wingetPath) { throw 'winget.exe wurde nach der Reparatur nicht gefunden.' }
-        $wingetVersionOutput = & $wingetPath --version 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetVersionOutput | Out-String)" }
-        $wingetCheck = Invoke-PowerShellWingetUpdateCheck -Path $wingetPath -FreshPowerShell
+        # Nach der Reparatur eine frische Windows-PowerShell-5.1-Instanz starten,
+        # damit aktualisierte App-Installer-Registrierungen neu eingelesen werden.
+        $wingetCheck = Invoke-PowerShellWingetUpdateCheck
         $packageOutput = $wingetCheck.Output
         $packageExitCode = $wingetCheck.ExitCode
         if ($packageExitCode -in $noUpdateExitCodes) { exit 0 }

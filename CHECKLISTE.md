@@ -2,14 +2,12 @@
 
 ## WinGet auf Windows Server 2019 und 2022
 
-- [x] Auf Windows Server 2019 und 2022 vor der Winget-Abfrage prüfen, ob `winget --version` im verwendeten Ausführungskontext erfolgreich ist.
-- [x] Wenn WinGet fehlt oder nicht funktioniert, das Installationsskript [asheroto/winget-install](https://github.com/asheroto/winget-install) verwenden.
-  - [x] Ist `winget-install` bereits vorhanden: das Skript unter Windows PowerShell 5.1 mit `-UpdateSelf` aktualisieren und WinGet danach mit `-Force` reparieren.
-  - [x] Ist `winget-install` nicht vorhanden: aus PSGallery installieren; bei Fehler die signierte aktuelle GitHub-Release-Datei verwenden.
-- [x] Nach der Reparatur `winget --version` im selben Ausführungskontext erneut prüfen und Ergebnis protokollieren.
-- [x] Fehlt WinGet oder schlägt die WinGet-Prüfung für das PS7-Update fehl, WinGet auf Windows Server 2019/2022 unabhängig von AD-Mitgliedschaft mit `winget-install` reparieren und die PS7-Prüfung wiederholen.
+- [x] WinGet-Suche, Installation, Quellenreset und Reparatur über `Microsoft.WinGet.Client` unter Windows PowerShell 5.1 ausführen.
+- [x] WinGet auf Windows Server 2019 und 2022 bei Bedarf mit `Repair-WinGetPackageManager -Latest -Force` reparieren; danach in einer frischen PowerShell-5.1-Instanz erneut prüfen.
+- [x] Standardquellen bei leerer oder fehlerhafter Suche mit `Reset-WinGetSource -All` zurücksetzen; `msstore`, `winget` und `winget-font` als Standardquellen behandeln.
+- [x] Unbekannte kundeneigene Quellen am Namen erkennen und einen vollständigen Reset in diesem Fall überspringen; keine Quell-URLs in Meldungen ausgeben.
 - [x] Chocolatey nur dann für das PS7-Update verwenden, wenn es bereits installiert ist; Chocolatey nicht automatisch nachinstallieren.
-- [x] Bei einem Fehler beim Durchsuchen der WinGet-Quelle `winget` diese Quelle einmal aktualisieren und die Paketabfrage wiederholen.
+- [x] Bei einer fehlerhaften WinGet-Quelle die Standardquellen einmal per Modul zurücksetzen und die Paketabfrage wiederholen.
 - [x] Alte `Mailsettings`-Bereiche und `SendMail` in allen vorhandenen allgemeinen und skriptspezifischen Settings-Dateien sichern und anhand des Dateinamens dem aktuellen Mail-Schema zuordnen; alte Betreffe verwerfen und aktuelle Standardbetreffe ergänzen.
 
 ## Konkrete Updates in der Nachinstallationsplanung

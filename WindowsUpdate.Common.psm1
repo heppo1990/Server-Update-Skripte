@@ -1491,86 +1491,26 @@ exit $LASTEXITCODE
             return [PSCustomObject]@{ Allowed = $allowed; Directory = $sourceStateDirectory; MarkerPath = $markerPath }
         }
 
-        function Get-WingetCompactOutput {
-            param([AllowNull()][string]$Text, [int]$MaximumLength = 500)
-            if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
-            $clean = [regex]::Replace($Text, '\x1B\[[0-?]*[ -/]*[@-~]', '')
-            $lines = @($clean -split "`r?`n" | ForEach-Object { ([string]$_).Trim() } | Where-Object {
-                $_ -and
-                $_ -notmatch '[\u2580-\u259F]' -and
-                $_ -notmatch '\u00e2\u2013' -and
-                $_ -notmatch '^[-\\|/](?:\s*[-\\|/]){2,}' -and
-                $_ -notmatch '(?i)\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)'
-            })
-            $summary = $lines -join ' '
-            if ($summary.Length -gt $MaximumLength) { $summary = $summary.Substring(0, $MaximumLength - 3) + '...' }
-            return $summary
-        }
         function Reset-WingetDefaultSources {
-            param([Parameter(Mandatory)][string]$WingetPath)
-            # Der vollständige Reset entspricht dem manuellen Reparaturweg.
-            # Kundeneigene Quellen werden vorher exportiert und danach wieder
-            # hergestellt, statt den Reset pauschal zu verhindern.
-            $sourceListOutput = & $WingetPath source list --disable-interactivity 2>&1 | Out-String
-            $sourceListExitCode = $LASTEXITCODE
-            if ($sourceListExitCode -ne 0) {
-                throw "WinGet-Quellen konnten vor dem Reset nicht aufgelistet werden (Exitcode $sourceListExitCode)."
-            }
-            $defaultSources = @('msstore', 'winget', 'winget-font')
-            $configuredSources = @($sourceListOutput -split "`r?`n" | ForEach-Object {
-                $line = [string]$_
-                # Nur der Quellname entscheidet. URLs variieren je nach
-                # WinGet-Version und gehören nicht in Fehlermeldungen.
-                if ($line -match '^\s*(?<Name>msstore|winget-font|winget)(?=\s|$)') { $Matches.Name }
-                elseif ($line -match '^\s*(?<Name>[^\s]+)\s+') {
-                    $name = $Matches.Name.Trim()
-                    if ($name -and $name -notmatch '^(Name|[-=]+)$') { $name }
-                }
-            })
-            $customSources = @($configuredSources | Where-Object { $_ -notin $defaultSources } | Select-Object -Unique)
+            Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+            $knownDefaultSources = @('msstore', 'winget', 'winget-font')
+            $configuredSources = @(Get-WinGetSource -ErrorAction Stop)
             if ($configuredSources.Count -eq 0) {
-                throw 'WinGet-Quellenliste war leer oder konnte nicht ausgewertet werden; vollständiger Reset aus Sicherheitsgründen abgebrochen.'
+                throw 'WinGet-Quellenliste war leer; Quellenreset abgebrochen.'
+            }
+            $customSources = @($configuredSources | Where-Object { [string]$_.Name -notin $knownDefaultSources } | ForEach-Object { [string]$_.Name } | Select-Object -Unique)
+            if ($customSources.Count -gt 0) {
+                throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); Reset wurde ausgelassen, damit diese erhalten bleiben."
             }
 
-            $customSourceDefinitions = @()
-            foreach ($customSourceName in $customSources) {
-                $exportOutput = & $WingetPath source export $customSourceName --disable-interactivity 2>&1 | Out-String
-                $exportExitCode = $LASTEXITCODE
-                if ($exportExitCode -ne 0) {
-                    throw "Kundeneigene WinGet-Quelle '$customSourceName' konnte nicht gesichert werden (Exitcode $exportExitCode); Reset abgebrochen."
-                }
-                try { $sourceDefinition = $exportOutput.Trim() | ConvertFrom-Json -ErrorAction Stop }
-                catch { throw "Definition der kundeneigenen WinGet-Quelle '$customSourceName' konnte nicht gelesen werden; Reset abgebrochen." }
-                if (-not $sourceDefinition.Name -or -not $sourceDefinition.Arg -or -not $sourceDefinition.Type) {
-                    throw "Definition der kundeneigenen WinGet-Quelle '$customSourceName' ist unvollständig; Reset abgebrochen."
-                }
-                $customSourceDefinitions += $sourceDefinition
-            }
-
-            # Gleicher Reset wie bei der bewährten manuellen Reparatur.
-            $resetOutput = & $WingetPath source reset --force 2>&1 | Out-String
-            $resetExitCode = $LASTEXITCODE
-            if ($resetExitCode -ne 0) {
-                throw "Vollständiger WinGet-Quellenreset fehlgeschlagen (Exitcode $resetExitCode)."
-            }
-
-            foreach ($sourceDefinition in $customSourceDefinitions) {
-                $addArguments = @('source', 'add', '--name', [string]$sourceDefinition.Name, '--arg', [string]$sourceDefinition.Arg, '--type', [string]$sourceDefinition.Type, '--accept-source-agreements', '--disable-interactivity')
-                $trustLevels = @($sourceDefinition.TrustLevel | ForEach-Object { [string]$_ })
-                if ($trustLevels -contains 'Trusted') { $addArguments += @('--trust-level', 'trusted') }
-                else { $addArguments += @('--trust-level', 'none') }
-                if ($sourceDefinition.Explicit -eq $true) { $addArguments += '--explicit' }
-                if ($sourceDefinition.Header) {
-                    foreach ($header in @($sourceDefinition.Header)) {
-                        if ($header -is [string]) { $addArguments += @('--header', $header) }
-                        elseif ($header.Key -and $header.Value) { $addArguments += @('--header', ('{0}={1}' -f $header.Key, $header.Value)) }
-                    }
-                }
-                $restoreOutput = & $WingetPath @addArguments 2>&1 | Out-String
-                $restoreExitCode = $LASTEXITCODE
-                if ($restoreExitCode -ne 0) {
-                    throw "Kundeneigene WinGet-Quelle '$($sourceDefinition.Name)' konnte nach dem Reset nicht wiederhergestellt werden (Exitcode $restoreExitCode)."
-                }
+            # winget-font ist eine Standardquelle. Reset-WinGetSource -All
+            # entspricht dem bewährten manuellen source reset --force.
+            Reset-WinGetSource -All -ErrorAction Stop | Out-Null
+            Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+            $sourcesAfterReset = @(Get-WinGetSource -ErrorAction Stop | ForEach-Object { [string]$_.Name })
+            $missingDefaults = @($knownDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
+            if ($missingDefaults.Count -gt 0) {
+                throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')."
             }
         }
 
@@ -1580,62 +1520,6 @@ exit $LASTEXITCODE
                 New-Item -Path $State.Directory -ItemType Directory -Force -ErrorAction Stop | Out-Null
             }
             [IO.File]::WriteAllText($State.MarkerPath, [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
-        }
-
-        function Get-WingetTempDirectory {
-            $candidates = @($env:TEMP, $env:TMP, (Join-Path $env:windir 'Temp')) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
-            foreach ($candidate in $candidates) {
-                $probePath = $null
-                $stream = $null
-                try {
-                    if (-not (Test-Path -LiteralPath $candidate -PathType Container -ErrorAction SilentlyContinue)) { continue }
-                    $probePath = Join-Path $candidate ('winget-temp-check-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
-                    $stream = [IO.File]::Open($probePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-                    $stream.Dispose(); $stream = $null
-                    Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
-                    return $candidate
-                }
-                catch {
-                    if ($stream) { $stream.Dispose() }
-                    if ($probePath) { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue }
-                }
-            }
-            throw 'Kein gültiger beschreibbarer temporärer Ordner für die WinGet-Reparatur gefunden.'
-        }
-        function Find-WingetInstallScript {
-            $command = Get-Command winget-install.ps1 -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return $command.Source }
-            $candidates = @()
-            if ($env:USERPROFILE -and (Test-Path -LiteralPath $env:USERPROFILE -PathType Container -ErrorAction SilentlyContinue)) {
-                $candidates += Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Scripts\winget-install.ps1'
-            }
-            if ($env:ProgramFiles) { $candidates += Join-Path $env:ProgramFiles 'WindowsPowerShell\Scripts\winget-install.ps1' }
-            foreach ($candidate in $candidates) {
-                if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
-            }
-            return $null
-        }
-        function Invoke-WingetInstallScript {
-            param([string]$Path, [string[]]$InstallerArguments)
-            $powerShell51 = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
-            # Nicht nur den Pfad voraussetzen: Vor -Force und -UpdateSelf
-            # verifizieren, dass genau dieser Interpreter tatsächlich PS 5.1 ist.
-            $versionOutput = (& $powerShell51 -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()' 2>&1 | Out-String -Width 100).Trim()
-            $versionExitCode = $LASTEXITCODE
-            if ($versionExitCode -ne 0 -or $versionOutput -notmatch '^5\.1(?:\.|$)') {
-                throw "winget-install benötigt Windows PowerShell 5.1; erkannt wurde '$versionOutput' (Exitcode $versionExitCode)."
-            }
-            $rawOutput = (& $powerShell51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @InstallerArguments 2>&1 | Out-String -Width 300)
-            $output = Get-WingetCompactOutput -Text $rawOutput
-            $exitCode = $LASTEXITCODE
-            return [PSCustomObject]@{ ExitCode = $exitCode; Output = $output.Trim(); PowerShellVersion = $versionOutput }
-        }
-
-        function Test-WingetInstallScriptSignature {
-            param([string]$Path)
-            $signature = Get-AuthenticodeSignature -LiteralPath $Path
-            return $signature.Status -eq 'Valid'
         }
 
         # Kein generisches .NET-List-Objekt: PowerShell 7 kann dieses beim
@@ -1683,56 +1567,12 @@ exit $LASTEXITCODE
                 $wingetHealth = Test-WingetExecutable -Path $wingetPath
                 if (-not $wingetHealth.Works) {
                     $wingetBootstrapMessage = "WinGet auf $env:COMPUTERNAME ($serverCaption) fehlt oder ist nicht funktionsfähig ($($wingetHealth.Output)); starte Reparatur."
-                    $installerPath = Find-WingetInstallScript
-                    $temporaryInstallerPath = $null
                     try {
-                        if ($installerPath) {
-                            if (-not (Test-WingetInstallScriptSignature -Path $installerPath)) {
-                                throw "Die vorhandene winget-install-Datei hat keine gültige Authenticode-Signatur: $installerPath"
-                            }
-                            $updateResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-UpdateSelf')
-                            $wingetBootstrapMessage += " UpdateSelf unter Windows PowerShell $($updateResult.PowerShellVersion), ExitCode=$($updateResult.ExitCode)."
-                            if (-not [string]::IsNullOrWhiteSpace($updateResult.Output)) { $wingetBootstrapMessage += " $($updateResult.Output)" }
-                            if ($updateResult.ExitCode -ne 0) { throw "winget-install -UpdateSelf endete mit ExitCode $($updateResult.ExitCode)." }
-                            $installerPath = Find-WingetInstallScript
-                        }
-                        else {
-                            # Skript aus PSGallery installieren; bei Galerieproblemen
-                            # auf die signierte GitHub-Release-Datei ausweichen.
-                            $bootstrapPath = Join-Path (Get-WingetTempDirectory) ("winget-install-bootstrap-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
-                            $bootstrapScript = @'
-$ErrorActionPreference = 'Stop'
-try {
-    Install-Script -Name winget-install -Repository PSGallery -Scope CurrentUser -Force -Confirm:$false -ErrorAction Stop
-    exit 0
-}
-catch {
-    Write-Error $_
-    exit 1
-}
-'@
-                            [IO.File]::WriteAllText($bootstrapPath, $bootstrapScript, [Text.Encoding]::UTF8)
-                            try { $galleryResult = Invoke-WingetInstallScript -Path $bootstrapPath -InstallerArguments @() }
-                            finally { Remove-Item -LiteralPath $bootstrapPath -Force -ErrorAction SilentlyContinue }
-                            $installerPath = Find-WingetInstallScript
-                            if ($galleryResult.ExitCode -ne 0 -or -not $installerPath) {
-                                $temporaryInstallerPath = Join-Path (Get-WingetTempDirectory) ("winget-install-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
-                                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                                Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -UseBasicParsing -TimeoutSec 90 -OutFile $temporaryInstallerPath -ErrorAction Stop
-                                $installerPath = $temporaryInstallerPath
-                            }
-                            $wingetBootstrapMessage += ' winget-install wurde bereitgestellt.'
-                        }
-
-                        if (-not $installerPath -or -not (Test-WingetInstallScriptSignature -Path $installerPath)) {
-                            throw 'Die winget-install-Datei hat keine gültige Authenticode-Signatur.'
-                        }
-                        $repairResult = Invoke-WingetInstallScript -Path $installerPath -InstallerArguments @('-Force')
-                        if ($repairResult.ExitCode -ne 0) {
-                            throw "winget-install -Force unter Windows PowerShell $($repairResult.PowerShellVersion) endete mit ExitCode $($repairResult.ExitCode): $($repairResult.Output)"
-                        }
-                        $wingetBootstrapMessage += " winget-install -Force lief unter Windows PowerShell $($repairResult.PowerShellVersion)."
-                        $env:PATH = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'
+                        Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
+                        $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+                        Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+                        $moduleVersion = [string](Get-WinGetVersion -ErrorAction Stop)
+                        $wingetBootstrapMessage += " Reparatur über Microsoft.WinGet.Client abgeschlossen ($moduleVersion)."
                         $wingetPath = Resolve-WingetExecutable
                         $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
                         if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }
@@ -1741,11 +1581,6 @@ catch {
                     catch {
                         $wingetPreparationSucceeded = $false
                         $wingetBootstrapMessage += " Reparatur fehlgeschlagen: $($_.Exception.Message)"
-                    }
-                    finally {
-                        if ($temporaryInstallerPath -and (Test-Path -LiteralPath $temporaryInstallerPath -PathType Leaf)) {
-                            Remove-Item -LiteralPath $temporaryInstallerPath -Force -ErrorAction SilentlyContinue
-                        }
                     }
                 }
             }
@@ -1767,45 +1602,20 @@ catch {
                     # Quellcache eine Fehlermeldung ausgeben, obwohl die Quelle danach
                     # wieder funktioniert. Quelle einmal gezielt aktualisieren und
                     # die Suche wiederholen, bevor der Lauf einen Fehler meldet.
-                    if ($wingetPath) {
-                        $wingetSourceRefreshOutput = & $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String
-                        $sourceRefreshExitCode = $LASTEXITCODE
-                    } else {
-                        $wingetSourceRefreshOutput = 'winget.exe wurde nicht gefunden.'
-                        $sourceRefreshExitCode = 1
-                    }
-                    if ($sourceRefreshExitCode -eq 0) {
-                        $wingetBootstrapMessage += ' WinGet-Quelle winget wurde aktualisiert; die Paketabfrage wird wiederholt.'
+                    try {
+                        Reset-WingetDefaultSources
+                        $sourceResetPerformed = $true
+                        $sourceResetState = Get-WingetSourceResetState
+                        try { Save-WingetSourceResetState -State $sourceResetState }
+                        catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
+                        $wingetBootstrapMessage += ' WinGet-Quellen wurden über Microsoft.WinGet.Client zurückgesetzt; die Paketabfrage wird wiederholt.'
                         $availableOutput = Get-WingetModuleUpdateOutput
                         $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                             Test-WingetSourceFailureLine -Line ([string]$_)
                         })
                     }
-                    else {
-                        $refreshSummary = Get-WingetCompactOutput -Text $wingetSourceRefreshOutput
-                        $refreshDetail = if ($refreshSummary) { ": $refreshSummary" } else { '' }
-                        $sourceFailureLines += "Aktualisieren der WinGet-Quelle winget fehlgeschlagen (ExitCode $sourceRefreshExitCode)$refreshDetail"
-                    }
-                    if ($sourceFailureLines.Count -gt 0) {
-                        $sourceResetState = Get-WingetSourceResetState
-                        # Bei einem echten Quellenfehler gilt die 24-Stunden-
-                        # Sperre nicht. Der Reset prüft weiterhin, dass vorab
-                        # ausschließlich die bekannten Standardquellen vorliegen.
-                        try {
-                            if (-not $wingetPath) { throw 'winget.exe fehlt; Quellenreset über die CLI ist nicht verfügbar.' }
-                            Reset-WingetDefaultSources -WingetPath $wingetPath
-                            $sourceResetPerformed = $true
-                            try { Save-WingetSourceResetState -State $sourceResetState }
-                            catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
-                            $wingetBootstrapMessage += ' WinGet-Standardquellen wurden zurückgesetzt; die Paketabfrage wird wiederholt.'
-                            $availableOutput = Get-WingetModuleUpdateOutput
-                            $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
-                                Test-WingetSourceFailureLine -Line ([string]$_)
-                            })
-                        }
-                        catch {
-                            $wingetBootstrapMessage += " Zurücksetzen der WinGet-Standardquellen fehlgeschlagen: $($_.Exception.Message)"
-                        }
+                    catch {
+                        $sourceFailureLines += "WinGet-Quellenreset über Microsoft.WinGet.Client fehlgeschlagen: $(([string]$_.Exception.Message -replace '\s+', ' ').Trim())"
                     }
                 }
                 # Winget liefert eine formatierte Tabelle. Echte Upgrade-Zeilen
@@ -1819,9 +1629,9 @@ catch {
                     # vollständige Reset erfolgt nur, wenn keine kundeneigenen
                     # Quellen vorhanden sind.
                     $sourceResetState = Get-WingetSourceResetState
-                    if ($sourceResetState.Allowed -and $wingetPath) {
+                    if ($sourceResetState.Allowed) {
                         try {
-                            Reset-WingetDefaultSources -WingetPath $wingetPath
+                            Reset-WingetDefaultSources
                             $sourceResetPerformed = $true
                             try { Save-WingetSourceResetState -State $sourceResetState }
                             catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
@@ -1880,14 +1690,15 @@ catch {
                             # WinGet kann in seiner lokalen Quelle noch auf einen
                             # bereits entfernten Manifest-Hash zeigen. In diesem
                             # Fall aktualisieren wir ausschließlich die winget-Quelle
-                            # und wiederholen das Paket einmal, statt einen globalen
-                            # Quellenreset auszulösen.
+                            # (über das WinGet-Modul) und wiederholen das Paket einmal.
                             if ($packageActionOutput -match '(?i)(0x80190194|GetUpstreamFile failed on source: https://cdn\.winget\.microsoft\.com/cache)') {
-                                if ($wingetPath) {
-                                    $sourceUpdateOutput = & $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String
-                                    $sourceUpdateExitCode = $LASTEXITCODE
-                                } else {
-                                    $sourceUpdateOutput = 'winget.exe wurde nicht gefunden.'
+                                try {
+                                    Reset-WingetDefaultSources
+                                    $sourceUpdateOutput = 'WinGet-Quellen über Microsoft.WinGet.Client zurückgesetzt.'
+                                    $sourceUpdateExitCode = 0
+                                }
+                                catch {
+                                    $sourceUpdateOutput = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
                                     $sourceUpdateExitCode = 1
                                 }
                                 $packageActionOutput += "`nGezieltes Aktualisieren der WinGet-Quelle nach HTTP-404 (ExitCode $sourceUpdateExitCode):`n$($sourceUpdateOutput.Trim())"
