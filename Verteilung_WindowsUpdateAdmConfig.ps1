@@ -84,7 +84,7 @@ function Write-DeployLog {
     if ($LogOnly) { return }
 
     $show = [string]::IsNullOrWhiteSpace($Message) -or $Level -in @('Warning', 'Error') -or
-        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe Setup|Warte|Teste|Erfolg|FEHLER|Verbindung vorbereitet|WindowsUpdateAdm-Endpunkt|Linux-Hosts|Home Assistant)|\[(Linux|Home Assistant)\]|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|Home-Assistant-Instanzen:|Gesamt Systeme:|Gesamt:|Logdatei:|\s{2,}[^:]+: (SSH-Schlüssel|Verbindung/Einrichtung)|\s{2,}[^:]+: \d+ (Paketupdates|Updates? verfügbar)|\s{2,}(Linux-Paket|Core|Supervisor|OS|Add-on))'
+        $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe (lokales )?Setup|Warte|Teste|Erfolg|FEHLER|Verbindung vorbereitet|WindowsUpdateAdm-Endpunkt|Linux-Hosts|Home Assistant|Setup:)|\[(Linux|Home Assistant)\]|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|SSH-Schlüssel/Verbindung:|Home-Assistant-Instanzen:|Verbindung:|Gesamt Systeme:|Gesamt:|Logdatei:|\s{2,}[^:]+: (SSH-Schlüssel|Verbindung/Einrichtung)|\s{2,}[^:]+: \d+ (Paketupdates|Updates? verfügbar)|\s{2,}(Linux-Paket|Core|Supervisor|OS|Add-on))'
     if (-not $show) { return }
 
     $color = switch ($Level) {
@@ -94,7 +94,7 @@ function Write-DeployLog {
         default   {
             if ($Message -match '(?i)^\s*(WARNUNG|WARNING)') { 'Yellow' }
             elseif ($Message -match '(?i)^\s*(FEHLER|ERROR)') { 'Red' }
-            elseif ($Message -match '(?i)^\s*(WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe Setup|Warte|Teste|Linux-Hosts|Home Assistant)|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|Home-Assistant-Instanzen:|Gesamt Systeme:|Gesamt:)') { 'Cyan' }
+            elseif ($Message -match '(?i)^\s*(WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe (lokales )?Setup|Warte|Teste|Linux-Hosts|Home Assistant|Setup:)|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|SSH-Schlüssel/Verbindung:|Home-Assistant-Instanzen:|Verbindung:|Gesamt Systeme:|Gesamt:)') { 'Cyan' }
             else { 'Gray' }
         }
     }
@@ -708,12 +708,25 @@ function Invoke-ServerDeployment {
     try {
         Write-DeployLog "[$Servername] Führe lokales Setup aus."
         $localParameters = @{}
-        # Ausführliche Setup-Ausgaben abfangen und nur ins Log schreiben;
-        # auf der Konsole erscheint anschließend ausschließlich das Ergebnis.
-        $localSetupOutput = @(& (Join-Path $RootDirectory $PSSCfgSkriptFile) @localParameters *>&1)
-        foreach ($entry in $localSetupOutput) {
+        # Alle Details protokollieren; wichtige Setup-Phasen live anzeigen,
+        # damit längere lokale Einrichtungsschritte erkennbar bleiben.
+        & (Join-Path $RootDirectory $PSSCfgSkriptFile) @localParameters *>&1 | ForEach-Object {
+            $entry = $_
             $entryText = if ($entry -is [System.Management.Automation.InformationRecord]) { [string]$entry.MessageData } else { [string]$entry }
             Write-DeployLog $entryText -LogOnly
+            if ($entryText -match '^\[[^]]+\]\s+\[(?<Level>INFO|UPDATE|WARN|SUCCESS|ERROR)\]\s+(?<Status>.*)$') {
+                $setupLevel = $Matches.Level
+                $setupStatus = $Matches.Status
+                if ($setupLevel -ne 'INFO' -or $setupStatus -match '^=== .+ ===$') {
+                    $displayLevel = switch ($setupLevel) {
+                        'WARN' { 'Warning' }
+                        'ERROR' { 'Error' }
+                        'SUCCESS' { 'Success' }
+                        default { 'Info' }
+                    }
+                    Write-DeployLog "[$Servername] Setup: $setupStatus" -Level $displayLevel -ConsoleOnly
+                }
+            }
         }
         if ($LASTEXITCODE -ne 0) {
             throw "Lokales Setup auf $Servername wurde mit Exit-Code $LASTEXITCODE beendet."
@@ -781,6 +794,7 @@ ForEach ($Server in $Serverlist) {
 # begrenzten sudo-/HA-Voraussetzungen vorbereitet. Die beiden Skripte behalten
 # dieselbe Ersteinrichtung zusätzlich für Check, Download und Installation.
 if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOnly) {
+    Write-DeployLog ''
     $hostPowerShell = Join-Path $PSHOME 'pwsh.exe'
     if (-not (Test-Path -LiteralPath $hostPowerShell)) { $hostPowerShell = (Get-Process -Id $PID).Path }
     $connectionSetups = @()
@@ -797,6 +811,7 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
             continue
         }
         Write-DeployLog "[$($connectionSetup.Name)] Verbindungseinrichtung gestartet."
+        Write-DeployLog ''
         try {
             # Ausgabe nicht abfangen: SSH-Anmeldeprompts kommen über stderr.
             # -Quiet hält normale Statusmeldungen aus der Konsole fern.
@@ -812,7 +827,8 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
                 $LinuxConnectionErrors = [int]$connectionStats.FailedHosts
                 $linuxLevel = if ($LinuxConnectionErrors -gt 0) { 'Warning' } else { 'Success' }
                 $linuxConnectedCount = [Math]::Max(0, $LinuxSystemCount - $LinuxConnectionErrors)
-                Write-DeployLog "[Linux] Hosts geprüft: $LinuxSystemCount; SSH-Schlüssel/Verbindung erfolgreich: $linuxConnectedCount; Fehler: $LinuxConnectionErrors" -Level $linuxLevel
+                Write-DeployLog "[Linux] Hosts geprüft: $LinuxSystemCount" -Level $linuxLevel
+                Write-DeployLog ''
                 foreach ($hostResult in $linuxHosts) {
                     if ($hostResult.Status -eq 'Fehler') {
                         Write-DeployLog "  $($hostResult.Host): Verbindung/Einrichtung fehlgeschlagen; Details im Log." -Level Warning
@@ -820,6 +836,7 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
                         Write-DeployLog "  $($hostResult.Host): SSH-Schlüssel und Verbindung funktionieren."
                     }
                 }
+                Write-DeployLog ''
             }
             else {
                 if (-not $connectionStats.Success) {
@@ -843,6 +860,7 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
         finally {
             Remove-Item -LiteralPath $statsPath -Force -ErrorAction SilentlyContinue
         }
+        if ($connectionSetup.Name -eq 'Home Assistant') { Write-DeployLog '' }
     }
 }
 
@@ -854,16 +872,24 @@ Write-DeployLog "Erfolgreich: $SuccessCount" -Level Success
 Write-DeployLog "Fehler: $FailCount" -Level $(if ($FailCount -eq 0) { 'Success' } else { 'Error' })
 if ($LinuxSystemCount -gt 0 -or $LinuxConnectionErrors -gt 0) {
     $linuxConnectedCount = [Math]::Max(0, $LinuxSystemCount - $LinuxConnectionErrors)
-    Write-DeployLog "Linux-Hosts: $LinuxSystemCount; SSH-Schlüssel/Verbindung: $linuxConnectedCount erfolgreich; Fehler: $LinuxConnectionErrors"
+    Write-DeployLog ''
+    Write-DeployLog "Linux-Hosts: $LinuxSystemCount"
+    Write-DeployLog "SSH-Schlüssel/Verbindung: $linuxConnectedCount erfolgreich" -Level $(if ($LinuxConnectionErrors -eq 0) { 'Success' } else { 'Warning' })
+    Write-DeployLog "Fehler: $LinuxConnectionErrors" -Level $(if ($LinuxConnectionErrors -eq 0) { 'Success' } else { 'Error' })
 }
 if ($HASystemCount -gt 0 -or $HAConnectionErrors -gt 0) {
     $haConnectedCount = [Math]::Max(0, $HASystemCount - $HAConnectionErrors)
-    Write-DeployLog "Home-Assistant-Instanzen: $HASystemCount; Verbindung: $haConnectedCount erfolgreich; Fehler: $HAConnectionErrors"
+    Write-DeployLog ''
+    Write-DeployLog "Home-Assistant-Instanzen: $HASystemCount"
+    Write-DeployLog "Verbindung: $haConnectedCount erfolgreich" -Level $(if ($HAConnectionErrors -eq 0) { 'Success' } else { 'Warning' })
+    Write-DeployLog "Fehler: $HAConnectionErrors" -Level $(if ($HAConnectionErrors -eq 0) { 'Success' } else { 'Error' })
 }
 $totalSystems = $Results.Count + $LinuxSystemCount + $HASystemCount
+Write-DeployLog ''
 Write-DeployLog "Gesamt Systeme: $totalSystems"
 
 # Fehlerhafte Server anzeigen
+Write-DeployLog ''
 if ($script:DeployLogEnabled) { Write-DeployLog "Logdatei: $script:DeployLogFile" }
 if ($script:DeployLogEnabled) {
     $null = Invoke-WindowsUpdateRetentionWithLog -Directory $script:DeployLogDirectory -Filter ("{0}_*.log" -f $ScriptName) -KeepFiles $script:DeployKeepLogFiles -Description 'Verteilungs-Logs' -WriteLog { param($message) Write-DeployLog $message }
