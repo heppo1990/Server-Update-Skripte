@@ -209,6 +209,18 @@ try {
             $nugetInstalled = $true
         }
         catch {
+            $nugetOnlineError = $_
+            $nugetErrorMessage = ([string]$nugetOnlineError.Exception.Message -replace '\s+', ' ').Trim()
+            $nugetInnerMessage = if ($nugetOnlineError.Exception.InnerException) {
+                ([string]$nugetOnlineError.Exception.InnerException.Message -replace '\s+', ' ').Trim()
+            } else { 'keine' }
+            $packageManagementVersion = (Get-Module PackageManagement -ListAvailable -ErrorAction SilentlyContinue |
+                Sort-Object Version -Descending | Select-Object -First 1).Version
+            if (-not $packageManagementVersion) { $packageManagementVersion = 'unbekannt' }
+            Write-SetupLog "NuGet-Online-Installation fehlgeschlagen: $nugetErrorMessage" 'WARN'
+            Write-SetupLog ("NuGet-Diagnose: Typ={0}; Fehler-ID={1}; PackageManagement={2}; InnerException={3}" -f `
+                $nugetOnlineError.Exception.GetType().FullName, $nugetOnlineError.FullyQualifiedErrorId, `
+                $packageManagementVersion, $nugetInnerMessage) 'WARN'
             Write-SetupLog "Online-Installation fehlgeschlagen - versuche lokale Installation..." "WARN"
             if (Install-NuGetFromLocalServer) {
                 Write-SetupLog "NuGet vom lokalen Server installiert." "SUCCESS"

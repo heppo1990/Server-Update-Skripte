@@ -717,6 +717,11 @@ function Invoke-ServerDeployment {
             if ($entryText -match '^\[[^]]+\]\s+\[(?<Level>INFO|UPDATE|WARN|SUCCESS|ERROR)\]\s+(?<Status>.*)$') {
                 $setupStatus = $Matches.Status
                 $showSetupStatus = $setupStatus -match '^(=== (NuGet Provider Check|PSWindowsUpdate Installation/Update|Dual PowerShell Support \(PS5 \+ PS7\)|PS-Remoting Konfiguration|JEA Role Capability Setup|WinRM Endpunkt Registrierung|Finaler Verbindungstest) ===|NuGet (Provider installiert|vom lokalen Server installiert)|PSWindowsUpdate (ist aktuell|erfolgreich aktualisiert|erfolgreich installiert|bereit;)|PowerShell-7-Remoting aktiviert|WinRM neu gestartet|Configuration über Windows PowerShell 5\.1 registriert|Loopback-Verbindungstest erfolgreich|Setup erfolgreich abgeschlossen!)'
+                if ($setupStatus -match '^NuGet-Online-Installation fehlgeschlagen:') {
+                    $nugetFailureText = $setupStatus
+                    if ($nugetFailureText.Length -gt 280) { $nugetFailureText = $nugetFailureText.Substring(0, 277) + '...' }
+                    Write-Host "[$Servername] $nugetFailureText" -ForegroundColor Yellow
+                }
                 if ($showSetupStatus) {
                     if ($setupStatus -match '^=== ') { Write-DeployLog '' -ConsoleOnly }
                     $setupLevel = if ($setupStatus -match '^(NuGet Provider installiert|NuGet vom lokalen Server installiert|PSWindowsUpdate (ist aktuell|erfolgreich aktualisiert|erfolgreich installiert|bereit;)|Loopback-Verbindungstest erfolgreich|Setup erfolgreich abgeschlossen!)') { 'Success' } else { 'Info' }

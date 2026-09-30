@@ -196,7 +196,7 @@ Die vorsorglichen Warnungen von `Register-PSSessionConfiguration` und `Set-PSSes
 
 Bei jeder Verteilung werden außerdem alte Ordner mit dem eindeutigen Namen `WindowsUpdateAdmSetup_*` in `%WINDIR%\Temp` und unter `C:\Users\*\AppData\Local\Temp` bereinigt, sofern sie älter als 30 Minuten sind. Die Schonfrist schützt parallel laufende Setups. Unregistrierte, danach vollständig leere Profil-Gerüste werden entfernt. Registrierte Benutzerprofile, Verknüpfungen und Ordner mit anderen Inhalten bleiben unangetastet.
 
-Der NuGet-Paketprovider wird bei Bedarf ohne interaktive Rückfrage maschinenweit installiert. So steht er auch dann für weitere Verteilungen bereit, wenn diese von einem anderen Administratorkonto gestartet werden. Der lokale Fallback überspringt eine Kopie, wenn die gefundene DLL bereits im Zielordner liegt, und meldet Erfolg erst nach erfolgreicher Provider-Erkennung.
+Der NuGet-Paketprovider wird bei Bedarf ohne interaktive Rückfrage maschinenweit installiert. So steht er auch dann für weitere Verteilungen bereit, wenn diese von einem anderen Administratorkonto gestartet werden. Scheitert der Online-Aufruf, werden Ausnahme, Fehler-ID, PackageManagement-Version und innere Ausnahme protokolliert; die kurze Ursache erscheint auch in der Verteilungsausgabe. Der lokale Fallback überspringt eine Kopie, wenn die gefundene DLL bereits im Zielordner liegt, und meldet Erfolg erst nach erfolgreicher Provider-Erkennung.
 
 Für eine einmalige Bereinigung ohne erneute WindowsUpdateAdm-Einrichtung:
 
