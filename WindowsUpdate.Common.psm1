@@ -514,7 +514,7 @@ function Update-PSWindowsUpdateModule {
 }
 
 function Update-WinGetClientModule {
-    <# Installiert/aktualisiert Microsoft.WinGet.Client maschinenweit unter PowerShell 7. #>
+    <# Installiert/aktualisiert Microsoft.WinGet.Client maschinenweit für Windows PowerShell 5.1. #>
     [CmdletBinding()]
     param(
         [scriptblock]$WriteLog,
@@ -523,65 +523,24 @@ function Update-WinGetClientModule {
     )
 
     $worker = {
-        param([string]$ReleaseApiUrl)
+        param()
         $ErrorActionPreference = 'Stop'
         $ProgressPreference = 'SilentlyContinue'
         $logs = [System.Collections.Generic.List[object]]::new()
 
         try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $pwsh = Get-Command -Name pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $pwsh) {
-                $knownPwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
-                if (Test-Path -LiteralPath $knownPwsh -PathType Leaf) {
-                    $pwsh = [pscustomobject]@{ Source = $knownPwsh }
-                }
-            }
-
-            if (-not $pwsh) {
-                $logs.Add([pscustomobject]@{ Type = 'Log'; Message = 'PowerShell 7 fehlt; lade das aktuelle stabile Microsoft-MSI.'; Level = 'UPDATE' })
-                $releases = @(Invoke-RestMethod -Uri $ReleaseApiUrl -UseBasicParsing -TimeoutSec 45)
-                $release = $null
-                $asset = $null
-                foreach ($candidateRelease in $releases) {
-                    if ($candidateRelease.prerelease) { continue }
-                    $candidateAsset = @($candidateRelease.assets | Where-Object { $_.name -match '^PowerShell-\d+\.\d+\.\d+-win-x64\.msi$' } | Select-Object -First 1)
-                    if ($candidateAsset.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$candidateAsset[0].browser_download_url)) {
-                        $release = $candidateRelease
-                        $asset = $candidateAsset[0]
-                        break
-                    }
-                }
-                if (-not $release -or -not $asset) {
-                    throw 'Es wurde kein stabiles PowerShell-7-x64-MSI gefunden.'
-                }
-
-                $msiPath = Join-Path (Join-Path $env:WINDIR 'Temp') ('ServerUpdate-PowerShell7-{0}.msi' -f [guid]::NewGuid().ToString('N'))
-                try {
-                    Invoke-WebRequest -Uri $asset.browser_download_url -UseBasicParsing -TimeoutSec 180 -OutFile $msiPath
-                    $signature = Get-AuthenticodeSignature -LiteralPath $msiPath
-                    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
-                        throw 'Die Signatur des PowerShell-7-Installationspakets ist ungültig.'
-                    }
-                    $installer = Join-Path $env:WINDIR 'System32\msiexec.exe'
-                    $arguments = @('/i', ('"{0}"' -f $msiPath), '/qn', '/norestart', 'ADD_PATH=1', 'USE_MU=1', 'ENABLE_MU=1', 'ENABLE_PSREMOTING=0')
-                    $install = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-                    if ($install.ExitCode -notin @(0, 3010)) { throw "PowerShell-7-Installation fehlgeschlagen (MSI-Exitcode $($install.ExitCode))." }
-                }
-                finally {
-                    Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
-                }
-
-                $pwshPath = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
-                if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) { throw 'PowerShell 7 wurde installiert, aber pwsh.exe ist nicht auffindbar.' }
-                $pwsh = [pscustomobject]@{ Source = $pwshPath }
-                $logs.Add([pscustomobject]@{ Type = 'Log'; Message = "PowerShell 7 installiert ($($release.tag_name)); die aktuelle Windows-PowerShell-Sitzung bleibt unverändert."; Level = 'SUCCESS' })
-            }
-
             $childScript = @'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $minimumNuGetVersion = [version]'2.8.5.201'
+    $nuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+        Where-Object { $_.Version -ge $minimumNuGetVersion } |
+        Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $nuget) {
+        Install-PackageProvider -Name NuGet -MinimumVersion $minimumNuGetVersion -Scope AllUsers -Force -Confirm:$false -ErrorAction Stop | Out-Null
+    }
     $installed = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
         Sort-Object Version -Descending | Select-Object -First 1
     $latest = Find-Module -Name Microsoft.WinGet.Client -Repository PSGallery -ErrorAction Stop
@@ -606,7 +565,9 @@ catch {
 }
 '@
             $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
-            $childOutput = @(& $pwsh.Source -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1 | ForEach-Object { [string]$_ })
+            $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
+            $childOutput = @(& $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1 | ForEach-Object { [string]$_ })
             $childExitCode = $LASTEXITCODE
             $resultLine = @($childOutput | Where-Object { $_ -match '^__WINGETCLIENT__(SUCCESS|ERROR)\t' } | Select-Object -Last 1)
             if ($resultLine.Count -gt 0 -and $resultLine[0] -match '^__WINGETCLIENT__SUCCESS\t(?<Version>[^\t]+)\t(?<State>.+)$') {
@@ -626,16 +587,15 @@ catch {
         return @($logs)
     }
 
-    $releaseApiUrl = 'https://api.github.com/repos/PowerShell/PowerShell/releases?per_page=20'
     if ([string]::IsNullOrWhiteSpace($ComputerName) -or $ComputerName -ieq $env:COMPUTERNAME -or $ComputerName -ieq 'localhost') {
-        $results = @(& $worker $releaseApiUrl)
+        $results = @(& $worker)
     }
     else {
         $session = $null
         try {
             $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
             $session = New-PSSession @sessionParameters
-            $results = @(Invoke-Command -Session $session -ScriptBlock $worker -ArgumentList $releaseApiUrl -ErrorAction Stop)
+            $results = @(Invoke-Command -Session $session -ScriptBlock $worker -ErrorAction Stop)
         }
         catch {
             Write-PSWindowsUpdateModuleLog $WriteLog "WinGet-Client-Modulpflege auf $ComputerName fehlgeschlagen: $($_.Exception.Message)" 'WARN'
@@ -1444,10 +1404,61 @@ exit $LASTEXITCODE
             param([string]$Output)
             return @($Output -split "`r?`n" | Where-Object {
                 $line = $_.Trim()
-                $line -match '\s(?:winget|msstore)\s*$' -and
+                $line -match '\s\S+\s*$' -and
                 $line -notmatch '^Name\s+' -and
                 -not (Test-WingetSourceFailureLine -Line $line)
             })
+        }
+
+        function Get-WingetModuleUpdateOutput {
+            try {
+                Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+                $packages = @(Get-WinGetPackage -ErrorAction Stop | Where-Object { $_.IsUpdateAvailable })
+                $lines = foreach ($package in $packages) {
+                    $availableVersions = @($package.AvailableVersions)
+                    $availableVersion = if ($availableVersions.Count -gt 0) { [string]$availableVersions[0] } else { 'unbekannt' }
+                    $sourceName = [string]$package.Source
+                    if ([string]::IsNullOrWhiteSpace($sourceName)) { throw "Für '$($package.Name)' [$($package.Id)] wurde keine WinGet-Quelle zurückgegeben." }
+                    [string]::Format('{0,-65} {1,-38} {2,-14} {3,-14} {4}', [string]$package.Name, [string]$package.Id, [string]$package.InstalledVersion, $availableVersion, $sourceName)
+                }
+                return (@($lines) -join [Environment]::NewLine)
+            }
+            catch {
+                $detail = ([string]$_.Exception.Message -split "`r?`n")[0].Trim()
+                if ($detail.Length -gt 350) { $detail = $detail.Substring(0, 347) + '...' }
+                if (Test-WingetSourceFailureLine -Line $detail) { return $detail }
+                throw
+            }
+        }
+
+        function Invoke-WingetModulePackageUpdate {
+            param(
+                [Parameter(Mandatory)][string]$Id,
+                [Parameter(Mandatory)][string]$Source,
+                [Parameter(Mandatory)][string]$Version
+            )
+            try {
+                Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+                $updateResult = @(Update-WinGetPackage -Id $Id -Source $Source -Version $Version -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:$false -ErrorAction Stop)
+                if ($updateResult.Count -eq 0) { throw 'Microsoft.WinGet.Client lieferte kein Installationsresultat.' }
+                $status = [string]$updateResult[-1].Status
+                $installerCode = [string]$updateResult[-1].InstallerErrorCode
+                $extendedCode = [string]$updateResult[-1].ExtendedErrorCode
+                $summary = "Status=$status"
+                if ($installerCode -and $installerCode -ne '0') { $summary += "; InstallerErrorCode=$installerCode" }
+                if ($extendedCode -and $extendedCode -ne '0') { $summary += "; ExtendedErrorCode=$extendedCode" }
+                foreach ($code in @($installerCode, $extendedCode)) {
+                    if ($code -match '^\-?\d+$') {
+                        try { $summary += ('; Fehlercode=0x{0:X8}' -f [uint32]([int64]$code)) } catch { }
+                    }
+                }
+                if ($updateResult[-1].RebootRequired) { $summary += '; Neustart erforderlich' }
+                $success = $status -eq 'Ok' -and (-not $installerCode -or $installerCode -eq '0')
+                return [PSCustomObject]@{ Success=$success; ExitCode=$(if ($success) { 0 } else { 1 }); Output=$summary; Result=$updateResult[-1] }
+            }
+            catch {
+                return [PSCustomObject]@{ Success=$false; ExitCode=1; Output=([string]$_.Exception.Message -replace '\s+', ' ').Trim(); Result=$null }
+            }
         }
 
         function Get-WingetSourceResetState {
@@ -1747,7 +1758,7 @@ catch {
             elseif ($wingetPath) {
                 try {
                 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
-                $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                $availableOutput = Get-WingetModuleUpdateOutput
                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                     Test-WingetSourceFailureLine -Line ([string]$_)
                 })
@@ -1762,7 +1773,7 @@ catch {
                     $sourceRefreshExitCode = $LASTEXITCODE
                     if ($sourceRefreshExitCode -eq 0) {
                         $wingetBootstrapMessage += ' WinGet-Quelle winget wurde aktualisiert; die Paketabfrage wird wiederholt.'
-                        $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                        $availableOutput = Get-WingetModuleUpdateOutput
                         $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                             Test-WingetSourceFailureLine -Line ([string]$_)
                         })
@@ -1783,7 +1794,7 @@ catch {
                             try { Save-WingetSourceResetState -State $sourceResetState }
                             catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
                             $wingetBootstrapMessage += ' WinGet-Standardquellen wurden zurückgesetzt; die Paketabfrage wird wiederholt.'
-                            $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                            $availableOutput = Get-WingetModuleUpdateOutput
                             $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                                 Test-WingetSourceFailureLine -Line ([string]$_)
                             })
@@ -1811,7 +1822,7 @@ catch {
                             try { Save-WingetSourceResetState -State $sourceResetState }
                             catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
                             $wingetBootstrapMessage += ' Die WinGet-Suche war leer; die Standardquellen wurden gezielt zurückgesetzt und die Suche einmal wiederholt.'
-                            $availableOutput = & $wingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                            $availableOutput = Get-WingetModuleUpdateOutput
                             $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                                 Test-WingetSourceFailureLine -Line ([string]$_)
                             })
@@ -1842,7 +1853,7 @@ catch {
                         # fehlinterpretiert.
                         $packageMatch = [regex]::Match(
                             [string]$packageLine,
-                            '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)\s+(?<Source>winget|msstore)\s*$',
+                            '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)\s+(?<Source>[^\s]+)\s*$',
                             [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
                         )
                         if (-not $packageMatch.Success) {
@@ -1859,11 +1870,9 @@ catch {
                         $packageName = $packageMatch.Groups['Name'].Value.Trim()
                         $packageSource = $packageMatch.Groups['Source'].Value
                         try {
-                            $packageArguments = @('upgrade', '--id', $packageId, '--exact')
-                            if (-not [string]::IsNullOrWhiteSpace($packageSource)) { $packageArguments += @('--source', $packageSource) }
-                            $packageArguments += @('--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
-                            $packageActionOutput = & $wingetPath @packageArguments 2>&1 | Out-String
-                            $packageExitCode = $LASTEXITCODE
+                            $moduleUpdate = Invoke-WingetModulePackageUpdate -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
+                            $packageActionOutput = [string]$moduleUpdate.Output
+                            $packageExitCode = [int]$moduleUpdate.ExitCode
                             # WinGet kann in seiner lokalen Quelle noch auf einen
                             # bereits entfernten Manifest-Hash zeigen. In diesem
                             # Fall aktualisieren wir ausschließlich die winget-Quelle
@@ -1874,26 +1883,12 @@ catch {
                                 $sourceUpdateExitCode = $LASTEXITCODE
                                 $packageActionOutput += "`nGezieltes Aktualisieren der WinGet-Quelle nach HTTP-404 (ExitCode $sourceUpdateExitCode):`n$($sourceUpdateOutput.Trim())"
                                 if ($sourceUpdateExitCode -eq 0) {
-                                    $retryOutput = & $wingetPath @packageArguments 2>&1 | Out-String
-                                    $packageExitCode = $LASTEXITCODE
-                                    $packageActionOutput += "`nErneuter Paketversuch nach Quellenaktualisierung:`n$($retryOutput.Trim())"
+                                    $retryResult = Invoke-WingetModulePackageUpdate -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
+                                    $packageExitCode = [int]$retryResult.ExitCode
+                                    $packageActionOutput += "`nErneuter Paketversuch nach Quellenaktualisierung:`n$([string]$retryResult.Output)"
                                 }
                             }
                             $noInstalledPackage = $packageActionOutput -match '(?i)(kein installiertes Paket gefunden|no installed package found)'
-                            if ($noInstalledPackage) {
-                                # Manche WinGet-Versionen zeigen ein Upgrade in der
-                                # Gesamtliste, finden es beim exakten ID-Aufruf aber
-                                # nicht wieder. Dann dieselbe Quelle mit dem exakten
-                                # Anzeigenamen aus der Liste ansprechen.
-                                $fallbackArguments = @('upgrade', '--name', $packageName, '--exact')
-                                if (-not [string]::IsNullOrWhiteSpace($packageSource)) { $fallbackArguments += @('--source', $packageSource) }
-                                $fallbackArguments += @('--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
-                                $fallbackOutput = & $wingetPath @fallbackArguments 2>&1 | Out-String
-                                $fallbackExitCode = $LASTEXITCODE
-                                $packageActionOutput += "`nFallback mit exaktem Paketnamen '$packageName':`n$($fallbackOutput.Trim())"
-                                $packageExitCode = $fallbackExitCode
-                                $noInstalledPackage = $fallbackOutput -match '(?i)(kein installiertes Paket gefunden|no installed package found)'
-                            }
                             $technologyMismatch = $packageActionOutput -match '(?i)(Installationstechnologie unterscheidet sich|installation technology (?:is|differs from|does not match)|technology.*different from the current installed)'
                             $appxSessionFailure = $packageActionOutput -match '(?i)(0x80073D19|2147958041|Fehler aufgrund der Abmeldung eines Benutzers|An error occurred because a user was logged off)'
                             $appxRegistrationFailure = $packageActionOutput -match '(?i)(0x80070002|2147942402)' -and
