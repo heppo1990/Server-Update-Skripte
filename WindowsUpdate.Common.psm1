@@ -1975,9 +1975,6 @@ catch {
                     $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$_.Exception.Message }
                 }
             }
-            else {
-                $result += [PSCustomObject]@{ Manager='Winget'; Available=$false; Success=$true; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }
-            }
             if (-not [string]::IsNullOrWhiteSpace($wingetBootstrapMessage)) {
                 foreach ($wingetResult in @($result | Where-Object { $_.Manager -eq 'Winget' })) {
                     Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue $wingetBootstrapMessage -Force
