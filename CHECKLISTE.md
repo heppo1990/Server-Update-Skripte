@@ -1,5 +1,7 @@
 # Offene Checkliste
 
+- [x] Automatische Skriptupdates über `UpdateSettings.AutoUpdateScripts` steuerbar; Standard `true`, direkte manuelle Ausführung des Updaters bleibt möglich.
+
 ## WinGet auf Windows Server 2019 und 2022
 
 - [x] WinGet-Suche, Installation, Quellenreset und Reparatur über `Microsoft.WinGet.Client` unter Windows PowerShell 5.1 ausführen.

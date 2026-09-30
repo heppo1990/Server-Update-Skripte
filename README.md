@@ -16,7 +16,7 @@ PowerShell 7 prüft zusätzlich PackageManagement auf Updates; auf Remotezielen 
 
 ## Wichtig
 
-- Die Skripte aktualisieren beim Start automatisch geänderte Programmdateien aus dem öffentlichen Branch `main`. Git muss auf den Zielsystemen nicht installiert sein.
+- Die Skripte aktualisieren beim Start automatisch geänderte Programmdateien aus dem öffentlichen Branch `main` (`UpdateSettings.AutoUpdateScripts`, Standard: `true`). Bei `false` bleiben automatische Updates aus; `Update-ServerUpdateScripts.ps1` lässt sich weiterhin manuell starten. Git muss auf den Zielsystemen nicht installiert sein.
 - Kundeneinstellungen, Zertifikate und Laufzeitdaten werden nicht aus GitHub überschrieben. Fehlende Standardwerte werden in bestehende Settings ergänzt und vorher gesichert.
 - Linux- und Home-Assistant-Skripte werden nur geladen, wenn sie in den Settings konfiguriert sind.
 - Mailversand lässt sich mit `Check-ServersUpdates.ps1 -TestMail` separat prüfen.

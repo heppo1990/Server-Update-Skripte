@@ -79,6 +79,7 @@ Die folgenden Tabellen beschreiben alle Felder aus `default_settings.json`. Opti
 | `KeepReportFiles` | Maximale Anzahl gespeicherter HTML-Berichte je Skript; ältere Berichte werden entfernt. |
 | `WriteLogFile` | Aktiviert oder deaktiviert lokale Logdateien, einschließlich der Verteilung. |
 | `KeepLogFiles` | Maximale Anzahl gespeicherter Logdateien je Skript, einschließlich der Verteilung; ältere Logs werden entfernt. |
+| `AutoUpdateScripts` | Steuert automatische Skriptupdates beim Start der übrigen Skripte. Standard `true`; bei `false` wird der lokale Stand verwendet. `Update-ServerUpdateScripts.ps1` kann weiterhin direkt zur manuellen Aktualisierung ausgeführt werden. |
 | `DetectNowWaitSeconds` | Wartezeit nach dem Anstoßen einer Windows-Update-Erkennung, bevor das Skript mit der Suche fortfährt. |
 | `ClearUpdateCacheBeforeCheck` | Bei `true` werden vor dem Check Download- und DataStore-Cache bereinigt und eine neue Erkennung angestoßen; `false` überspringt diese Bereinigung. |
 | `EnableWingetUpdates` | Bei `true` werden Winget-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Winget. |

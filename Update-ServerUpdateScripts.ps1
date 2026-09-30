@@ -23,6 +23,7 @@ function Get-ServerUpdateConfiguration {
     $configuration = @{
         LinuxHosts = @()
         HomeAssistantHost = ''
+        AutoUpdateScripts = $true
     }
     $configurationFiles = @(
         (Join-Path $ScriptRoot 'default_settings.json'),
@@ -47,6 +48,9 @@ function Get-ServerUpdateConfiguration {
                 if (-not [string]::IsNullOrWhiteSpace($configuredHomeAssistantHost)) {
                     $configuration.HomeAssistantHost = $configuredHomeAssistantHost
                 }
+            }
+            if ($settings.UpdateSettings -and $settings.UpdateSettings.PSObject.Properties['AutoUpdateScripts']) {
+                $configuration.AutoUpdateScripts = [bool]$settings.UpdateSettings.AutoUpdateScripts
             }
         }
         catch {
@@ -545,6 +549,15 @@ function Invoke-ServerUpdateScripts {
 
     $scriptRoot = Split-Path -Parent $ScriptPath
     $scriptName = [IO.Path]::GetFileName($ScriptPath)
+    # Der direkte Aufruf dieses Updaters bleibt ein manueller Updateweg.
+    # Automatische Aktualisierungen aus den übrigen Skripten sind abschaltbar.
+    if ($scriptName -ine 'Update-ServerUpdateScripts.ps1') {
+        $updateConfiguration = Get-ServerUpdateConfiguration -ScriptRoot $scriptRoot -ScriptName $scriptName
+        if (-not $updateConfiguration.AutoUpdateScripts) {
+            Write-Host 'Automatische Skriptupdates sind deaktiviert (UpdateSettings.AutoUpdateScripts=false); lokaler Stand wird verwendet.' -ForegroundColor Yellow
+            return
+        }
+    }
     $repoOwner = 'heppo1990'
     $repoName = 'Server-Update-Skripte'
     $branch = 'main'

@@ -5,6 +5,7 @@
 		"KeepReportFiles": 5,
 		"WriteLogFile": true,
 		"KeepLogFiles": 5,
+		"AutoUpdateScripts": true,
 		"DetectNowWaitSeconds": 60,
 		"ClearUpdateCacheBeforeCheck": false,
 		"EnableWingetUpdates": true,
