@@ -1662,6 +1662,24 @@ if ($ServerADList -ne $null) {
         # Package-Manager-Updates
         $packageResults = @(Invoke-PackageManagerUpdates -Servername $Servername -AuthInfo $svcCredential)
         foreach ($packageResult in $packageResults) {
+          $packages = @($packageResult.Packages)
+          # Auch gefundene Pakete aus fehlgeschlagenen Installationen in den
+          # Mailbericht aufnehmen. Bisher landeten hier nur erfolgreiche Updates;
+          # dadurch fehlten erkannte WinGet-Pakete in der Paketübersicht.
+          if ($packageResult.Available -and $packages.Count -gt 0) {
+            $existingPackageInfo = @($PackageUpdateDetails | Where-Object { $_.Server -ieq $Servername -and $_.Manager -ieq [string]$packageResult.Manager } | Select-Object -First 1)
+            if ($existingPackageInfo.Count -gt 0) {
+              $existingPackageInfo[0].Packages = @($existingPackageInfo[0].Packages) + $packages
+              if (-not $packageResult.Success) { $existingPackageInfo[0].Success = $false }
+            } else {
+              $PackageUpdateDetails += [PSCustomObject]@{
+                Server = $Servername
+                Manager = [string]$packageResult.Manager
+                Packages = @($packages)
+                Success = [bool]$packageResult.Success
+              }
+            }
+          }
           $manualActionProperty = $packageResult.PSObject.Properties['RequiresManualAction']
           $requiresManualAction = $manualActionProperty -and [bool]$manualActionProperty.Value
           $requiresManualReview = $packageResult.Available -and -not $packageResult.Success -and -not $packageResult.Skipped
@@ -1687,13 +1705,6 @@ if ($ServerADList -ne $null) {
           $PackageUpdateCount += $packages.Count
           if ($packageResult.Manager -eq 'Winget') { $WingetUpdateCount += $packages.Count }
           if ($packageResult.Manager -eq 'Chocolatey') { $ChocolateyUpdateCount += $packages.Count }
-          # Ein gemeinsamer Mailabschnitt pro Server und Paketmanager statt Einträgen pro Paket.
-          $existingPackageInfo = @($PackageUpdateDetails | Where-Object { $_.Server -ieq $Servername -and $_.Manager -ieq [string]$packageResult.Manager } | Select-Object -First 1)
-          if ($existingPackageInfo.Count -gt 0) {
-            $existingPackageInfo[0].Packages = @($existingPackageInfo[0].Packages) + $packages
-          } else {
-            $PackageUpdateDetails += [PSCustomObject]@{ Server = $Servername; Manager = [string]$packageResult.Manager; Packages = @($packages) }
-          }
         }
 
         # Zurückgestellte Kategorien + Zeitpunkte aus Settings lesen
@@ -1942,7 +1953,8 @@ if ($PackageUpdateDetails.Count -gt 0) {
   foreach ($packageInfo in $PackageUpdateDetails) {
     $packageList = @($packageInfo.Packages | ForEach-Object { [System.Net.WebUtility]::HtmlEncode([string]$_) }) -join '<br>'
     $RepBody += "<div class='server-title'>Server: $($packageInfo.Server) – $($packageInfo.Manager)</div>"
-    $RepBody += "<div class='linux-package-list'><strong>Aktualisierte Pakete ($(@($packageInfo.Packages).Count)):</strong><br>$packageList</div>"
+    $packageLabel = if ($packageInfo.Success) { 'Aktualisierte Pakete' } else { 'Gefundene Pakete (nicht vollständig aktualisiert)' }
+    $RepBody += "<div class='linux-package-list'><strong>${packageLabel} ($(@($packageInfo.Packages).Count)):</strong><br>$packageList</div>"
   }
 }
 
