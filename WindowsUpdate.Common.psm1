@@ -160,7 +160,9 @@ function Update-NuGetProvider {
     $latestProvider = $null
 
     try {
-        $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction Stop |
+        # Die Suche prüft Bootstrap-Feed und PSGallery. Ein "No match" aus PSGallery
+        # darf die gefundenen Bootstrap-Versionen nicht durch ErrorAction Stop verwerfen.
+        $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction SilentlyContinue |
             Where-Object { $_.Source -like 'https://cdn.oneget.org/providers/nuget-*.package.swidtag' } |
             Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
     }
