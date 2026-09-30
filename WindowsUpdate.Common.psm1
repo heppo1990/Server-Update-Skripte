@@ -1359,9 +1359,9 @@ exit $LASTEXITCODE
         }
         function Reset-WingetDefaultSources {
             param([Parameter(Mandatory)][string]$WingetPath)
-            # Der vollständige Reset hat sich als notwendig erwiesen. Vorher
-            # prüfen, ob kundeneigene Quellen vorhanden sind, da WinGet sie bei
-            # einem globalen Reset entfernt.
+            # Der vollständige Reset entspricht dem manuellen Reparaturweg.
+            # Kundeneigene Quellen werden vorher exportiert und danach wieder
+            # hergestellt, statt den Reset pauschal zu verhindern.
             $sourceListOutput = & $WingetPath source list --disable-interactivity 2>&1 | Out-String
             $sourceListExitCode = $LASTEXITCODE
             if ($sourceListExitCode -ne 0) {
@@ -1382,14 +1382,46 @@ exit $LASTEXITCODE
             if ($configuredSources.Count -eq 0) {
                 throw 'WinGet-Quellenliste war leer oder konnte nicht ausgewertet werden; vollständiger Reset aus Sicherheitsgründen abgebrochen.'
             }
-            if ($customSources.Count -gt 0) {
-                throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); vollständiger Reset wurde aus Sicherheitsgründen abgebrochen, damit diese Quellen erhalten bleiben."
+
+            $customSourceDefinitions = @()
+            foreach ($customSourceName in $customSources) {
+                $exportOutput = & $WingetPath source export $customSourceName --disable-interactivity 2>&1 | Out-String
+                $exportExitCode = $LASTEXITCODE
+                if ($exportExitCode -ne 0) {
+                    throw "Kundeneigene WinGet-Quelle '$customSourceName' konnte nicht gesichert werden (Exitcode $exportExitCode); Reset abgebrochen."
+                }
+                try { $sourceDefinition = $exportOutput.Trim() | ConvertFrom-Json -ErrorAction Stop }
+                catch { throw "Definition der kundeneigenen WinGet-Quelle '$customSourceName' konnte nicht gelesen werden; Reset abgebrochen." }
+                if (-not $sourceDefinition.Name -or -not $sourceDefinition.Arg -or -not $sourceDefinition.Type) {
+                    throw "Definition der kundeneigenen WinGet-Quelle '$customSourceName' ist unvollständig; Reset abgebrochen."
+                }
+                $customSourceDefinitions += $sourceDefinition
             }
 
-            $resetOutput = & $WingetPath source reset --force --disable-interactivity 2>&1 | Out-String
+            # Gleicher Reset wie bei der bewährten manuellen Reparatur.
+            $resetOutput = & $WingetPath source reset --force 2>&1 | Out-String
             $resetExitCode = $LASTEXITCODE
             if ($resetExitCode -ne 0) {
                 throw "Vollständiger WinGet-Quellenreset fehlgeschlagen (Exitcode $resetExitCode)."
+            }
+
+            foreach ($sourceDefinition in $customSourceDefinitions) {
+                $addArguments = @('source', 'add', '--name', [string]$sourceDefinition.Name, '--arg', [string]$sourceDefinition.Arg, '--type', [string]$sourceDefinition.Type, '--accept-source-agreements', '--disable-interactivity')
+                $trustLevels = @($sourceDefinition.TrustLevel | ForEach-Object { [string]$_ })
+                if ($trustLevels -contains 'Trusted') { $addArguments += @('--trust-level', 'trusted') }
+                else { $addArguments += @('--trust-level', 'none') }
+                if ($sourceDefinition.Explicit -eq $true) { $addArguments += '--explicit' }
+                if ($sourceDefinition.Header) {
+                    foreach ($header in @($sourceDefinition.Header)) {
+                        if ($header -is [string]) { $addArguments += @('--header', $header) }
+                        elseif ($header.Key -and $header.Value) { $addArguments += @('--header', ('{0}={1}' -f $header.Key, $header.Value)) }
+                    }
+                }
+                $restoreOutput = & $WingetPath @addArguments 2>&1 | Out-String
+                $restoreExitCode = $LASTEXITCODE
+                if ($restoreExitCode -ne 0) {
+                    throw "Kundeneigene WinGet-Quelle '$($sourceDefinition.Name)' konnte nach dem Reset nicht wiederhergestellt werden (Exitcode $restoreExitCode)."
+                }
             }
         }
 
