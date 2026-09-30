@@ -514,7 +514,9 @@ if ($CheckOnly) {
         $addonsJson = Invoke-HAJson -Command 'ha addons list --raw-json' -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
         $addons = if ($addonsJson.data -and $addonsJson.data.addons) { @($addonsJson.data.addons) } elseif ($addonsJson.addons) { @($addonsJson.addons) } else { @($addonsJson) }
         foreach ($addon in $addons | Where-Object { $_.update_available }) {
-            $details += [PSCustomObject]@{ Component=(if ($addon.name) { "Add-on: $($addon.name)" } else { "Add-on: $($addon.slug)" }); Current=[string]$addon.version; Available=[string]$addon.version_latest }
+            # PowerShell erlaubt kein if-Statement direkt als Wert in einem Hashtable-Feld.
+            $addonDisplayName = if ($addon.name) { "Add-on: $($addon.name)" } else { "Add-on: $($addon.slug)" }
+            $details += [PSCustomObject]@{ Component=[string]$addonDisplayName; Current=[string]$addon.version; Available=[string]$addon.version_latest }
         }
         foreach ($detail in $details) {
             Write-HostLog -Message ("Update verfügbar: {0} ({1} -> {2})" -f $detail.Component, $detail.Current, $detail.Available) -RemoteHost $HAHost -LogFile $LogFile -Level Warning
