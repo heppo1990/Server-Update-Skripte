@@ -116,125 +116,13 @@ try {
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== NuGet Provider Check ===" "INFO"
     
-    $MinNuGetVersion = [Version]"2.8.5.201"
-    $machineNuGetRoot = Join-Path $env:ProgramFiles 'PackageManagement\ProviderAssemblies\nuget'
-    $CurrentNuGet = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Version -ge $MinNuGetVersion -and
-            $_.ProviderPath -like "$machineNuGetRoot\*"
-        } |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
-
-    # Hilfsfunktion: NuGet vom lokalen Server kopieren
-    function Install-NuGetFromLocalServer {
-        # NuGet Provider liegt typischerweise hier auf Servern wo es bereits installiert ist
-        $nugetProviderPaths = @(
-            "$env:ProgramFiles\PackageManagement\ProviderAssemblies\nuget",
-            "$env:ProgramData\Microsoft\Windows\PowerShell\PowerShellGet",
-            "${env:ProgramFiles(x86)}\PackageManagement\ProviderAssemblies\nuget"
-        )
-        $destDir = "$env:ProgramFiles\PackageManagement\ProviderAssemblies\nuget\2.8.5.208"
-
-        foreach ($searchPath in $nugetProviderPaths) {
-            if (Test-Path $searchPath) {
-                $found = Get-ChildItem $searchPath -Recurse -Filter "*.dll" -ErrorAction SilentlyContinue |
-                         Where-Object { $_.Name -like "*NuGet*" } |
-                         Select-Object -First 1
-                if ($found) {
-                    try {
-                        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-                        $destinationFile = Join-Path $destDir 'Microsoft.PackageManagement.NuGetProvider.dll'
-                        $sourceFullPath = [IO.Path]::GetFullPath($found.FullName)
-                        $destinationFullPath = [IO.Path]::GetFullPath($destinationFile)
-                        if (-not [string]::Equals($sourceFullPath, $destinationFullPath, [StringComparison]::OrdinalIgnoreCase)) {
-                            Copy-Item -LiteralPath $sourceFullPath -Destination $destinationFullPath -Force -ErrorAction Stop
-                        } else {
-                            Write-SetupLog 'NuGet-DLL liegt bereits im vorgesehenen Zielordner; Kopie wird übersprungen.' 'INFO'
-                        }
-
-                        $availableProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-                            Where-Object { $_.Version -ge $MinNuGetVersion } |
-                            Sort-Object Version -Descending |
-                            Select-Object -First 1
-                        if ($availableProvider) { return $true }
-                    }
-                    catch {
-                        Write-SetupLog "Lokale NuGet-Datei konnte nicht eingerichtet werden: $($_.Exception.Message)" 'WARN'
-                    }
-                }
-            }
-        }
-
-        # Fallback: Skriptordner
-        $offlineNuGet = Join-Path $PSScriptRoot "NuGet.exe"
-        if (Test-Path $offlineNuGet) {
-            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-            $offlineDestination = Join-Path $destDir 'Microsoft.PackageManagement.NuGetProvider.exe'
-            $offlineSourceFullPath = [IO.Path]::GetFullPath($offlineNuGet)
-            $offlineDestinationFullPath = [IO.Path]::GetFullPath($offlineDestination)
-            if (-not [string]::Equals($offlineSourceFullPath, $offlineDestinationFullPath, [StringComparison]::OrdinalIgnoreCase)) {
-                Copy-Item -LiteralPath $offlineSourceFullPath -Destination $offlineDestinationFullPath -Force -ErrorAction Stop
-            }
-            $availableProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-                Where-Object { $_.Version -ge $MinNuGetVersion } |
-                Sort-Object Version -Descending |
-                Select-Object -First 1
-            return [bool]$availableProvider
-        }
-        return $false
+    $nugetReady = Update-NuGetProvider -Force:$ForceUpdate -WriteLog {
+        param($message, $level)
+        Write-SetupLog $message $level
     }
-    
-    if (-not $CurrentNuGet -or $ForceUpdate) {
-        if ($CurrentNuGet) {
-            Write-SetupLog "Aktualisiere maschinenweit verfügbaren NuGet Provider..." "UPDATE"
-        } else {
-            Write-SetupLog "NuGet Provider fehlt maschinenweit oder ist zu alt - installiere ohne Rückfrage..." "UPDATE"
-        }
-        $nugetInstalled = $false
-        try {
-            # AllUsers verhindert eine erneute Installation bei abweichenden
-            # Administratorkonten; ForceBootstrap bestätigt die NuGet-Abfrage
-            # automatisch, wenn PackageManagement den Provider erst laden muss.
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 `
-                -Scope AllUsers -Force -ForceBootstrap -ErrorAction Stop | Out-Null
-            $installedNuGet = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction Stop |
-                Where-Object { $_.ProviderPath -like "$machineNuGetRoot\*" } |
-                Sort-Object Version -Descending |
-                Select-Object -First 1
-            if (-not $installedNuGet -or $installedNuGet.Version -lt $MinNuGetVersion) {
-                throw 'Der NuGet Provider wurde nicht in den maschinenweiten Providerpfad installiert.'
-            }
-            Write-SetupLog "NuGet Provider installiert - Version: $($installedNuGet.Version)" "SUCCESS"
-            $nugetInstalled = $true
-        }
-        catch {
-            $nugetOnlineError = $_
-            $nugetErrorMessage = ([string]$nugetOnlineError.Exception.Message -replace '\s+', ' ').Trim()
-            $nugetInnerMessage = if ($nugetOnlineError.Exception.InnerException) {
-                ([string]$nugetOnlineError.Exception.InnerException.Message -replace '\s+', ' ').Trim()
-            } else { 'keine' }
-            $packageManagementVersion = (Get-Module PackageManagement -ListAvailable -ErrorAction SilentlyContinue |
-                Sort-Object Version -Descending | Select-Object -First 1).Version
-            if (-not $packageManagementVersion) { $packageManagementVersion = 'unbekannt' }
-            Write-SetupLog "NuGet-Online-Installation fehlgeschlagen: $nugetErrorMessage" 'WARN'
-            Write-SetupLog ("NuGet-Diagnose: Typ={0}; Fehler-ID={1}; PackageManagement={2}; InnerException={3}" -f `
-                $nugetOnlineError.Exception.GetType().FullName, $nugetOnlineError.FullyQualifiedErrorId, `
-                $packageManagementVersion, $nugetInnerMessage) 'WARN'
-            Write-SetupLog "Online-Installation fehlgeschlagen - versuche lokale Installation..." "WARN"
-            if (Install-NuGetFromLocalServer) {
-                Write-SetupLog "NuGet vom lokalen Server installiert." "SUCCESS"
-                $nugetInstalled = $true
-            } else {
-                Write-SetupLog "NuGet nicht installierbar. Hinweis: NuGet.exe in Skriptordner legen als Fallback." "WARN"
-                Write-SetupLog "PSWindowsUpdate-Installation wird möglicherweise fehlschlagen." "WARN"
-            }
-        }
-    } else {
-        Write-SetupLog "NuGet Provider ist maschinenweit installiert (Version: $($CurrentNuGet.Version))" "SUCCESS"
+    if (-not $nugetReady) {
+        Write-SetupLog 'PSWindowsUpdate-Installation wird möglicherweise fehlschlagen.' 'WARN'
     }
-    
-    # =========================================================
     # === PowerShell Gallery konfigurieren
     # =========================================================
     Write-SetupLog "" "INFO"

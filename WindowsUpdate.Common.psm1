@@ -148,6 +148,70 @@ function Write-PSWindowsUpdateModuleLog {
     if ($Level -eq 'WARN') { Write-Warning $Message } else { Write-Verbose $Message }
 }
 
+function Update-NuGetProvider {
+    <# Aktualisiert den NuGet-Provider im gemeinsamen Rechnerpfad auf die neueste Bootstrap-Version. #>
+    param([switch]$Force, [scriptblock]$WriteLog)
+
+    $minimumVersion = [version]'2.8.5.201'
+    $providerRoot = Join-Path $env:ProgramFiles 'PackageManagement\ProviderAssemblies\nuget'
+    $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+        Where-Object { $_.ProviderPath -like "$providerRoot\*" } |
+        Sort-Object Version -Descending | Select-Object -First 1
+    $latestProvider = $null
+
+    try {
+        $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction Stop |
+            Where-Object { $_.Source -like 'https://cdn.oneget.org/providers/nuget-*.package.swidtag' } |
+            Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+    }
+    catch {
+        $message = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        if ($installedProvider -and $installedProvider.Version -ge $minimumVersion) {
+            if ($WriteLog) { & $WriteLog "NuGet-Versionsprüfung nicht verfügbar; vorhandene Version $($installedProvider.Version) bleibt aktiv: $message" 'WARN' }
+            return $true
+        }
+        if ($WriteLog) { & $WriteLog "Neueste NuGet-Version konnte nicht ermittelt werden: $message" 'WARN' }
+        return $false
+    }
+
+    if (-not $latestProvider) {
+        if ($installedProvider -and $installedProvider.Version -ge $minimumVersion) {
+            if ($WriteLog) { & $WriteLog "Keine neuere NuGet-Version gefunden; vorhandene Version $($installedProvider.Version) bleibt aktiv." 'INFO' }
+            return $true
+        }
+        if ($WriteLog) { & $WriteLog 'Keine NuGet-Version aus dem Bootstrap-Feed gefunden.' 'WARN' }
+        return $false
+    }
+
+    $targetVersion = [version]$latestProvider.Version
+    if ($installedProvider -and $installedProvider.Version -ge $targetVersion -and -not $Force) {
+        if ($WriteLog) { & $WriteLog "NuGet ist aktuell (Version $($installedProvider.Version))." 'SUCCESS' }
+        return $true
+    }
+
+    $oldVersion = if ($installedProvider) { [string]$installedProvider.Version } else { 'nicht installiert' }
+    if ($WriteLog) { & $WriteLog "Aktualisiere NuGet: $oldVersion -> $targetVersion." 'UPDATE' }
+    try {
+        Install-PackageProvider -Name NuGet -RequiredVersion ([string]$targetVersion) -Scope AllUsers `
+            -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
+        $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProviderPath -like "$providerRoot\*" -and $_.Version -ge $targetVersion } |
+            Sort-Object Version -Descending | Select-Object -First 1
+        if (-not $installedProvider) { throw "NuGet $targetVersion wurde nicht im Rechnerpfad gefunden." }
+        if ($WriteLog) { & $WriteLog "NuGet erfolgreich aktualisiert (Version $($installedProvider.Version))." 'SUCCESS' }
+        return $true
+    }
+    catch {
+        $message = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        if ($installedProvider -and $installedProvider.Version -ge $minimumVersion) {
+            if ($WriteLog) { & $WriteLog "NuGet-Aktualisierung fehlgeschlagen; vorhandene Version $($installedProvider.Version) bleibt aktiv: $message" 'WARN' }
+            return $true
+        }
+        if ($WriteLog) { & $WriteLog "NuGet konnte nicht installiert oder aktualisiert werden: $message" 'WARN' }
+        return $false
+    }
+}
+
 function Update-PSWindowsUpdateModule {
     <#
     .SYNOPSIS
@@ -172,12 +236,15 @@ function Update-PSWindowsUpdateModule {
             $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
             $session = New-PSSession @sessionParameters
             $updateDefinition = (Get-Command -Name Update-PSWindowsUpdateModule -CommandType Function).Definition
+            $nugetUpdaterDefinition = (Get-Command -Name Update-NuGetProvider -CommandType Function).Definition
             $logDefinition = (Get-Command -Name Write-PSWindowsUpdateModuleLog -CommandType Function).Definition
             $remoteWorker = {
-                param($UpdaterText, $LoggerText, $ForceUpdate)
+                param($UpdaterText, $NuGetUpdaterText, $LoggerText, $ForceUpdate)
                 Set-Item -Path Function:\Write-PSWindowsUpdateModuleLog -Value ([scriptblock]::Create($LoggerText))
+                Set-Item -Path Function:\Update-NuGetProvider -Value ([scriptblock]::Create($NuGetUpdaterText))
                 Set-Item -Path Function:\Update-PSWindowsUpdateModule -Value ([scriptblock]::Create($UpdaterText))
                 $remoteLogger = { param($Message, $Level) [pscustomobject]@{ Type = 'ModuleLog'; Message = $Message; Level = $Level } }
+                $null = Update-NuGetProvider -WriteLog $remoteLogger -Force:$ForceUpdate
                 # ArgumentList-Werte können bei älteren Remoting-Endpunkten als
                 # String zurückkommen. Switches deshalb nur als echte Switch-
                 # Parameter über eine Splat-Hashtable weitergeben.
@@ -204,7 +271,7 @@ function Update-PSWindowsUpdateModule {
                     }
                 }
             }
-            $remoteResults = @(Invoke-Command -Session $session -ScriptBlock $remoteWorker -ArgumentList $updateDefinition, $logDefinition, [bool]$Force -ErrorAction Stop)
+            $remoteResults = @(Invoke-Command -Session $session -ScriptBlock $remoteWorker -ArgumentList $updateDefinition, $nugetUpdaterDefinition, $logDefinition, [bool]$Force -ErrorAction Stop)
             $success = $false
             foreach ($entry in $remoteResults) {
                 if ($entry.Type -eq 'ModuleLog') { Write-PSWindowsUpdateModuleLog $WriteLog "[$ComputerName] $($entry.Message)" $entry.Level }
@@ -225,13 +292,7 @@ function Update-PSWindowsUpdateModule {
     $galleryVersion = $null
 
     try {
-        $nugetProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-            Where-Object { $_.Version -ge [version]'2.8.5.201' } |
-            Sort-Object Version -Descending | Select-Object -First 1
-        if (-not $nugetProvider) {
-            Install-PackageProvider -Name NuGet -MinimumVersion '2.8.5.201' -Scope AllUsers `
-                -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
-        }
+        $null = Update-NuGetProvider -WriteLog $WriteLog -Force:$Force
 
         $galleryModule = Find-Module -Name PSWindowsUpdate -Repository PSGallery -ErrorAction Stop
         $galleryVersion = [version]$galleryModule.Version
@@ -1819,4 +1880,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-PSWindowsUpdateModule
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule

@@ -8,7 +8,7 @@ Die Mailkonfiguration lässt sich mit `Check-ServersUpdates.ps1 -TestMail` gezie
 
 ## Automatische Skriptaktualisierung
 
-`Check-ServersUpdates.ps1` hält `PSWindowsUpdate` auf dem Verwaltungsrechner und den entfernten Windows-Zielen aktuell. Die verfügbare Version wird in den Modulpfaden von Windows PowerShell 5.1 und PowerShell 7 bereitgestellt. Remote erfolgt die Pflege über WinRM; bei Kerberos wird kein abweichender SPN mit Port verwendet. Scheitert die Aktualisierung, protokolliert der Check eine Warnung und nutzt die vorhandene Modulversion weiter.
+`Check-ServersUpdates.ps1` hält den NuGet-Paketprovider und `PSWindowsUpdate` auf dem Verwaltungsrechner und den entfernten Windows-Zielen aktuell. NuGet wird mit der neuesten verfügbaren Version aus dem PackageManagement-Bootstrap-Feed im gemeinsamen Rechnerpfad abgeglichen; PowerShell 7 kann zusätzlich einen neueren eingebauten Provider verwenden. `PSWindowsUpdate` wird in den Modulpfaden von Windows PowerShell 5.1 und PowerShell 7 bereitgestellt. Remote erfolgt die Pflege über WinRM; bei Kerberos wird kein abweichender SPN mit Port verwendet. Scheitert eine Aktualisierung, protokolliert der Check eine Warnung und verwendet eine vorhandene funktionsfähige Version weiter.
 
 Alle direkt ausführbaren PowerShell-Skripte prüfen beim Start den öffentlichen Branch `main` von [heppo1990/Server-Update-Skripte](https://github.com/heppo1990/Server-Update-Skripte). Dafür ist weder Git noch ein GitHub-Konto auf dem ausführenden System erforderlich; der Rechner benötigt lediglich HTTPS-Zugriff auf GitHub.
 

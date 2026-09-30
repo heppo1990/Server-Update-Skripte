@@ -11,6 +11,8 @@ Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen 
 5. Optional lädt `Download-ServersUpdates.ps1` die Updates vor.
 6. `Install-ServersUpdates.ps1` installiert Updates im geplanten Wartungsfenster.
 
+Beim PSWindowsUpdate-Check werden NuGet und PSWindowsUpdate auf dem Verwaltungsrechner und den Windows-Zielen geprüft und bei Bedarf aktualisiert.
+
 ## Wichtig
 
 - Die Skripte aktualisieren beim Start automatisch geänderte Programmdateien aus dem öffentlichen Branch `main`. Git muss auf den Zielsystemen nicht installiert sein.
