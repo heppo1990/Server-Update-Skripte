@@ -827,17 +827,26 @@ if ($ServerADList -ne $null) {
             continue
           }
           if (-not $packageResult.Available) { continue }
+          $packages = @($packageResult.Packages)
           if (-not $packageResult.Success) {
-            Write-ScriptLog "WARNUNG: $($packageResult.Manager)-Prüfung auf ${Servername} fehlgeschlagen: $($packageResult.ActionOutput)"
+            $hasPackageResults = $packageResult.Manager -eq 'Winget' -and $packages.Count -gt 0
+            if ($hasPackageResults) {
+              Write-ScriptLog "WARNUNG: WinGet auf ${Servername} meldet eine Quellenwarnung; gefundene Updates werden trotzdem übernommen. Details: $($packageResult.ActionOutput)"
+            } else {
+              Write-ScriptLog "WARNUNG: $($packageResult.Manager)-Prüfung auf ${Servername} fehlgeschlagen: $($packageResult.ActionOutput)"
+            }
             $packageErrorHtml = [System.Net.WebUtility]::HtmlEncode([string]$packageResult.ActionOutput)
             if ([string]::IsNullOrWhiteSpace($packageErrorHtml)) { $packageErrorHtml = 'Keine Fehlerdetails zurückgegeben.' }
             $managerHtml = [System.Net.WebUtility]::HtmlEncode([string]$packageResult.Manager)
             $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
-            $RepBody += "<div class='warning-box'><strong>$managerHtml-Prüfung auf $serverHtml fehlgeschlagen.</strong><br>$packageErrorHtml</div>"
-            continue
+            if ($hasPackageResults) {
+              $RepBody += "<div class='warning-box'><strong>$managerHtml-Quellenwarnung auf $serverHtml.</strong> Gefundene Updates werden angezeigt.<br>$packageErrorHtml</div>"
+            } else {
+              $RepBody += "<div class='warning-box'><strong>$managerHtml-Prüfung auf $serverHtml fehlgeschlagen.</strong><br>$packageErrorHtml</div>"
+              continue
+            }
           }
 
-          $packages = @($packageResult.Packages)
           $packageCount = $packages.Count
           if ($packageCount -eq 0) {
             Write-ScriptLog "$($packageResult.Manager) auf ${Servername}: keine Paketupdates verfügbar."

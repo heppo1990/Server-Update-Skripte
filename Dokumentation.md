@@ -387,6 +387,8 @@ Nicht konfigurierte Linux- und Home-Assistant-Ziele werden in Check, Download, I
 
 Die selbstlöschende Nachinstallationsaufgabe protokolliert zusätzlich direkt auf dem jeweiligen Zielsystem in `C:\ProgramData\WindowsUpdateAdm\DeferredUpdates.log`. Dort stehen die erkannte Neustartzeit, die Nachinstallationsauswahl sowie jeder Mailversuch oder SMTP-Fehler.
 
+Bei der WinGet-Prüfung können Paketupdates trotz einer Warnung beim Aktualisieren der Quelle zurückgegeben werden. Check zeigt und zählt solche Paketzeilen weiterhin und weist die Quellenwarnung separat aus; nur wenn keine Paketdaten vorliegen, gilt die Prüfung als fehlgeschlagen.
+
 ## Test einer verzögerten Nachinstallation
 
 Für einen Test kann eine einzelne KB zurückgestellt und eine VM sofort neu gestartet werden:
