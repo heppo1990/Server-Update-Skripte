@@ -596,7 +596,7 @@ function Invoke-ServerUpdateScripts {
         }
 
         $requiredFiles = Get-ServerUpdateRequiredFiles -ScriptRoot $scriptRoot -ScriptPath $ScriptPath -RepositoryBlobs $repositoryBlobs -BoundParameters $BoundParameters
-        $isConnectionOnlyRun = $BoundParameters.Contains('ConnectionOnly') -and [bool]$BoundParameters['ConnectionOnly']
+        $isConnectionOnlyRun = (@($BoundParameters.Keys) -contains 'ConnectionOnly') -and [bool]$BoundParameters['ConnectionOnly']
 
         $filesToFetch = @($requiredFiles | Where-Object {
             $localPath = Join-Path $scriptRoot $_.Path
@@ -725,12 +725,12 @@ function Invoke-ServerUpdateScripts {
         $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         if (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) {
             $restartArguments = [System.Collections.Generic.List[string]]::new()
-            if ($BoundParameters.Contains('DebugMode') -and [bool]$BoundParameters['DebugMode']) { $restartArguments.Add('-DebugMode') }
-            if ($BoundParameters.Contains('TargetComputer')) {
+            if ((@($BoundParameters.Keys) -contains 'DebugMode') -and [bool]$BoundParameters['DebugMode']) { $restartArguments.Add('-DebugMode') }
+            if (@($BoundParameters.Keys) -contains 'TargetComputer') {
                 $restartArguments.Add('-TargetComputer')
                 foreach ($target in @($BoundParameters['TargetComputer'])) { $restartArguments.Add([string]$target) }
             }
-            if ($BoundParameters.Contains('TestDeferredMail') -and [bool]$BoundParameters['TestDeferredMail']) { $restartArguments.Add('-TestDeferredMail') }
+            if ((@($BoundParameters.Keys) -contains 'TestDeferredMail') -and [bool]$BoundParameters['TestDeferredMail']) { $restartArguments.Add('-TestDeferredMail') }
 
             $statusPath = Join-Path ([IO.Path]::GetTempPath()) ('ServerUpdate-PowerShell7-' + [guid]::NewGuid().ToString('N') + '.json')
             $environmentNames = @(
