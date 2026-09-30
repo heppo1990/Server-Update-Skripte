@@ -783,7 +783,6 @@ if ($ServerADList -ne $null) {
           ($updateRows | Select-Object ComputerName, Status, KB, Size, Title | Format-Table -AutoSize | Out-String) `
             -split "\r?\n" | ForEach-Object { if ($_) { Write-ScriptLog $_ } }
           Write-ScriptLog ''
-
           $UpdResultFull += $updateRows
           
           $RepBody += "<table>`n"
@@ -977,9 +976,11 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
 # Zusammenfassung
 $ScriptDuration = [math]::Round((New-TimeSpan -Start $ScriptStartTime).TotalMinutes, 2)
 $CheckedSystemCount = $Anzahl + $(if ($LinuxCheckAttempted) { $LinuxConfiguredHostCount } else { 0 }) + $(if ($HACheckAttempted) { 1 } else { 0 })
-$checkedSystemBreakdown = "Windows: $Anzahl"
-if ($LinuxCheckAttempted) { $checkedSystemBreakdown += ", Linux: $LinuxConfiguredHostCount" }
-if ($HACheckAttempted) { $checkedSystemBreakdown += ', Home Assistant: 1' }
+$checkedSystemParts = @()
+if ($Anzahl -gt 0) { $checkedSystemParts += "Windows: $Anzahl" }
+if ($LinuxCheckAttempted -and $LinuxConfiguredHostCount -gt 0) { $checkedSystemParts += "Linux: $LinuxConfiguredHostCount" }
+if ($HACheckAttempted) { $checkedSystemParts += 'Home Assistant: 1' }
+$checkedSystemBreakdown = $checkedSystemParts -join ', '
 
 if (($UpdCount + $PackageUpdateCount + $LinuxUpdateCount + $HAUpdateCount) -eq 0) {
   $RepBody += @"
@@ -1001,7 +1002,7 @@ $RepBody += @"
 <div class="info-box">
     <p><strong>Statistik:</strong></p>
     <ul>
-        <li>Geprüfte Systeme: $CheckedSystemCount ($checkedSystemBreakdown)</li>
+        <li>Geprüfte Systeme: $CheckedSystemCount$(if ($checkedSystemBreakdown) { " ($checkedSystemBreakdown)" })</li>
         <li>Verfügbare Windows-Updates: $UpdCount</li>
         <li>Verfügbare Anwendungsupdates: $PackageUpdateCount (Winget: $WingetUpdateCount, Chocolatey: $ChocolateyUpdateCount)</li>
         <li>Verarbeitungsdauer: $ScriptDuration Minuten</li>
@@ -1020,7 +1021,7 @@ if ($HACheckExecuted) {
 
 $checkSummaryLines = @(
   "PowerShell Version: $($PSVersionTable.PSVersion)",
-  "Geprüfte Systeme: $CheckedSystemCount ($checkedSystemBreakdown)",
+  "Geprüfte Systeme: $CheckedSystemCount$(if ($checkedSystemBreakdown) { " ($checkedSystemBreakdown)" })",
   "Verfügbare Windows-Updates: $UpdCount",
   "Verfügbare Anwendungsupdates: $PackageUpdateCount (Winget: $WingetUpdateCount, Chocolatey: $ChocolateyUpdateCount)",
   "Dauer: $ScriptDuration Minuten"

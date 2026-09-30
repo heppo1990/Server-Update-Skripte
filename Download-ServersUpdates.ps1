@@ -487,9 +487,11 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
 # Zusammenfassung
 $ScriptDuration = [math]::Round((New-TimeSpan -Start $ScriptStartTime).TotalMinutes, 2)
 $ProcessedSystemCount = $Anzahl + $(if ($LinuxCheckAttempted) { $LinuxConfiguredHostCount } else { 0 }) + $(if ($HACheckAttempted) { 1 } else { 0 })
-$processedSystemBreakdown = "Windows: $Anzahl"
-if ($LinuxCheckAttempted) { $processedSystemBreakdown += ", Linux: $LinuxConfiguredHostCount" }
-if ($HACheckAttempted) { $processedSystemBreakdown += ', Home Assistant: 1' }
+$processedSystemParts = @()
+if ($Anzahl -gt 0) { $processedSystemParts += "Windows: $Anzahl" }
+if ($LinuxCheckAttempted -and $LinuxConfiguredHostCount -gt 0) { $processedSystemParts += "Linux: $LinuxConfiguredHostCount" }
+if ($HACheckAttempted) { $processedSystemParts += 'Home Assistant: 1' }
+$processedSystemBreakdown = $processedSystemParts -join ', '
 
 if ($UpdCount -eq 0) {
   $RepBody += @"
@@ -511,7 +513,7 @@ $RepBody += @"
 <div class="info-box">
     <p><strong>Statistik:</strong></p>
     <ul>
-        <li>Verarbeitete Systeme: $ProcessedSystemCount ($processedSystemBreakdown)</li>
+        <li>Verarbeitete Systeme: $ProcessedSystemCount$(if ($processedSystemBreakdown) { " ($processedSystemBreakdown)" })</li>
         <li>Heruntergeladene Updates: $UpdCount</li>
         <li>Verarbeitungsdauer: $ScriptDuration Minuten</li>
     </ul>
@@ -529,7 +531,7 @@ if ($HACheckExecuted) {
 
  $downloadSummaryLines = @(
   "PowerShell Version: $($PSVersionTable.PSVersion)",
-  "Verarbeitete Systeme: $ProcessedSystemCount ($processedSystemBreakdown)",
+  "Verarbeitete Systeme: $ProcessedSystemCount$(if ($processedSystemBreakdown) { " ($processedSystemBreakdown)" })",
   "Heruntergeladene Updates: $UpdCount",
   "Dauer: $ScriptDuration Minuten"
 )

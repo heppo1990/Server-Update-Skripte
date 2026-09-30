@@ -1306,6 +1306,7 @@ $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings
 $haSettings = if ($Settings.PSObject.Properties['HomeAssistantSettings']) { $Settings.HomeAssistantSettings } else { $null }
 $LinuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Properties['Hosts'] -and @($linuxSettings.Hosts | Where-Object { $_ }).Count -gt 0
 $HAConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
+$LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Where-Object { $_ }).Count } else { 0 }
 $UpdateSettings = $Settings.UpdateSettings
 $MailSettings = $Settings.MailSettings
 # Zurückstellungen einmalig und nur für tatsächlich konfigurierte Auswahlwerte anzeigen.
@@ -1333,6 +1334,11 @@ $HAScriptExecuted = $false
 $LinuxUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Install-Linux Updates.ps1"
 $LinuxStatsFile = Join-Path $PSScriptRoot "linux_update_stats.json"
 $IsWindowsOnlyRun = $TargetComputer -and $TargetComputer.Count -gt 0
+if (-not $IsWindowsOnlyRun) {
+  # Im Gesamtlauf zählen konfigurierte Linux- und HA-Ziele auch bei fehlender Statistikdatei.
+  $LinuxServerCount = $LinuxConfiguredHostCount
+  $HAServerCount = if ($HAConfigured) { 1 } else { 0 }
+}
 
 if ($IsWindowsOnlyRun) {
   Write-ScriptLog "Eingeschränkter Windows-Testlauf: Linux-Updates werden übersprungen."
@@ -1349,7 +1355,7 @@ if ($IsWindowsOnlyRun) {
       if ($LinuxStats.PSObject.Properties.Name -contains 'PendingPhysicalReboots') {
         foreach ($pendingLinuxReboot in @($LinuxStats.PendingPhysicalReboots)) { $script:PendingLinuxPhysicalReboots.Add($pendingLinuxReboot) }
       }
-      $LinuxServerCount = $LinuxStats.TotalHosts
+      $LinuxServerCount = [math]::Max($LinuxServerCount, [int]$LinuxStats.TotalHosts)
       
       if ($LinuxStats.PSObject.Properties.Name -contains 'UpdatesInstalled') {
         $LinuxUpdatesInstalled = $LinuxStats.UpdatesInstalled
@@ -1409,7 +1415,7 @@ if ($IsWindowsOnlyRun) {
       if ($HAStats.PSObject.Properties.Name -contains 'PendingPhysicalReboot' -and $null -ne $HAStats.PendingPhysicalReboot) {
         $script:PendingHAPhysicalReboots.Add($HAStats.PendingPhysicalReboot)
       }
-      $HAServerCount = $HAStats.TotalHosts
+      $HAServerCount = [math]::Max($HAServerCount, [int]$HAStats.TotalHosts)
       
       if ($HAStats.PSObject.Properties.Name -contains 'SuccessfulUpdates') {
         $HAUpdatesInstalled = $HAStats.SuccessfulUpdates
@@ -2068,15 +2074,16 @@ $RepBody += @"
     <h3>Serveranzahl</h3>
     <p><strong>Gesamtanzahl Server:</strong> $TotalServerCount</p>
     <ul>
-        <li>Windows-Server (AD): $WindowsAdCount</li>
-        <li>Windows-Server (Nicht-AD): $WindowsNonAdCount</li>
 "@
 
-if ($LinuxScriptExecuted) {
+if ($WindowsAdCount -gt 0) { $RepBody += "        <li>Windows-Server (AD): $WindowsAdCount</li>`n" }
+if ($WindowsNonAdCount -gt 0) { $RepBody += "        <li>Windows-Server (Nicht-AD): $WindowsNonAdCount</li>`n" }
+
+if ($LinuxServerCount -gt 0) {
   $RepBody += "        <li>Linux-Server: $LinuxServerCount</li>`n"
 }
 
-if ($HAScriptExecuted) {
+if ($HAServerCount -gt 0) {
   $RepBody += "        <li>Home Assistant: $HAServerCount</li>`n"
 }
 
@@ -2128,12 +2135,12 @@ $RepBody += @"
 "@
 
 $summaryLines = @(
-  "Gesamtanzahl Server: $TotalServerCount",
-  "  • Windows-Server (AD): $WindowsAdCount",
-  "  • Windows-Server (Nicht-AD): $WindowsNonAdCount"
+  "Gesamtanzahl Server: $TotalServerCount"
 )
-if ($LinuxScriptExecuted) { $summaryLines += "  • Linux-Server: $LinuxServerCount" }
-if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAServerCount" }
+if ($WindowsAdCount -gt 0) { $summaryLines += "  • Windows-Server (AD): $WindowsAdCount" }
+if ($WindowsNonAdCount -gt 0) { $summaryLines += "  • Windows-Server (Nicht-AD): $WindowsNonAdCount" }
+if ($LinuxServerCount -gt 0) { $summaryLines += "  • Linux-Server: $LinuxServerCount" }
+if ($HAServerCount -gt 0) { $summaryLines += "  • Home Assistant: $HAServerCount" }
 $summaryLines += @('', "Updates installiert: $TotalUpdatesInstalled", "  • Windows: $UpdCount")
 if ($PackageUpdateCount -gt 0) { $summaryLines += "  • Anwendungen: $PackageUpdateCount (Winget: $WingetUpdateCount, Chocolatey: $ChocolateyUpdateCount)" }
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesInstalled" }
