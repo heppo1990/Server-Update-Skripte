@@ -1295,6 +1295,90 @@ function Get-WindowsUpdateTargets {
     return @($targets)
 }
 
+function Invoke-WindowsUpdateRemoteCommandWithTimeout {
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        $AuthInfo,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @(),
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300,
+        [Parameter(Mandatory)][string]$OperationName
+    )
+
+    $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
+    $invokeParameters.ScriptBlock = $ScriptBlock
+    if ($ArgumentList.Count -gt 0) { $invokeParameters.ArgumentList = $ArgumentList }
+    $invokeParameters.AsJob = $true
+    $job = $null
+    try {
+        $job = Invoke-Command @invokeParameters
+        $completedJob = Wait-Job -Job $job -Timeout $TimeoutSeconds
+        if (-not $completedJob) {
+            try { $null = Stop-Job -Job $job -ErrorAction SilentlyContinue } catch { }
+            throw [System.TimeoutException]::new("$OperationName hat das Zeitlimit von $TimeoutSeconds Sekunden überschritten.")
+        }
+        if ($job.State -ne 'Completed') {
+            $reason = @($job.ChildJobs | ForEach-Object { $_.JobStateInfo.Reason.Message } | Where-Object { $_ }) -join '; '
+            if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "Remoting-Aufgabe endete mit Status '$($job.State)'" }
+            throw $reason
+        }
+        return @(Receive-Job -Job $job -ErrorAction Stop)
+    }
+    finally {
+        if ($job) {
+            if ($job.State -in @('Running', 'NotStarted')) {
+                try { $null = Stop-Job -Job $job -ErrorAction SilentlyContinue } catch { }
+            }
+            try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    }
+}
+
+function Reset-WindowsUpdateRemoteWinGetSources {
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        $AuthInfo,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300
+    )
+
+    $resetScript = {
+        $ErrorActionPreference = 'Stop'
+        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+        $knownDefaultSources = @('msstore', 'winget', 'winget-font')
+        $configuredSources = @(Get-WinGetSource -ErrorAction Stop)
+        if ($configuredSources.Count -eq 0) { throw 'WinGet-Quellenliste war leer; Quellenreset abgebrochen.' }
+        $customSources = @($configuredSources | Where-Object { [string]$_.Name -notin $knownDefaultSources } | ForEach-Object { [string]$_.Name } | Select-Object -Unique)
+        if ($customSources.Count -gt 0) {
+            throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); Reset wurde ausgelassen, damit diese erhalten bleiben."
+        }
+
+        Reset-WinGetSource -All -ErrorAction Stop | Out-Null
+        Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+        $sourcesAfterReset = @(Get-WinGetSource -ErrorAction Stop | ForEach-Object { [string]$_.Name })
+        $missingDefaults = @($knownDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
+        if ($missingDefaults.Count -gt 0) { throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')." }
+
+        $stateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $env:ProgramData } else { $env:LOCALAPPDATA }
+        if (-not [string]::IsNullOrWhiteSpace($stateRoot)) {
+            $stateDirectory = Join-Path $stateRoot 'ServerUpdateSkripte'
+            $markerPath = Join-Path $stateDirectory 'WingetAllSourcesResetUtc.txt'
+            try {
+                if (-not (Test-Path -LiteralPath $stateDirectory -PathType Container)) {
+                    New-Item -Path $stateDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                }
+                [IO.File]::WriteAllText($markerPath, [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
+            }
+            catch { Write-Warning "24-Stunden-Marker für WinGet-Quellenreset konnte nicht gespeichert werden: $($_.Exception.Message)" }
+        }
+        [pscustomobject]@{ Success = $true; Message = 'WinGet-Standardquellen wurden zurückgesetzt.' }
+    }
+
+    $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
+        -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName "Quellenreset auf $ComputerName")
+    if ($result.Count -eq 0 -or -not $result[-1].Success) { throw "Quellenreset auf $ComputerName lieferte keine Erfolgsbestätigung." }
+    return $result[-1]
+}
+
 function Invoke-WindowsUpdatePackageManagers {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
@@ -1916,10 +2000,65 @@ $response = @{ Success = $false; Error = $_.Exception.Message; Results = @() }
         }
     }
     else {
-        $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
-        $invokeParameters.ScriptBlock = $packageScript
-        $invokeParameters.ArgumentList = @($Mode, $EnableWinget, $EnableChocolatey)
-        $packageResults = @(Invoke-Command @invokeParameters)
+        if ($Mode -eq 'Check' -and $EnableWinget) {
+            # Chocolatey und WinGet getrennt ausführen: Ein WinGet-Hänger darf
+            # weder den Windows-Update-Check noch Chocolatey-Ergebnisse blockieren.
+            $baseParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
+            $baseParameters.ScriptBlock = $packageScript
+            $baseParameters.ArgumentList = @($Mode, $false, $EnableChocolatey)
+            $baseResults = @(Invoke-Command @baseParameters)
+            $packageResults = @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
+
+            $wingetTimeoutSeconds = 300
+            Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName gestartet (Zeitlimit: 5 Minuten)."
+            try {
+                $wingetResults = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
+                    -ScriptBlock $packageScript -ArgumentList @($Mode, $true, $false) -TimeoutSeconds $wingetTimeoutSeconds `
+                    -OperationName "WinGet-Prüfung auf $ComputerName")
+                $packageResults += @($wingetResults | Where-Object { $_.Manager -eq 'Winget' })
+            }
+            catch [System.TimeoutException] {
+                $firstTimeoutMessage = $_.Exception.Message
+                Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName hat das Zeitlimit erreicht; Quellenreset und einmalige Wiederholung über eine neue Verbindung."
+                try {
+                    $null = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds $wingetTimeoutSeconds
+                    Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen PowerShell-Remoting-Verbindung."
+                    $retryResults = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
+                        -ScriptBlock $packageScript -ArgumentList @($Mode, $true, $false) -TimeoutSeconds $wingetTimeoutSeconds `
+                        -OperationName "WinGet-Wiederholungsprüfung auf $ComputerName")
+                    $wingetResults = @($retryResults | Where-Object { $_.Manager -eq 'Winget' })
+                    if ($wingetResults.Count -eq 0) { throw 'Die Wiederholungsprüfung lieferte kein WinGet-Ergebnis.' }
+                    $retryMessage = 'Erstprüfung überschritt 5 Minuten; Quellen zurückgesetzt und einmal in neuer Verbindung wiederholt.'
+                    foreach ($wingetResult in $wingetResults) {
+                        $bootstrapProperty = $wingetResult.PSObject.Properties['BootstrapMessage']
+                        $existingMessage = if ($bootstrapProperty) { [string]$bootstrapProperty.Value } else { '' }
+                        if ([string]::IsNullOrWhiteSpace($existingMessage)) {
+                            Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue $retryMessage -Force
+                        } else {
+                            Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue "$existingMessage $retryMessage" -Force
+                        }
+                    }
+                    $packageResults += $wingetResults
+                }
+                catch {
+                    $retryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                    if ($retryFailure.Length -gt 300) { $retryFailure = $retryFailure.Substring(0, 297) + '...' }
+                    $failureMessage = "Erste WinGet-Prüfung abgelaufen ($firstTimeoutMessage); Quellenreset/Wiederholung fehlgeschlagen: $retryFailure"
+                    Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName fehlgeschlagen; Details im Log."
+                    $packageResults += [pscustomobject]@{
+                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
+                        ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$failureMessage
+                        BootstrapMessage="WinGet-Prüfung auf ${ComputerName}: Zeitlimit erreicht; Wiederherstellung fehlgeschlagen."
+                    }
+                }
+            }
+        }
+        else {
+            $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
+            $invokeParameters.ScriptBlock = $packageScript
+            $invokeParameters.ArgumentList = @($Mode, $EnableWinget, $EnableChocolatey)
+            $packageResults = @(Invoke-Command @invokeParameters)
+        }
     }
     foreach ($packageResult in $packageResults) {
         $bootstrapMessageProperty = $packageResult.PSObject.Properties['BootstrapMessage']
