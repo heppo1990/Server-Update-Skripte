@@ -1379,6 +1379,140 @@ function Reset-WindowsUpdateRemoteWinGetSources {
     return $result[-1]
 }
 
+function Invoke-WindowsUpdateLocalCommandWithTimeout {
+    param(
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @(),
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300,
+        [switch]$NoTimeout,
+        [Parameter(Mandatory)][string]$OperationName
+    )
+
+    $powerShell51 = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) {
+        throw 'Windows PowerShell 5.1 wurde für die lokale WinGet-Prüfung nicht gefunden.'
+    }
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('ServerUpdate-WinGet-{0}' -f [guid]::NewGuid().ToString('N'))
+    $payloadPath = Join-Path $temporaryRoot 'payload.json'
+    $runnerPath = Join-Path $temporaryRoot 'run.ps1'
+    $responsePath = Join-Path $temporaryRoot 'response.json'
+    $stdoutPath = Join-Path $temporaryRoot 'stdout.log'
+    $stderrPath = Join-Path $temporaryRoot 'stderr.log'
+    $process = $null
+    try {
+        New-Item -ItemType Directory -Path $temporaryRoot -Force -ErrorAction Stop | Out-Null
+        $payload = ConvertTo-Json -InputObject @{
+            Script = $ScriptBlock.ToString()
+            ArgumentList = @($ArgumentList)
+        } -Depth 20 -Compress
+        [IO.File]::WriteAllText($payloadPath, $payload, [Text.UTF8Encoding]::new($false))
+        $runnerSource = @'
+param([Parameter(Mandatory)][string]$PayloadPath, [Parameter(Mandatory)][string]$ResponsePath)
+$ErrorActionPreference = 'Stop'
+try {
+    $payload = Get-Content -LiteralPath $PayloadPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $runnerArguments = @($payload.ArgumentList)
+    $items = @(& ([scriptblock]::Create([string]$payload.Script)) @runnerArguments)
+    $response = @{ Success = $true; Results = @($items) }
+}
+catch {
+    $response = @{ Success = $false; Error = $_.Exception.Message; Results = @() }
+}
+[IO.File]::WriteAllText($ResponsePath, (ConvertTo-Json -InputObject $response -Depth 20 -Compress), [Text.UTF8Encoding]::new($false))
+'@
+        [IO.File]::WriteAllText($runnerPath, $runnerSource, [Text.UTF8Encoding]::new($false))
+        $processArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -PayloadPath "{1}" -ResponsePath "{2}"' -f $runnerPath, $payloadPath, $responsePath
+        $process = Start-Process -FilePath $powerShell51 -ArgumentList $processArguments -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+        if ($NoTimeout) {
+            $process.WaitForExit()
+        } elseif (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            try { $null = $process.WaitForExit(10000) } catch { }
+            throw [System.TimeoutException]::new("$OperationName hat das Zeitlimit von $TimeoutSeconds Sekunden überschritten.")
+        }
+
+        if (-not (Test-Path -LiteralPath $responsePath -PathType Leaf)) {
+            $stdout = if (Test-Path -LiteralPath $stdoutPath) { (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
+            $stderr = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
+            throw "$OperationName lieferte keine strukturierte Rückgabe (Exitcode $($process.ExitCode)). $stdout $stderr"
+        }
+        $response = Get-Content -LiteralPath $responsePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        if (-not $response.Success) { throw [string]$response.Error }
+        return @($response.Results)
+    }
+    finally {
+        if ($process) { $process.Dispose() }
+        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Reset-WindowsUpdateLocalWinGetSources {
+    param([ValidateRange(1, 3600)][int]$TimeoutSeconds = 300)
+    $resetScript = {
+        $ErrorActionPreference = 'Stop'
+        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+        $knownDefaultSources = @('msstore', 'winget', 'winget-font')
+        $configuredSources = @(Get-WinGetSource -ErrorAction Stop)
+        if ($configuredSources.Count -eq 0) { throw 'WinGet-Quellenliste war leer; Quellenreset abgebrochen.' }
+        $customSources = @($configuredSources | Where-Object { [string]$_.Name -notin $knownDefaultSources } | ForEach-Object { [string]$_.Name } | Select-Object -Unique)
+        if ($customSources.Count -gt 0) {
+            throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); Reset wurde ausgelassen, damit diese erhalten bleiben."
+        }
+        Reset-WinGetSource -All -ErrorAction Stop | Out-Null
+        Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+        $sourceNames = @(Get-WinGetSource -ErrorAction Stop | ForEach-Object { [string]$_.Name })
+        $missingDefaults = @($knownDefaultSources | Where-Object { $_ -notin $sourceNames })
+        if ($missingDefaults.Count -gt 0) { throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')." }
+        $stateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $env:ProgramData } else { $env:LOCALAPPDATA }
+        if (-not [string]::IsNullOrWhiteSpace($stateRoot)) {
+            $stateDirectory = Join-Path $stateRoot 'ServerUpdateSkripte'
+            try {
+                if (-not (Test-Path -LiteralPath $stateDirectory -PathType Container)) { New-Item -Path $stateDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null }
+                [IO.File]::WriteAllText((Join-Path $stateDirectory 'WingetAllSourcesResetUtc.txt'), [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
+            } catch { Write-Warning "24-Stunden-Marker für WinGet-Quellenreset konnte nicht gespeichert werden: $($_.Exception.Message)" }
+        }
+        [pscustomobject]@{ Success = $true; Message = 'WinGet-Standardquellen wurden zurückgesetzt.' }
+    }
+    $result = @(Invoke-WindowsUpdateLocalCommandWithTimeout -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName 'Lokaler WinGet-Quellenreset')
+    if ($result.Count -eq 0 -or -not $result[-1].Success) { throw 'Lokaler WinGet-Quellenreset lieferte keine Erfolgsbestätigung.' }
+    return $result[-1]
+}
+
+function Invoke-WindowsUpdatePackageWorker {
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        $AuthInfo,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @(),
+        [bool]$IsLocalTarget = $false,
+        [switch]$NoTimeout,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300,
+        [Parameter(Mandatory)][string]$OperationName
+    )
+
+    if ($IsLocalTarget) {
+        $localParameters = @{
+            ScriptBlock = $ScriptBlock
+            ArgumentList = $ArgumentList
+            OperationName = $OperationName
+        }
+        if ($NoTimeout) { $localParameters.NoTimeout = $true }
+        else { $localParameters.TimeoutSeconds = $TimeoutSeconds }
+        return @(Invoke-WindowsUpdateLocalCommandWithTimeout @localParameters)
+    }
+
+    if ($NoTimeout) {
+        $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
+        $invokeParameters.ScriptBlock = $ScriptBlock
+        if ($ArgumentList.Count -gt 0) { $invokeParameters.ArgumentList = $ArgumentList }
+        return @(Invoke-Command @invokeParameters)
+    }
+
+    return @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
+        -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds -OperationName $OperationName)
+}
+
 function Invoke-WindowsUpdatePackageManagers {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
@@ -1553,23 +1687,59 @@ catch {
         }
 
         function Get-WingetModuleUpdateOutput {
+            $queryJob = $null
             try {
-                Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-                $packages = @(Get-WinGetPackage -ErrorAction Stop | Where-Object { $_.IsUpdateAvailable })
-                $lines = foreach ($package in $packages) {
-                    $availableVersions = @($package.AvailableVersions)
-                    $availableVersion = if ($availableVersions.Count -gt 0) { [string]$availableVersions[0] } else { 'unbekannt' }
-                    $sourceName = [string]$package.Source
-                    if ([string]::IsNullOrWhiteSpace($sourceName)) { throw "Für '$($package.Name)' [$($package.Id)] wurde keine WinGet-Quelle zurückgegeben." }
-                    [string]::Format('{0,-65} {1,-38} {2,-14} {3,-14} {4}', [string]$package.Name, [string]$package.Id, [string]$package.InstalledVersion, $availableVersion, $sourceName)
+                # Katalogabfragen können in WinGet/COM hängen bleiben. Sie laufen
+                # daher in einem eigenen Prozess und werden in Check und Install
+                # nach fünf Minuten beendet. Der Paketinstallationsschritt selbst
+                # liegt außerhalb dieses Zeitlimits.
+                $queryJob = Start-Job -ScriptBlock {
+                    $ErrorActionPreference = 'Stop'
+                    try {
+                        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+                        $packages = @(Get-WinGetPackage -ErrorAction Stop | Where-Object { $_.IsUpdateAvailable })
+                        $lines = foreach ($package in $packages) {
+                            $availableVersions = @($package.AvailableVersions)
+                            $availableVersion = if ($availableVersions.Count -gt 0) { [string]$availableVersions[0] } else { 'unbekannt' }
+                            $sourceName = [string]$package.Source
+                            if ([string]::IsNullOrWhiteSpace($sourceName)) { throw "Für '$($package.Name)' [$($package.Id)] wurde keine WinGet-Quelle zurückgegeben." }
+                            [string]::Format('{0,-65} {1,-38} {2,-14} {3,-14} {4}', [string]$package.Name, [string]$package.Id, [string]$package.InstalledVersion, $availableVersion, $sourceName)
+                        }
+                        [pscustomobject]@{ Success = $true; Output = (@($lines) -join [Environment]::NewLine); Error = '' }
+                    }
+                    catch {
+                        $detail = ([string]$_.Exception.Message -split "`r?`n")[0].Trim()
+                        if ($detail -match '(?i)(Fehler beim Durchsuchen der Quelle|Fehler beim Versuch, die Quelle zu aktualisieren|An error occurred while searching the source|Failed when searching (?:the )?source|Failed in attempting to update the source)') {
+                            [pscustomobject]@{ Success = $true; Output = $detail; Error = '' }
+                        }
+                        else {
+                            [pscustomobject]@{ Success = $false; Output = ''; Error = $_.Exception.ToString() }
+                        }
+                    }
                 }
-                return (@($lines) -join [Environment]::NewLine)
+                # 30 Sekunden Reserve für das Aufräumen im Worker; der äußere
+                # Check-Timeout bleibt bei fünf Minuten.
+                $queryState = Wait-Job -Job $queryJob -Timeout 270
+                if (-not $queryState) {
+                    Stop-Job -Job $queryJob -ErrorAction SilentlyContinue
+                    throw [System.TimeoutException]::new('WinGet-Katalogabfrage hat das Zeitlimit von 4 Minuten 30 Sekunden überschritten.')
+                }
+                $queryResult = Receive-Job -Job $queryJob -ErrorAction Stop | Select-Object -Last 1
+                if (-not $queryResult) { throw 'WinGet-Katalogabfrage lieferte keine Rückgabe.' }
+                if (-not $queryResult.Success) { throw [string]$queryResult.Error }
+                return [string]$queryResult.Output
             }
             catch {
+                if ($_.Exception -is [System.TimeoutException]) { throw }
                 $detail = ([string]$_.Exception.Message -split "`r?`n")[0].Trim()
                 if ($detail.Length -gt 350) { $detail = $detail.Substring(0, 347) + '...' }
                 if (Test-WingetSourceFailureLine -Line $detail) { return $detail }
                 throw
+            }
+            finally {
+                if ($queryJob) {
+                    Remove-Job -Job $queryJob -Force -ErrorAction SilentlyContinue
+                }
             }
         }
 
@@ -1707,7 +1877,7 @@ catch {
             $wingetPreparationSucceeded = $true
             $serverCaption = ''
             try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
-            if ($serverCaption -match 'Windows Server (2019|2022)') {
+            if ($ExecutionMode -eq 'Check' -and $serverCaption -match 'Windows Server (2019|2022)') {
                 $wingetHealth = Test-WingetExecutable -Path $wingetPath
                 $wingetModuleHealth = Test-WingetModuleApi
                 if (-not $wingetHealth.Works -or $wingetModuleHealth.RepairRequired) {
@@ -1736,7 +1906,12 @@ catch {
             }
 
             if (-not $wingetPreparationSucceeded) {
-                $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$wingetBootstrapMessage; BootstrapMessage=$wingetBootstrapMessage }
+                $retryFreshConnection = $wingetBootstrapMessage -match '(?i)(0x800706ba|-2147023174|Failed to create instance|RPC server is unavailable|RPC-Server nicht verfügbar)'
+                $result += [PSCustomObject]@{
+                    Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                    Packages=@(); AvailableOutput=''; ActionOutput=$wingetBootstrapMessage; BootstrapMessage=$wingetBootstrapMessage
+                    RetryFreshConnection=$retryFreshConnection
+                }
             }
             else {
                 try {
@@ -1748,53 +1923,33 @@ catch {
                 $wingetSourceRefreshOutput = ''
                 $sourceResetPerformed = $false
                 if ($sourceFailureLines.Count -gt 0) {
-                    # WinGet kann bei veraltetem oder kurzfristig nicht erreichbarem
-                    # Quellcache eine Fehlermeldung ausgeben, obwohl die Quelle danach
-                    # wieder funktioniert. Quelle einmal gezielt aktualisieren und
-                    # die Suche wiederholen, bevor der Lauf einen Fehler meldet.
-                    try {
-                        Reset-WingetDefaultSources
-                        $sourceResetPerformed = $true
-                        $sourceResetState = Get-WingetSourceResetState
-                        try { Save-WingetSourceResetState -State $sourceResetState }
-                        catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
-                        $wingetBootstrapMessage += ' WinGet-Quellen wurden über Microsoft.WinGet.Client zurückgesetzt; die Paketabfrage wird wiederholt.'
-                        $availableOutput = Get-WingetModuleUpdateOutput
-                        $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
-                            Test-WingetSourceFailureLine -Line ([string]$_)
-                        })
+                    $sourceFailureText = @($sourceFailureLines | ForEach-Object { Get-WingetCompactOutput -Text ([string]$_) }) -join ' '
+                    $result += [PSCustomObject]@{
+                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=1
+                        Packages=@(); AvailableOutput=$availableOutput; ActionOutput=$sourceFailureText
+                        RetryAfterSourceReset=($ExecutionMode -eq 'Check')
                     }
-                    catch {
-                        $sourceFailureLines += "WinGet-Quellenreset über Microsoft.WinGet.Client fehlgeschlagen: $(([string]$_.Exception.Message -replace '\s+', ' ').Trim())"
-                    }
+                    return @($result)
                 }
                 # Winget liefert eine formatierte Tabelle. Echte Upgrade-Zeilen
                 # enden mit ihrer Paketquelle (winget oder msstore); Status- und
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
-                if ($packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $sourceResetPerformed) {
+                if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $sourceResetPerformed) {
                     # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
                     # beschädigten lokalen Quellenzustand hindeuten. Der nötige
                     # vollständige Reset erfolgt nur, wenn keine kundeneigenen
                     # Quellen vorhanden sind.
                     $sourceResetState = Get-WingetSourceResetState
                     if ($sourceResetState.Allowed) {
-                        try {
-                            Reset-WingetDefaultSources
-                            $sourceResetPerformed = $true
-                            try { Save-WingetSourceResetState -State $sourceResetState }
-                            catch { $wingetBootstrapMessage += " Warnung: Die 24-Stunden-Sperre für Quellenresets konnte nicht gespeichert werden: $($_.Exception.Message)" }
-                            $wingetBootstrapMessage += ' Die WinGet-Suche war leer; die Standardquellen wurden gezielt zurückgesetzt und die Suche einmal wiederholt.'
-                            $availableOutput = Get-WingetModuleUpdateOutput
-                            $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
-                                Test-WingetSourceFailureLine -Line ([string]$_)
-                            })
-                            $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
+                        $result += [PSCustomObject]@{
+                            Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                            Packages=@(); AvailableOutput=$availableOutput
+                            ActionOutput='WinGet-Suche war leer; Quellenreset und eine erneute Prüfung in neuer Verbindung erforderlich.'
+                            RetryAfterSourceReset=$true
                         }
-                        catch {
-                            $wingetBootstrapMessage += " Zurücksetzen der WinGet-Standardquellen fehlgeschlagen: $($_.Exception.Message)"
-                        }
+                        return @($result)
                     }
                     elseif (-not $sourceResetState.Allowed) {
                         $wingetBootstrapMessage += " Die WinGet-Suche war leer; ein Quellenreset wurde übersprungen, da auf diesem Zielsystem innerhalb der letzten 24 Stunden bereits einer ausgeführt wurde."
@@ -1933,7 +2088,17 @@ catch {
                 }
                 }
                 catch {
-                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$_.Exception.Message }
+                    $exceptionMessage = [string]$_.Exception.Message
+                    $retryFreshConnection = $exceptionMessage -match '(?i)(0x800706ba|-2147023174|Failed to create instance|RPC server is unavailable|RPC-Server nicht verfügbar)'
+                    $queryTimedOut = $_.Exception -is [System.TimeoutException] -or
+                        $exceptionMessage -match '(?i)(WinGet-Katalogabfrage hat das Zeitlimit|WinGet.*Zeitlimit von 5 Minuten überschritten)'
+                    $retryAfterSourceReset = $queryTimedOut -and $ExecutionMode -eq 'Check'
+                    $retryFreshConnection = $retryFreshConnection -or ($queryTimedOut -and $ExecutionMode -eq 'Install')
+                    $result += [PSCustomObject]@{
+                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                        Packages=@(); AvailableOutput=''; ActionOutput=$exceptionMessage; DiagnosticOutput=$_.Exception.ToString()
+                        RetryFreshConnection=$retryFreshConnection; RetryAfterSourceReset=$retryAfterSourceReset
+                    }
                 }
             }
             if (-not [string]::IsNullOrWhiteSpace($wingetBootstrapMessage)) {
@@ -1947,117 +2112,130 @@ catch {
 
     $localNames = @($env:COMPUTERNAME, [System.Net.Dns]::GetHostName()) | Where-Object { $_ }
     if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
-    if ($localNames -contains $ComputerName) {
-        # Microsoft.WinGet.Client nutzt WinRT/COM und funktioniert auf den
-        # unterstützten Verwaltungsservern zuverlässig in Windows PowerShell
-        # 5.1. Deshalb lokale Prüfungen ebenfalls in einem frischen PS5-Prozess
-        # ausführen, unabhängig davon, ob der Aufrufer PS5 oder PS7 verwendet.
-        $powerShell51 = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) {
-            throw 'Windows PowerShell 5.1 wurde für die lokale WinGet-Modulabfrage nicht gefunden.'
-        }
-        $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('ServerUpdate-WinGet-{0}' -f [guid]::NewGuid().ToString('N'))
-        $payloadPath = Join-Path $temporaryRoot 'payload.json'
-        $runnerPath = Join-Path $temporaryRoot 'run.ps1'
-        $responsePath = Join-Path $temporaryRoot 'response.json'
-        try {
-            New-Item -ItemType Directory -Path $temporaryRoot -Force -ErrorAction Stop | Out-Null
-            $payloadJson = ConvertTo-Json -InputObject @{
-                Script = $packageScript.ToString()
-                Mode = $Mode
-                UseWinget = $EnableWinget
-                UseChocolatey = $EnableChocolatey
-            } -Depth 20 -Compress
-            [IO.File]::WriteAllText($payloadPath, $payloadJson, [Text.UTF8Encoding]::new($false))
-            $runnerSource = @'
-param([Parameter(Mandatory)][string]$PayloadPath)
-$ErrorActionPreference = 'Stop'
-try {
-    $payload = Get-Content -LiteralPath $PayloadPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    $items = @(& ([scriptblock]::Create([string]$payload.Script)) ([string]$payload.Mode) ([bool]$payload.UseWinget) ([bool]$payload.UseChocolatey))
-    $response = @{ Success = $true; Results = @($items) }
-}
-catch {
-$response = @{ Success = $false; Error = $_.Exception.Message; Results = @() }
-}
-[IO.File]::WriteAllText($env:SERVER_UPDATE_WINGET_RESPONSE_PATH, (ConvertTo-Json -InputObject $response -Depth 20 -Compress), [Text.UTF8Encoding]::new($false))
-'@
-            [IO.File]::WriteAllText($runnerPath, $runnerSource, [Text.UTF8Encoding]::new($false))
-            $previousResponsePath = $env:SERVER_UPDATE_WINGET_RESPONSE_PATH
-            $env:SERVER_UPDATE_WINGET_RESPONSE_PATH = $responsePath
-            try { $runnerOutput = @(& $powerShell51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runnerPath -PayloadPath $payloadPath 2>&1) }
-            finally { $env:SERVER_UPDATE_WINGET_RESPONSE_PATH = $previousResponsePath }
-            $runnerExitCode = $LASTEXITCODE
-            if (-not (Test-Path -LiteralPath $responsePath -PathType Leaf)) {
-                throw "Windows PowerShell 5.1 lieferte keine strukturierte Paketmanager-Rückgabe (Exitcode $runnerExitCode). $((($runnerOutput | ForEach-Object { [string]$_ }) -join ' '))"
-            }
-            $runnerResult = Get-Content -LiteralPath $responsePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-            if (-not $runnerResult.Success) { throw [string]$runnerResult.Error }
-            $packageResults = @($runnerResult.Results)
-        }
-        finally {
-            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    $isLocalTarget = $localNames -contains $ComputerName
+    $packageResults = @()
+
+    if (-not $EnableWinget) {
+        $packageResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey) -IsLocalTarget $isLocalTarget `
+            -NoTimeout -OperationName "Paketmanager-Prüfung auf $ComputerName")
     }
     else {
-        if ($Mode -eq 'Check' -and $EnableWinget) {
-            # Chocolatey und WinGet getrennt ausführen: Ein WinGet-Hänger darf
-            # weder den Windows-Update-Check noch Chocolatey-Ergebnisse blockieren.
-            $baseParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
-            $baseParameters.ScriptBlock = $packageScript
-            $baseParameters.ArgumentList = @($Mode, $false, $EnableChocolatey)
-            $baseResults = @(Invoke-Command @baseParameters)
-            $packageResults = @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
+        # Chocolatey und WinGet getrennt ausführen. So bleiben Chocolatey-
+        # Ergebnisse erhalten, auch wenn WinGet hängen bleibt oder wiederholt wird.
+        $baseResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey) -IsLocalTarget $isLocalTarget `
+            -NoTimeout -OperationName "Chocolatey-Prüfung auf $ComputerName")
+        $packageResults += @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
 
-            $wingetTimeoutSeconds = 300
-            Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName gestartet (Zeitlimit: 5 Minuten)."
-            try {
-                $wingetResults = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
-                    -ScriptBlock $packageScript -ArgumentList @($Mode, $true, $false) -TimeoutSeconds $wingetTimeoutSeconds `
-                    -OperationName "WinGet-Prüfung auf $ComputerName")
-                $packageResults += @($wingetResults | Where-Object { $_.Manager -eq 'Winget' })
+        $wingetTimeoutSeconds = 300
+        $hasCheckTimeout = $Mode -eq 'Check'
+        $firstWingetResult = $null
+        $retryRequired = $false
+        $retryRequiresSourceReset = $false
+        $retryReason = ''
+        $firstFailure = ''
+        if ($hasCheckTimeout) { Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName gestartet (Zeitlimit: 5 Minuten)." }
+
+        try {
+            $initialParameters = @{
+                ComputerName = $ComputerName
+                AuthInfo = $AuthInfo
+                ScriptBlock = $packageScript
+                ArgumentList = @($Mode, $true, $false)
+                IsLocalTarget = $isLocalTarget
+                OperationName = "WinGet-Prüfung auf $ComputerName"
             }
-            catch [System.TimeoutException] {
-                $firstTimeoutMessage = $_.Exception.Message
-                Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName hat das Zeitlimit erreicht; Quellenreset und einmalige Wiederholung über eine neue Verbindung."
-                try {
-                    $null = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds $wingetTimeoutSeconds
-                    Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen PowerShell-Remoting-Verbindung."
-                    $retryResults = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
-                        -ScriptBlock $packageScript -ArgumentList @($Mode, $true, $false) -TimeoutSeconds $wingetTimeoutSeconds `
-                        -OperationName "WinGet-Wiederholungsprüfung auf $ComputerName")
-                    $wingetResults = @($retryResults | Where-Object { $_.Manager -eq 'Winget' })
-                    if ($wingetResults.Count -eq 0) { throw 'Die Wiederholungsprüfung lieferte kein WinGet-Ergebnis.' }
-                    $retryMessage = 'Erstprüfung überschritt 5 Minuten; Quellen zurückgesetzt und einmal in neuer Verbindung wiederholt.'
-                    foreach ($wingetResult in $wingetResults) {
-                        $bootstrapProperty = $wingetResult.PSObject.Properties['BootstrapMessage']
-                        $existingMessage = if ($bootstrapProperty) { [string]$bootstrapProperty.Value } else { '' }
-                        if ([string]::IsNullOrWhiteSpace($existingMessage)) {
-                            Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue $retryMessage -Force
-                        } else {
-                            Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue "$existingMessage $retryMessage" -Force
-                        }
-                    }
-                    $packageResults += $wingetResults
-                }
-                catch {
-                    $retryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-                    if ($retryFailure.Length -gt 300) { $retryFailure = $retryFailure.Substring(0, 297) + '...' }
-                    $failureMessage = "Erste WinGet-Prüfung abgelaufen ($firstTimeoutMessage); Quellenreset/Wiederholung fehlgeschlagen: $retryFailure"
-                    Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName fehlgeschlagen; Details im Log."
-                    $packageResults += [pscustomobject]@{
-                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
-                        ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$failureMessage
-                        BootstrapMessage="WinGet-Prüfung auf ${ComputerName}: Zeitlimit erreicht; Wiederherstellung fehlgeschlagen."
-                    }
-                }
+            if ($hasCheckTimeout) { $initialParameters.TimeoutSeconds = $wingetTimeoutSeconds }
+            else { $initialParameters.NoTimeout = $true }
+            $wingetResults = @(Invoke-WindowsUpdatePackageWorker @initialParameters | Where-Object { $_.Manager -eq 'Winget' })
+            if ($wingetResults.Count -eq 0) { throw 'Die WinGet-Prüfung lieferte kein Ergebnis.' }
+            $firstWingetResult = $wingetResults[-1]
+            $resetProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourceReset']
+            $connectionProperty = $firstWingetResult.PSObject.Properties['RetryFreshConnection']
+            if ($resetProperty -and [bool]$resetProperty.Value) {
+                $retryRequired = $true
+                $retryRequiresSourceReset = $true
+                $retryReason = 'Quellenreset erforderlich'
+                $firstFailure = [string]$firstWingetResult.ActionOutput
             }
+            elseif ($connectionProperty -and [bool]$connectionProperty.Value) {
+                $retryRequired = $true
+                $retryReason = 'WinGet-RPC-Fehler; frische Verbindung erforderlich'
+                $firstFailure = [string]$firstWingetResult.ActionOutput
+            }
+            else { $packageResults += $wingetResults }
         }
-        else {
-            $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
-            $invokeParameters.ScriptBlock = $packageScript
-            $invokeParameters.ArgumentList = @($Mode, $EnableWinget, $EnableChocolatey)
-            $packageResults = @(Invoke-Command @invokeParameters)
+        catch [System.TimeoutException] {
+            $retryRequired = $true
+            $retryRequiresSourceReset = $true
+            $retryReason = 'Zeitlimit erreicht; Quellenreset erforderlich'
+            $firstFailure = $_.Exception.Message
+        }
+
+        if ($retryRequired) {
+            $retryDescription = if ($retryRequiresSourceReset) { 'Quellenreset und einmalige Wiederholung' } else { 'einmalige Wiederholung' }
+            Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
+            try {
+                if ($retryRequiresSourceReset) {
+                    if ($isLocalTarget) {
+                        $null = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds $wingetTimeoutSeconds
+                    } else {
+                        $null = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds $wingetTimeoutSeconds
+                    }
+                    Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen Sitzung."
+                }
+
+                $retryParameters = @{
+                    ComputerName = $ComputerName
+                    AuthInfo = $AuthInfo
+                    ScriptBlock = $packageScript
+                    ArgumentList = @($Mode, $true, $false)
+                    IsLocalTarget = $isLocalTarget
+                    OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
+                }
+                if ($hasCheckTimeout) { $retryParameters.TimeoutSeconds = $wingetTimeoutSeconds }
+                else { $retryParameters.NoTimeout = $true }
+                $retryResults = @(Invoke-WindowsUpdatePackageWorker @retryParameters | Where-Object { $_.Manager -eq 'Winget' })
+                if ($retryResults.Count -eq 0) { throw 'Die Wiederholungsprüfung lieferte kein WinGet-Ergebnis.' }
+                $retryResult = $retryResults[-1]
+                $retryResetProperty = $retryResult.PSObject.Properties['RetryAfterSourceReset']
+                $retryConnectionProperty = $retryResult.PSObject.Properties['RetryFreshConnection']
+                if (($retryResetProperty -and [bool]$retryResetProperty.Value) -or
+                    ($retryConnectionProperty -and [bool]$retryConnectionProperty.Value)) {
+                    $retryDetail = ([string]$retryResult.ActionOutput -replace '\s+', ' ').Trim()
+                    if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet lieferte erneut kein auswertbares Ergebnis.' }
+                    throw "Wiederholungsprüfung blieb fehlerhaft: $retryDetail"
+                }
+                $retryMessage = if ($retryRequiresSourceReset) {
+                    'WinGet nach Quellenreset in neuer Sitzung erneut geprüft.'
+                } else {
+                    'WinGet nach Fehler in neuer Sitzung erneut geprüft.'
+                }
+                foreach ($wingetResult in $retryResults) {
+                    $bootstrapProperty = $wingetResult.PSObject.Properties['BootstrapMessage']
+                    $existingMessage = if ($bootstrapProperty) { [string]$bootstrapProperty.Value } else { '' }
+                    if ([string]::IsNullOrWhiteSpace($existingMessage)) {
+                        Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue $retryMessage -Force
+                    } else {
+                        Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue "$existingMessage $retryMessage" -Force
+                    }
+                }
+                $packageResults += $retryResults
+            }
+            catch {
+                $retryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                if ($retryFailure.Length -gt 300) { $retryFailure = $retryFailure.Substring(0, 297) + '...' }
+                $compactFirstFailure = ([string]$firstFailure -replace '\s+', ' ').Trim()
+                if ($compactFirstFailure.Length -gt 300) { $compactFirstFailure = $compactFirstFailure.Substring(0, 297) + '...' }
+                $failureMessage = "Erste WinGet-Prüfung: $compactFirstFailure; Wiederherstellung fehlgeschlagen: $retryFailure"
+                Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName fehlgeschlagen; Details im Log."
+                $packageResults += [pscustomobject]@{
+                    Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
+                    ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$failureMessage
+                    BootstrapMessage="WinGet-Prüfung auf ${ComputerName}: Wiederholung nach Fehler fehlgeschlagen."
+                }
+            }
         }
     }
     foreach ($packageResult in $packageResults) {
