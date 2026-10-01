@@ -613,23 +613,19 @@ catch {
     return -not (@($results | Where-Object { $_.Type -eq 'Log' -and $_.Level -eq 'WARN' }).Count -gt 0)
 }
 
-function Repair-WindowsUpdateWinGetPackageManager {
-    <# Repariert WinGet und registriert die bereitgestellte App-Installer-Version für den aktuellen Benutzer. #>
+function Register-WindowsUpdateWinGetAppInstallerForCurrentUser {
+    <# Registriert eine neuere bereitgestellte App-Installer-Version für den aktuellen Benutzer. #>
     [CmdletBinding()]
     param()
 
     $ErrorActionPreference = 'Stop'
-    Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
-    $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
-    Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
-
-    $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+    $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
         Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
     $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
         Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
     $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
     if ($latestPackage.Count -eq 0) {
-        throw 'App Installer wurde nach der WinGet-Reparatur nicht als Paket gefunden.'
+        return [pscustomobject]@{ AppInstallerVersion = ''; RegistrationChanged = $false }
     }
 
     $targetVersion = [version]$latestPackage[0].Version
@@ -651,10 +647,23 @@ function Repair-WindowsUpdateWinGetPackageManager {
         throw "App Installer $targetVersion wurde für den aktuellen Benutzer nicht erfolgreich registriert."
     }
 
+    return [pscustomobject]@{ AppInstallerVersion = [string]$registeredPackage[0].Version; RegistrationChanged = $registrationChanged }
+}
+
+function Repair-WindowsUpdateWinGetPackageManager {
+    <# Repariert WinGet und registriert die bereitgestellte App-Installer-Version für den aktuellen Benutzer. #>
+    [CmdletBinding()]
+    param()
+
+    $ErrorActionPreference = 'Stop'
+    Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
+    $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+    Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+    $registration = Register-WindowsUpdateWinGetAppInstallerForCurrentUser
     [pscustomobject]@{
         WinGetVersion = [string](Get-WinGetVersion -ErrorAction Stop)
-        AppInstallerVersion = [string]$registeredPackage[0].Version
-        RegistrationChanged = $registrationChanged
+        AppInstallerVersion = [string]$registration.AppInstallerVersion
+        RegistrationChanged = [bool]$registration.RegistrationChanged
     }
 }
 
@@ -1882,12 +1891,12 @@ catch {
         }
 
         function Register-LatestWinGetAppInstallerForCurrentUser {
-            $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+            $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
                 Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
             $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
                 Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
             $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
-            if ($latestPackage.Count -eq 0) { throw 'App Installer wurde nach der WinGet-Reparatur nicht als Paket gefunden.' }
+            if ($latestPackage.Count -eq 0) { return [pscustomobject]@{ Version = ''; RegistrationChanged = $false } }
 
             $targetVersion = [version]$latestPackage[0].Version
             $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
@@ -1951,6 +1960,20 @@ catch {
             $wingetPreparationSucceeded = $true
             $serverCaption = ''
             try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+            if ($ExecutionMode -eq 'Check' -and $wingetPath -and $serverCaption -match 'Windows Server') {
+                try {
+                    $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
+                    if ($appInstallerRegistration.RegistrationChanged) {
+                        $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) für den aktuellen Benutzer registriert."
+                        $wingetPath = Resolve-WingetExecutable
+                    }
+                }
+                catch {
+                    $registrationError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                    if ($registrationError.Length -gt 250) { $registrationError = $registrationError.Substring(0, 247) + '...' }
+                    $wingetBootstrapMessage += " App-Installer-Registrierung fehlgeschlagen: $registrationError"
+                }
+            }
             if ($ExecutionMode -eq 'Check' -and $serverCaption -match 'Windows Server (2019|2022)') {
                 $wingetHealth = Test-WingetExecutable -Path $wingetPath
                 $wingetModuleHealth = Test-WingetModuleApi
@@ -1958,7 +1981,7 @@ catch {
                     $healthProblems = @()
                     if (-not $wingetHealth.Works) { $healthProblems += "winget.exe: $($wingetHealth.Output)" }
                     if ($wingetModuleHealth.RepairRequired) { $healthProblems += "WinGet-Modul: $($wingetModuleHealth.Output)" }
-                    $wingetBootstrapMessage = "WinGet auf $env:COMPUTERNAME ($serverCaption) ist nicht funktionsfähig ($($healthProblems -join '; ')); starte Reparatur."
+                    $wingetBootstrapMessage += " WinGet auf $env:COMPUTERNAME ($serverCaption) ist nicht funktionsfähig ($($healthProblems -join '; ')); starte Reparatur."
                     try {
                         Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
                         $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
@@ -2489,4 +2512,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Repair-WindowsUpdateWinGetPackageManager
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager

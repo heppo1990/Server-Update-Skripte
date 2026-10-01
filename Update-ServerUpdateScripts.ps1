@@ -788,6 +788,7 @@ function Invoke-PowerShellWingetUpdateCheck {
         '$commonModulePath = __COMMON_MODULE_PATH__'
         'Import-Module -Name $commonModulePath -Force -ErrorAction Stop'
         'if (-not (Update-WinGetClientModule)) { throw ''Microsoft.WinGet.Client konnte nicht bereitgestellt werden.'' }'
+        '$null = Register-WindowsUpdateWinGetAppInstallerForCurrentUser'
         'Import-Module Microsoft.WinGet.Client -ErrorAction Stop'
         '$updates = @(Get-WinGetPackage -Id ''Microsoft.PowerShell'' -Source winget -MatchOption EqualsCaseInsensitive -ErrorAction Stop | Where-Object { $_.IsUpdateAvailable })'
         'if ($updates.Count -eq 0) { [pscustomobject]@{ State = ''NoUpdate''; Output = ''Kein PowerShell-7-Update verfügbar.'' } | ConvertTo-Json -Compress; return }'
