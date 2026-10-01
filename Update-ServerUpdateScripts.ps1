@@ -774,11 +774,8 @@ function Invoke-WingetRepair {
     if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw 'WindowsUpdate.Common.psm1 für die WinGet-Reparatur fehlt.' }
     Import-Module -Name $commonModule -Force -ErrorAction Stop
     if (-not (Update-WinGetClientModule)) { throw 'Microsoft.WinGet.Client konnte nicht installiert oder aktualisiert werden.' }
-    Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
-    $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
-    Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
-    $version = [string](Get-WinGetVersion -ErrorAction Stop)
-    Write-Host "WinGet über Microsoft.WinGet.Client repariert ($version)."
+    $repair = Repair-WindowsUpdateWinGetPackageManager
+    Write-Host "WinGet repariert ($($repair.WinGetVersion)); App Installer $($repair.AppInstallerVersion) für aktuellen Benutzer registriert."
 }
 
 function Invoke-PowerShellWingetUpdateCheck {

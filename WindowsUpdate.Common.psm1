@@ -613,6 +613,51 @@ catch {
     return -not (@($results | Where-Object { $_.Type -eq 'Log' -and $_.Level -eq 'WARN' }).Count -gt 0)
 }
 
+function Repair-WindowsUpdateWinGetPackageManager {
+    <# Repariert WinGet und registriert die bereitgestellte App-Installer-Version für den aktuellen Benutzer. #>
+    [CmdletBinding()]
+    param()
+
+    $ErrorActionPreference = 'Stop'
+    Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
+    $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+    Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+
+    $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
+    $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
+    $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+    if ($latestPackage.Count -eq 0) {
+        throw 'App Installer wurde nach der WinGet-Reparatur nicht als Paket gefunden.'
+    }
+
+    $targetVersion = [version]$latestPackage[0].Version
+    $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+    $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
+    $registrationChanged = $currentVersion -lt $targetVersion
+    if ($registrationChanged) {
+        $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
+        }
+        Add-AppxPackage -Path $manifestPath -Register -DisableDevelopmentMode -ErrorAction Stop
+    }
+
+    $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+        Where-Object { [version]$_.Version -ge $targetVersion } |
+        Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+    if ($registeredPackage.Count -eq 0 -or [string]$registeredPackage[0].Status -ne 'Ok') {
+        throw "App Installer $targetVersion wurde für den aktuellen Benutzer nicht erfolgreich registriert."
+    }
+
+    [pscustomobject]@{
+        WinGetVersion = [string](Get-WinGetVersion -ErrorAction Stop)
+        AppInstallerVersion = [string]$registeredPackage[0].Version
+        RegistrationChanged = $registrationChanged
+    }
+}
+
 function Initialize-WindowsUpdateDpapi {
     if ('System.Security.Cryptography.ProtectedData' -as [type]) { return }
     try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
@@ -1836,6 +1881,35 @@ catch {
             [IO.File]::WriteAllText($State.MarkerPath, [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
         }
 
+        function Register-LatestWinGetAppInstallerForCurrentUser {
+            $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
+            $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
+            $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+            if ($latestPackage.Count -eq 0) { throw 'App Installer wurde nach der WinGet-Reparatur nicht als Paket gefunden.' }
+
+            $targetVersion = [version]$latestPackage[0].Version
+            $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+            $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
+            $registrationChanged = $currentVersion -lt $targetVersion
+            if ($registrationChanged) {
+                $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
+                if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                    throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
+                }
+                Add-AppxPackage -Path $manifestPath -Register -DisableDevelopmentMode -ErrorAction Stop | Out-Null
+            }
+
+            $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+                Where-Object { [version]$_.Version -ge $targetVersion } |
+                Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+            if ($registeredPackage.Count -eq 0 -or [string]$registeredPackage[0].Status -ne 'Ok') {
+                throw "App Installer $targetVersion wurde für den aktuellen Benutzer nicht erfolgreich registriert."
+            }
+            return [pscustomobject]@{ Version = [string]$registeredPackage[0].Version; RegistrationChanged = $registrationChanged }
+        }
+
         # Kein generisches .NET-List-Objekt: PowerShell 7 kann dieses beim
         # Rückgabewert einer verschachtelten ScriptBlock-Ausführung fehlerhaft
         # binden ("Argument types do not match"). Ein normales PS-Array ist
@@ -1891,6 +1965,9 @@ catch {
                         Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
                         $moduleVersion = [string](Get-WinGetVersion -ErrorAction Stop)
                         $wingetBootstrapMessage += " Reparatur über Microsoft.WinGet.Client abgeschlossen ($moduleVersion)."
+                        $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
+                        $registrationText = if ($appInstallerRegistration.RegistrationChanged) { 'für den aktuellen Benutzer registriert' } else { 'bereits für den aktuellen Benutzer registriert' }
+                        $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) $registrationText."
                         $wingetPath = Resolve-WingetExecutable
                         $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
                         if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }
@@ -2412,4 +2489,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Repair-WindowsUpdateWinGetPackageManager
