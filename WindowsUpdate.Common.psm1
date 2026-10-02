@@ -108,7 +108,7 @@ function Test-WindowsUpdateConsoleMessage {
         return $true
     }
 
-    if ($Message -match '(?i)^\s*(Keine Windows-Updates installiert|Kein automatischer Neustart|Kein Neustartstatus|Get-WURebootStatus auf|Keine zurückgestellten Updates|Zurückgestellte Updates auf .* verfügbar:)') { return $false }
+    if ($Message -match '(?i)^\s*(Kein automatischer Neustart|Kein Neustartstatus|Get-WURebootStatus auf|Keine zurückgestellten Updates|Zurückgestellte Updates auf .* verfügbar:)') { return $false }
 
     if ($script:WindowsUpdateConsoleSummaryActive) {
         if ($Message -match '^\s*═+\s*$') {
