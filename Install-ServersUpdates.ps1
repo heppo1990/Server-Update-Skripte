@@ -145,6 +145,7 @@ function Invoke-PackageManagerUpdates {
     $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -WriteLog { param($message) Write-ScriptLog $message })
     # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
     $successfulPackagesByManager = @{}
+    $manualPackageCount = 0
     foreach ($result in $results) {
       if ($result.Skipped) {
         $skipReason = if ([string]::IsNullOrWhiteSpace([string]$result.SkipReason)) { 'ohne Angabe eines Grundes' } else { [string]$result.SkipReason }
@@ -156,9 +157,16 @@ function Invoke-PackageManagerUpdates {
         continue
       }
       if (-not $result.Success) {
-        $errorSummaryProperty = $result.PSObject.Properties['ErrorSummary']
-        $errorSummary = if ($errorSummaryProperty -and -not [string]::IsNullOrWhiteSpace([string]$errorSummaryProperty.Value)) { [string]$errorSummaryProperty.Value } else { [string]$result.ActionOutput }
-        Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $errorSummary"
+        $manualActionProperty = $result.PSObject.Properties['RequiresManualAction']
+        $requiresManualAction = $manualActionProperty -and [bool]$manualActionProperty.Value
+        if ($requiresManualAction) {
+          $failedPackageCount = @($result.Packages).Count
+          $manualPackageCount += [Math]::Max(1, $failedPackageCount)
+        } else {
+          $errorSummaryProperty = $result.PSObject.Properties['ErrorSummary']
+          $errorSummary = if ($errorSummaryProperty -and -not [string]::IsNullOrWhiteSpace([string]$errorSummaryProperty.Value)) { [string]$errorSummaryProperty.Value } else { [string]$result.ActionOutput }
+          Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $errorSummary"
+        }
         $diagnosticProperty = $result.PSObject.Properties['DiagnosticOutput']
         $debugActionOutput = if ($diagnosticProperty) { [string]$diagnosticProperty.Value } else { [string]$result.ActionOutput }
         if ($DebugMode -and -not [string]::IsNullOrWhiteSpace($debugActionOutput)) {
@@ -186,6 +194,10 @@ function Invoke-PackageManagerUpdates {
       $managerPackages = @($successfulPackagesByManager[$manager])
       Write-ScriptLog "$manager auf ${Servername}: $($managerPackages.Count) Paketupdates installiert"
       foreach ($package in $managerPackages) { Write-ScriptLog "  $package" }
+      Write-ScriptLog ''
+    }
+    if ($manualPackageCount -gt 0) {
+      Write-ScriptLog "Manuelles Eingreifen bei $manualPackageCount Paket(en) auf ${Servername} erforderlich."
     }
     return $results
   }
