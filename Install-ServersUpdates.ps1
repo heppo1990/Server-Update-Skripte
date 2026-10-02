@@ -910,7 +910,7 @@ function Register-DeferredLocalRebootTask {
 }
 
 function Register-DeferredUpdateTask {
-  param([string]$Servername, [string[]]$DeferredCategories, [string[]]$DeferredKBs = @(), [bool]$SucheOnline, $AuthInfo = $null, [datetime]$ScheduledAt = [datetime]::MinValue, [string]$MaintenanceEndTime = '')
+  param([string]$Servername, [string[]]$DeferredCategories, [string[]]$DeferredKBs = @(), [bool]$SucheOnline, [bool]$RebootRequired = $false, $AuthInfo = $null, [datetime]$ScheduledAt = [datetime]::MinValue, [string]$MaintenanceEndTime = '')
   # Nach einem Neustart prüft der Worker automatisch die Bereitschaft
   # des Windows-Update-Dienstes, statt eine feste Minutenfrist abzuwarten.
   $taskName = 'WindowsUpdateAdm-DeferredUpdates'
@@ -973,6 +973,7 @@ try {
     return `$mail
   }
   `$waitForReboot = `$false
+  `$mainRunRebootRequired = $($RebootRequired.ToString().ToLowerInvariant())
   `$scheduledAt = if ($scheduledAtFileTime -gt 0) { [DateTime]::FromFileTimeUtc($scheduledAtFileTime) } else { [DateTime]::MinValue }
   `$maintenanceEndTime = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$maintenanceEndBase64'))
   Write-DeferredLog 'Nachinstallationsaufgabe gestartet.'
@@ -997,19 +998,21 @@ try {
     if (-not `$windowOpen) {
       `$waitForReboot = `$true
       Write-DeferredLog "Wartungsfenster ist geschlossen. Die Aufgabe wartet auf das nächste tägliche Wartungsfenster."
-    } elseif (-not `$rebootDetected) {
-      # Ist das Wartungsfenster offen, dürfen zurückgestellte Updates auch
-      # ohne vorherigen Neustart installiert werden.
-      Write-DeferredLog 'Wartungsfenster ist offen und seit Aufgabenanlage wurde kein Neustart erkannt. Nachinstallation startet direkt.'
-    } else {
+    } elseif (`$mainRunRebootRequired -and -not `$rebootDetected) {
+      `$waitForReboot = `$true
+      Write-DeferredLog 'Der Hauptlauf hat einen Neustartbedarf erkannt. Die Nachinstallation wartet auf den tatsächlichen Neustart.'
+    } elseif (`$rebootDetected) {
       Write-DeferredLog 'Neustart erkannt und Wartungsfenster offen. Prüfe automatisch die Bereitschaft von Windows Update.'
+    } else {
+      Write-DeferredLog 'Kein Neustart erforderlich. Wartungsfenster ist offen; Nachinstallation startet direkt.'
     }
-  } elseif (-not `$rebootDetected) {
-    # Ohne Wartungszeit bleibt die Aufgabe bis zum Neustart aktiv.
+  } elseif (`$mainRunRebootRequired -and -not `$rebootDetected) {
     `$waitForReboot = `$true
-    Write-DeferredLog 'Kein Wartungsfenster konfiguriert und noch kein Neustart erkannt. Aufgabe wartet auf Systemstart.'
-  } else {
+    Write-DeferredLog 'Der Hauptlauf hat einen Neustartbedarf erkannt. Die Nachinstallation wartet auf den tatsächlichen Neustart.'
+  } elseif (`$rebootDetected) {
     Write-DeferredLog 'Neustart erkannt. Prüfe automatisch die Bereitschaft von Windows Update.'
+  } else {
+    Write-DeferredLog 'Kein Neustart erforderlich. Nachinstallation startet direkt.'
   }
   if (-not `$waitForReboot -and `$rebootDetected) {
     # Statt einer festen Wartezeit auf eine erfolgreiche, rein lesende
@@ -1794,6 +1797,7 @@ if ($ServerADList -ne $null) {
               -DeferredCategories  $deferredCategories `
               -DeferredKBs         $deferredKBs `
               -SucheOnline         $SucheOnline `
+              -RebootRequired      $rebootRequired `
               -AuthInfo            $svcCredential `
               -ScheduledAt         $deferredScheduledAt `
               -MaintenanceEndTime  $deferredMaintenanceEndTime
