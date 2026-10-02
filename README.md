@@ -25,9 +25,9 @@ PowerShell 7 prüft zusätzlich PackageManagement auf Updates; auf Remotezielen 
 - Nicht konfigurierte Linux- und Home-Assistant-Ziele werden still ausgelassen und nicht als übersprungen ausgegeben.
 - Zurückgestellte Windows-Updates und Neustart-Wartungsfenster werden über `UpdateSettings` konfiguriert.
 - Alle Skripte zeigen Ziele, Updates und Aktionen knapp, farbig und mit Leerzeilen getrennt. Installierte Paketmanager melden auch dann ihren Status, wenn keine Updates verfügbar sind; Fehlerdetails stehen im Log.
-- WinGet-Suche, Updates, Quellenreset und Reparatur verwenden `Microsoft.WinGet.Client` unter Windows PowerShell 5.1.
-- Bei einer leeren oder fehlerhaften WinGet-Suche werden die Standardquellen mit `Reset-WinGetSource -All` zurückgesetzt. Unbekannte kundeneigene Quellen werden vorher erkannt und bleiben unangetastet.
-- WinGet wird auf Windows Server 2019 und 2022 bei CLI- oder COM/RPC-Fehlern mit `Repair-WinGetPackageManager -Latest -Force` repariert; danach prüft eine frische PowerShell-5.1-Instanz CLI und Modul.
+- WinGet-Suche und Updates verwenden zuerst `Microsoft.WinGet.Client` unter Windows PowerShell 5.1; bei Modulfehlern fällt Check und Installation auf `winget.exe` zurück.
+- Bei einer leeren Modulsuche oder einem Quellenfehler werden die Standardquellen mit `Reset-WinGetSource -All` zurückgesetzt. Unbekannte kundeneigene Quellen werden vorher erkannt und bleiben unangetastet.
+- Die CLI-Abfrage ist auf 3 Minuten 30 Sekunden begrenzt; das gesamte WinGet-Prüffenster bleibt bei fünf Minuten. Paketupdates installiert der Fallback einzeln und still.
 - Meldet WinGet neben einer Quellenwarnung trotzdem Paketupdates, zeigt und zählt der Check diese Updates zusätzlich zur Warnung.
 
 ## Ausführliche Dokumentation

@@ -4,9 +4,9 @@
 
 ## WinGet auf Windows Server 2019 und 2022
 
-- [x] WinGet-Suche, Installation, Quellenreset und Reparatur über `Microsoft.WinGet.Client` unter Windows PowerShell 5.1 ausführen.
-- [x] WinGet auf Windows Server 2019 und 2022 bei Bedarf mit `Repair-WinGetPackageManager -Latest -Force` reparieren; danach in einer frischen PowerShell-5.1-Instanz erneut prüfen.
-- [x] Standardquellen bei leerer oder fehlerhafter Suche mit `Reset-WinGetSource -All` zurücksetzen; `msstore`, `winget` und `winget-font` als Standardquellen behandeln.
+- [x] WinGet-Suche und Installation zuerst über `Microsoft.WinGet.Client` unter Windows PowerShell 5.1 ausführen; bei Modulfehlern `winget.exe` auf dem jeweiligen Zielsystem verwenden.
+- [x] CLI-Fallback in Check und Installation mit Quellen- und Paketvereinbarungen sowie stiller Einzelinstallation verwenden; CLI-Suche nach 3 Minuten 30 Sekunden abbrechen.
+- [x] Standardquellen nach leerer Modulsuche oder Quellenfehler mit `Reset-WinGetSource -All` zurücksetzen; eine leere CLI-Fallback-Suche löst keinen Reset aus.
 - [x] Unbekannte kundeneigene Quellen am Namen erkennen und einen vollständigen Reset in diesem Fall überspringen; keine Quell-URLs in Meldungen ausgeben.
 - [x] Chocolatey nur dann für das PS7-Update verwenden, wenn es bereits installiert ist; Chocolatey nicht automatisch nachinstallieren.
 - [x] Bei einer fehlerhaften WinGet-Quelle die Standardquellen einmal per Modul zurücksetzen und die Paketabfrage wiederholen.

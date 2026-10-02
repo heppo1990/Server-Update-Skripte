@@ -1746,21 +1746,79 @@ catch {
 
         function Get-WingetUpgradeLines {
             param([string]$Output)
-            return @($Output -split "`r?`n" | Where-Object {
-                $line = $_.Trim()
-                $line -match '\s\S+\s*$' -and
-                $line -notmatch '^Name\s+' -and
-                -not (Test-WingetSourceFailureLine -Line $line)
-            })
+            $rowPattern = '^\s*(?<Name>.+)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)(?:\s+(?<Source>\S+))?\s*$'
+            $rows = foreach ($line in ($Output -split "`r?`n")) {
+                if (Test-WingetSourceFailureLine -Line $line) { continue }
+                $match = [regex]::Match($line, $rowPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if (-not $match.Success) { continue }
+                $source = if ($match.Groups['Source'].Success) { $match.Groups['Source'].Value } else { 'winget' }
+                [string]::Format('{0,-65} {1,-38} {2,-14} {3,-14} {4}',
+                    $match.Groups['Name'].Value.Trim(), $match.Groups['Id'].Value,
+                    $match.Groups['InstalledVersion'].Value, $match.Groups['AvailableVersion'].Value, $source)
+            }
+            return @($rows)
+        }
+
+        function Invoke-WingetCliUpgradeQuery {
+            param([Parameter(Mandatory)][string]$Path)
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                throw 'winget.exe wurde für den CLI-Fallback nicht gefunden.'
+            }
+            $cliJob = Start-Job -ArgumentList $Path -ScriptBlock {
+                param([string]$WingetPath)
+                $output = (& $WingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+                [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
+            }
+            try {
+                $jobState = Wait-Job -Job $cliJob -Timeout 210
+                if (-not $jobState) {
+                    Stop-Job -Job $cliJob -ErrorAction SilentlyContinue
+                    throw [System.TimeoutException]::new('WinGet-CLI-Abfrage hat das Zeitlimit von 3 Minuten 30 Sekunden überschritten.')
+                }
+                $cliResult = Receive-Job -Job $cliJob -ErrorAction Stop | Select-Object -Last 1
+                if (-not $cliResult) { throw 'WinGet-CLI-Abfrage lieferte keine Rückgabe.' }
+                $output = [string]$cliResult.Output
+                $exitCode = [int]$cliResult.ExitCode
+            }
+            finally {
+                Remove-Job -Job $cliJob -Force -ErrorAction SilentlyContinue
+            }
+            if ($exitCode -ne 0) {
+                $detail = ($output -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1)
+                if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe upgrade endete mit Exitcode $exitCode." }
+                throw $detail
+            }
+            return $output
+        }
+
+        function Invoke-WingetCliPackageUpdate {
+            param(
+                [Parameter(Mandatory)][string]$Path,
+                [Parameter(Mandatory)][string]$Id,
+                [Parameter(Mandatory)][string]$Source,
+                [Parameter(Mandatory)][string]$Version
+            )
+            try {
+                $arguments = @(
+                    'upgrade', '--id', $Id, '--exact', '--source', $Source, '--version', $Version,
+                    '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity'
+                )
+                $output = (& $Path @arguments 2>&1 | Out-String -Width 1200).Trim()
+                $exitCode = $LASTEXITCODE
+                $summary = if ([string]::IsNullOrWhiteSpace($output)) { "winget.exe upgrade endete mit Exitcode $exitCode." } else { $output }
+                return [PSCustomObject]@{ Success=($exitCode -eq 0); ExitCode=$exitCode; Output=$summary; Result=$null }
+            }
+            catch {
+                return [PSCustomObject]@{ Success=$false; ExitCode=1; Output=([string]$_.Exception.Message -replace '\s+', ' ').Trim(); Result=$null }
+            }
         }
 
         function Get-WingetModuleUpdateOutput {
             $queryJob = $null
             try {
                 # Katalogabfragen können in WinGet/COM hängen bleiben. Sie laufen
-                # daher in einem eigenen Prozess und werden in Check und Install
-                # nach fünf Minuten beendet. Der Paketinstallationsschritt selbst
-                # liegt außerhalb dieses Zeitlimits.
+                # daher in einem eigenen Prozess begrenzt. Bei Modulfehlern bleibt
+                # so Zeit für den CLI-Fallback innerhalb des äußeren 5-Minuten-Limits.
                 $queryJob = Start-Job -ScriptBlock {
                     $ErrorActionPreference = 'Stop'
                     try {
@@ -1785,12 +1843,12 @@ catch {
                         }
                     }
                 }
-                # 30 Sekunden Reserve für das Aufräumen im Worker; der äußere
-                # Check-Timeout bleibt bei fünf Minuten.
-                $queryState = Wait-Job -Job $queryJob -Timeout 270
+                # Reserve für den CLI-Fallback; der äußere Check-Timeout bleibt
+                # bei fünf Minuten.
+                $queryState = Wait-Job -Job $queryJob -Timeout 60
                 if (-not $queryState) {
                     Stop-Job -Job $queryJob -ErrorAction SilentlyContinue
-                    throw [System.TimeoutException]::new('WinGet-Katalogabfrage hat das Zeitlimit von 4 Minuten 30 Sekunden überschritten.')
+                    throw [System.TimeoutException]::new('WinGet-Modulabfrage hat das Zeitlimit von 60 Sekunden überschritten.')
                 }
                 $queryResult = Receive-Job -Job $queryJob -ErrorAction Stop | Select-Object -Last 1
                 if (-not $queryResult) { throw 'WinGet-Katalogabfrage lieferte keine Rückgabe.' }
@@ -1990,11 +2048,9 @@ catch {
             }
             if ($ExecutionMode -eq 'Check' -and $serverCaption -match 'Windows Server (2019|2022)') {
                 $wingetHealth = Test-WingetExecutable -Path $wingetPath
-                $wingetModuleHealth = Test-WingetModuleApi
-                if (-not $wingetHealth.Works -or $wingetModuleHealth.RepairRequired) {
+                if (-not $wingetHealth.Works) {
                     $healthProblems = @()
                     if (-not $wingetHealth.Works) { $healthProblems += "winget.exe: $($wingetHealth.Output)" }
-                    if ($wingetModuleHealth.RepairRequired) { $healthProblems += "WinGet-Modul: $($wingetModuleHealth.Output)" }
                     $wingetBootstrapMessage += " WinGet auf $env:COMPUTERNAME ($serverCaption) ist nicht funktionsfähig ($($healthProblems -join '; ')); starte Reparatur."
                     try {
                         Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
@@ -2008,8 +2064,6 @@ catch {
                         $wingetPath = Resolve-WingetExecutable
                         $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
                         if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }
-                        $wingetModuleHealth = Test-WingetModuleApi -FreshPowerShell
-                        if (-not $wingetModuleHealth.Works) { throw "WinGet-Modulabfrage ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetModuleHealth.Output)" }
                         $wingetBootstrapMessage += " Reparatur erfolgreich; $($wingetHealth.Output)"
                     }
                     catch {
@@ -2030,7 +2084,21 @@ catch {
             else {
                 try {
                 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
-                $availableOutput = Get-WingetModuleUpdateOutput
+                $wingetCliFallback = $false
+                try {
+                    $availableOutput = Get-WingetModuleUpdateOutput
+                }
+                catch {
+                    $moduleQueryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                    try {
+                        $availableOutput = Invoke-WingetCliUpgradeQuery -Path $wingetPath
+                        $wingetCliFallback = $true
+                        $wingetBootstrapMessage += " WinGet-Modulabfrage fehlgeschlagen ($moduleQueryFailure); WinGet-CLI-Fallback verwendet."
+                    }
+                    catch {
+                        throw "WinGet-Modulabfrage fehlgeschlagen ($moduleQueryFailure); CLI-Fallback ebenfalls fehlgeschlagen: $($_.Exception.Message)"
+                    }
+                }
                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                     Test-WingetSourceFailureLine -Line ([string]$_)
                 })
@@ -2050,7 +2118,7 @@ catch {
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
-                if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $sourceResetPerformed) {
+                if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $sourceResetPerformed -and -not $wingetCliFallback) {
                     # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
                     # beschädigten lokalen Quellenzustand hindeuten. Der nötige
                     # vollständige Reset erfolgt nur, wenn keine kundeneigenen
@@ -2101,10 +2169,31 @@ catch {
 
                         $packageId = $packageMatch.Groups['Id'].Value
                         $packageName = $packageMatch.Groups['Name'].Value.Trim()
-                        $packageSource = $packageMatch.Groups['Source'].Value
+                        $packageSource = if ($packageMatch.Groups['Source'].Success) { $packageMatch.Groups['Source'].Value } else { 'winget' }
+                        $packageActionOutput = ''
                         try {
-                            $moduleUpdate = Invoke-WingetModulePackageUpdate -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
-                            $packageActionOutput = [string]$moduleUpdate.Output
+                            if ($wingetCliFallback) {
+                                $moduleUpdate = Invoke-WingetCliPackageUpdate -Path $wingetPath -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
+                            } else {
+                                $moduleUpdate = Invoke-WingetModulePackageUpdate -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
+                                if (-not $moduleUpdate.Success) {
+                                    $moduleFailureOutput = [string]$moduleUpdate.Output
+                                    $cliUpdate = Invoke-WingetCliPackageUpdate -Path $wingetPath -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
+                                    if ($cliUpdate.Success) {
+                                        $moduleUpdate = $cliUpdate
+                                        $wingetBootstrapMessage += " WinGet-Modulpaketupdate fehlgeschlagen ($moduleFailureOutput); CLI-Fallback verwendet."
+                                    }
+                                    else {
+                                        $moduleUpdate = [PSCustomObject]@{
+                                            Success = $false
+                                            ExitCode = $cliUpdate.ExitCode
+                                            Output = "Modul: $moduleFailureOutput; CLI-Fallback: $($cliUpdate.Output)"
+                                            Result = $null
+                                        }
+                                    }
+                                }
+                            }
+                            if (-not $packageActionOutput) { $packageActionOutput = [string]$moduleUpdate.Output }
                             $packageExitCode = [int]$moduleUpdate.ExitCode
                             # WinGet kann in seiner lokalen Quelle noch auf einen
                             # bereits entfernten Manifest-Hash zeigen. In diesem
