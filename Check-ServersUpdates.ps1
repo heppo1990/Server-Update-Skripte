@@ -303,11 +303,13 @@ function Import-PSWindowsUpdate {
 $ScriptStartTime = Get-Date
 $psVersion = $PSVersionTable.PSVersion.Major
 
+Write-Host ''
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)" -ForegroundColor Gray
 Write-Host "Betriebssystem: $([System.Environment]::OSVersion.VersionString)" -ForegroundColor Gray
 Write-Host "Ausführungskontext: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -ForegroundColor Gray
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ''
 
 $Settings = Get-CheckSettingsFromCommon
 $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings.LinuxSettings } else { $null }
@@ -510,6 +512,7 @@ $RepBody = @"
 
 # Server verarbeiten
 if ($ServerADList -ne $null) {
+  Write-ScriptLog ''
   Write-ScriptLog "Verarbeite Windows-Zielliste..."
 
   # -----------------------------------------------------------------------
@@ -597,7 +600,7 @@ if ($ServerADList -ne $null) {
 
       Try {
         $targetTypeLabel = if ($Server.IsHypervisor) { 'Hypervisor' } elseif ($Server.IsAdditional) { 'Zusatzcomputer' } else { 'AD-Ziel' }
-        Write-ScriptLog ''
+        if ($index -gt 1) { Write-ScriptLog '' }
         Write-ScriptLog "Starte Update-Check auf $targetTypeLabel $Servername..."
         $RepBody += "<div class='server-title'>Windows-Ziel: ${Servername}</div>"
 
@@ -766,7 +769,6 @@ if ($ServerADList -ne $null) {
         }
 
         Write-ScriptLog "Ergebnis der Update-Suche:"
-        Write-ScriptLog ''
 
         # Remote-SYSTEM-Aufgaben können bei leerer Suche ein leeres Ergebnisobjekt
         # zurückgeben. Nur Einträge mit Update-Status, KB oder Titel sind Updates.
@@ -790,7 +792,6 @@ if ($ServerADList -ne $null) {
         if ($updateRows.Count -gt 0) {
           ($updateRows | Select-Object ComputerName, Status, KB, Size, Title | Format-Table -AutoSize | Out-String) `
             -split "\r?\n" | ForEach-Object { if ($_) { Write-ScriptLog $_ } }
-          Write-ScriptLog ''
           $UpdResultFull += $updateRows
           
           $RepBody += "<table>`n"
@@ -816,6 +817,7 @@ if ($ServerADList -ne $null) {
           Write-ScriptLog "... es sind keine Windows-Updates verfügbar."
           $RepBody += "<div class='no-updates'>Es sind keine Updates zu installieren.</div>"
         }
+        Write-ScriptLog ''
 
         # Zusätzlich installierte Anwendungen über die zentrale Paketverwaltung prüfen.
         try {

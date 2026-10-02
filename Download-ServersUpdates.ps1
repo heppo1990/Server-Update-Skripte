@@ -99,10 +99,12 @@ function Write-ScriptLog ($Message) {
 $ScriptStartTime = Get-Date
 $psVersion = $PSVersionTable.PSVersion.Major
 
+Write-Host ''
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)" -ForegroundColor Gray
 Write-Host "Betriebssystem: $([System.Environment]::OSVersion.VersionString)" -ForegroundColor Gray
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ''
 
 $Settings = Get-DownloadSettingsFromCommon
 $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings.LinuxSettings } else { $null }
@@ -211,6 +213,7 @@ $RepBody = @"
 
 # Server verarbeiten
 if ($ServerADList -ne $null) {
+  Write-ScriptLog ''
   Write-ScriptLog "Verarbeite AD-Serverliste..."
 
   $SucheOnline = $UpdateSettings.SucheOnline
@@ -251,7 +254,7 @@ if ($ServerADList -ne $null) {
       Write-Progress -Activity "Verarbeite AD-Serverliste" -Status "Verarbeite Server [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
 
       Try {
-        Write-ScriptLog ''
+        if ($index -gt 1) { Write-ScriptLog '' }
         Write-ScriptLog "Starte Update-Download auf AD-Server $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
@@ -364,7 +367,6 @@ if ($ServerADList -ne $null) {
         }
 
         Write-ScriptLog "Ergebnis des Downloads:"
-        Write-ScriptLog ''
 
         if ($UpdResult) {
           # Duplikate entfernen (Get-WindowsUpdate -Download gibt Updates manchmal doppelt zurück)
@@ -397,6 +399,7 @@ if ($ServerADList -ne $null) {
           Write-ScriptLog "... keine Updates zum Download verfügbar."
           $RepBody += "<div class='no-updates'>Keine Updates zum Download verfügbar.</div>"
         }
+        Write-ScriptLog ''
 
       }
       Catch {

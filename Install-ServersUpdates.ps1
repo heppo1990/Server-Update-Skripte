@@ -196,6 +196,7 @@ function Invoke-PackageManagerUpdates {
       foreach ($package in $managerPackages) { Write-ScriptLog "  $package" }
       Write-ScriptLog ''
     }
+    if ($successfulPackagesByManager.Count -eq 0 -and $manualPackageCount -eq 0) { Write-ScriptLog '' }
     if ($manualPackageCount -gt 0) {
       $manualPackageLabel = if ($manualPackageCount -eq 1) { 'Paket' } else { 'Pakete' }
       Write-ScriptLog "Manuelles Eingreifen bei $manualPackageCount $manualPackageLabel auf ${Servername} erforderlich."
@@ -1317,10 +1318,12 @@ if ($DebugMode) {
   Write-Host ""
 }
 
+Write-Host ''
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)" -ForegroundColor Gray
 Write-Host "Betriebssystem: $([System.Environment]::OSVersion.VersionString)" -ForegroundColor Gray
 Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ''
 
 $Settings = Get-InstallSettingsFromCommon
 $linuxSettings = if ($Settings.PSObject.Properties['LinuxSettings']) { $Settings.LinuxSettings } else { $null }
@@ -1645,6 +1648,7 @@ $DeferredUpdatesPlanned = 0
 $ManualActions = @()
 
 if ($ServerADList -ne $null) {
+  Write-ScriptLog ''
   Write-ScriptLog "Verarbeite AD-Serverliste..."
   
   $RepBody += "<div class='section-title'>🖥️ Windows-Server Updates</div>"
@@ -1668,7 +1672,7 @@ if ($ServerADList -ne $null) {
       Write-Progress -Activity "Verarbeite AD-Serverliste" -Status "Verarbeite Server [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
 
       Try {
-        Write-ScriptLog ''
+        if ($index -gt 1) { Write-ScriptLog '' }
         Write-ScriptLog "Starte Update-Installation auf AD-Server $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
@@ -1849,7 +1853,6 @@ if ($ServerADList -ne $null) {
         }
 
         Write-ScriptLog "Ergebnis der Installation:"
-        Write-ScriptLog ''
         
         if ($UpdResult -and -not ($UpdResult -is [Array])) {
             $UpdResult = @($UpdResult)
