@@ -100,6 +100,7 @@ $PackageUpdateCount = 0
 $WingetUpdateCount = 0
 $ChocolateyUpdateCount = 0
 $LinuxUpdateDetails = @()
+$HAUpdateDetails = @()
 $script:VMRebootIndex = 0
 $script:VMRebootLatestAt = $null
 $script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new()
