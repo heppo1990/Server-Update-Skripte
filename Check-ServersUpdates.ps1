@@ -601,7 +601,10 @@ if ($ServerADList -ne $null) {
 
       Try {
         $targetTypeLabel = if ($Server.IsHypervisor) { 'Hypervisor' } elseif ($Server.IsAdditional) { 'Zusatzcomputer' } else { 'AD-Ziel' }
-        if ($index -gt 1) { Write-ScriptLog '' }
+        if ($index -gt 1) {
+          Write-ScriptLog ''
+          Write-ScriptLog ''
+        }
         Write-ScriptLog "Starte Update-Check auf $targetTypeLabel $Servername..."
         $RepBody += "<div class='server-title'>Windows-Ziel: ${Servername}</div>"
 
