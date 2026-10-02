@@ -197,7 +197,8 @@ function Invoke-PackageManagerUpdates {
       Write-ScriptLog ''
     }
     if ($manualPackageCount -gt 0) {
-      Write-ScriptLog "Manuelles Eingreifen bei $manualPackageCount Paket(en) auf ${Servername} erforderlich."
+      $manualPackageLabel = if ($manualPackageCount -eq 1) { 'Paket' } else { 'Pakete' }
+      Write-ScriptLog "Manuelles Eingreifen bei $manualPackageCount $manualPackageLabel auf ${Servername} erforderlich."
       Write-ScriptLog ''
     }
     return $results
