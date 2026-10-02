@@ -364,6 +364,7 @@ if ($ServerADList -ne $null) {
         }
 
         Write-ScriptLog "Ergebnis des Downloads:"
+        Write-ScriptLog ''
 
         if ($UpdResult) {
           # Duplikate entfernen (Get-WindowsUpdate -Download gibt Updates manchmal doppelt zurück)

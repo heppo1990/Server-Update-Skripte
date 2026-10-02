@@ -766,6 +766,7 @@ if ($ServerADList -ne $null) {
         }
 
         Write-ScriptLog "Ergebnis der Update-Suche:"
+        Write-ScriptLog ''
 
         # Remote-SYSTEM-Aufgaben können bei leerer Suche ein leeres Ergebnisobjekt
         # zurückgeben. Nur Einträge mit Update-Status, KB oder Titel sind Updates.
@@ -857,6 +858,7 @@ if ($ServerADList -ne $null) {
           $packageCount = $packages.Count
           if ($packageCount -eq 0) {
             Write-ScriptLog "$($packageResult.Manager) auf ${Servername}: keine Paketupdates verfügbar."
+            Write-ScriptLog ''
             continue
           }
 
@@ -865,6 +867,7 @@ if ($ServerADList -ne $null) {
           if ($packageResult.Manager -eq 'Chocolatey') { $ChocolateyUpdateCount += $packageCount }
           Write-ScriptLog "$($packageResult.Manager) auf ${Servername}: $packageCount Paketupdate(s) verfügbar."
           foreach ($package in $packages) { Write-ScriptLog "  ${Servername}: $package" }
+          Write-ScriptLog ''
 
           $RepBody += "<div class='info-box'><strong>$($packageResult.Manager)-Updates auf $Servername ($packageCount):</strong><br>"
           $RepBody += (($packages | ForEach-Object { [System.Net.WebUtility]::HtmlEncode([string]$_) }) -join '<br>')

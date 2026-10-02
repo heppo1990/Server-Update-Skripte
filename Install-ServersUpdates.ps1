@@ -198,6 +198,7 @@ function Invoke-PackageManagerUpdates {
     }
     if ($manualPackageCount -gt 0) {
       Write-ScriptLog "Manuelles Eingreifen bei $manualPackageCount Paket(en) auf ${Servername} erforderlich."
+      Write-ScriptLog ''
     }
     return $results
   }
@@ -1847,6 +1848,7 @@ if ($ServerADList -ne $null) {
         }
 
         Write-ScriptLog "Ergebnis der Installation:"
+        Write-ScriptLog ''
         
         if ($UpdResult -and -not ($UpdResult -is [Array])) {
             $UpdResult = @($UpdResult)
