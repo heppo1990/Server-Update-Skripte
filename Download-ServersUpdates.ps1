@@ -397,7 +397,7 @@ if ($ServerADList -ne $null) {
 
           $UpdCount += @($UpdResult).Count
         } else {
-          Write-ScriptLog "... keine Updates zum Download verfügbar."
+          Write-ScriptLog "... es sind keine Windows-Updates verfügbar."
           $RepBody += "<div class='no-updates'>Keine Updates zum Download verfügbar.</div>"
         }
         Write-ScriptLog ''

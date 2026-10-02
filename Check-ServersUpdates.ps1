@@ -793,6 +793,7 @@ if ($ServerADList -ne $null) {
         if ($updateRows.Count -gt 0) {
           ($updateRows | Select-Object ComputerName, Status, KB, Size, Title | Format-Table -AutoSize | Out-String) `
             -split "\r?\n" | ForEach-Object { if ($_) { Write-ScriptLog $_ } }
+          Write-ScriptLog ''
           $UpdResultFull += $updateRows
           
           $RepBody += "<table>`n"
