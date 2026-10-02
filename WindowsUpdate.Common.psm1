@@ -1749,8 +1749,15 @@ catch {
             $rowPattern = '^\s*(?<Name>.+)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)(?:\s+(?<Source>\S+))?\s*$'
             $rows = foreach ($line in ($Output -split "`r?`n")) {
                 if (Test-WingetSourceFailureLine -Line $line) { continue }
+                # Je nach WinGet-Version und Umleitung heißen Tabellenköpfe
+                # Name/Id/Version oder SearchName/SearchId/SearchVersion.
+                # Sie sehen sonst wie eine Paketzeile aus und würden gezählt.
+                if ($line.Trim() -match '^(?:SearchName|Name)\s+(?:SearchId|Id)\s+(?:SearchVersion|Version)\s+(?:AvailableHeader|Available)(?:\s+(?:SearchSource|Source))?\b') { continue }
                 $match = [regex]::Match($line, $rowPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
                 if (-not $match.Success) { continue }
+                if ($match.Groups['Id'].Value -in @('Id', 'SearchId') -or
+                    $match.Groups['InstalledVersion'].Value -in @('Version', 'SearchVersion') -or
+                    $match.Groups['AvailableVersion'].Value -in @('Available', 'AvailableHeader')) { continue }
                 $source = if ($match.Groups['Source'].Success) { $match.Groups['Source'].Value } else { 'winget' }
                 [string]::Format('{0,-65} {1,-38} {2,-14} {3,-14} {4}',
                     $match.Groups['Name'].Value.Trim(), $match.Groups['Id'].Value,
@@ -2093,7 +2100,6 @@ catch {
                     try {
                         $availableOutput = Invoke-WingetCliUpgradeQuery -Path $wingetPath
                         $wingetCliFallback = $true
-                        $wingetBootstrapMessage += " WinGet-Modulabfrage fehlgeschlagen ($moduleQueryFailure); WinGet-CLI-Fallback verwendet."
                     }
                     catch {
                         throw "WinGet-Modulabfrage fehlgeschlagen ($moduleQueryFailure); CLI-Fallback ebenfalls fehlgeschlagen: $($_.Exception.Message)"
@@ -2181,7 +2187,6 @@ catch {
                                     $cliUpdate = Invoke-WingetCliPackageUpdate -Path $wingetPath -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
                                     if ($cliUpdate.Success) {
                                         $moduleUpdate = $cliUpdate
-                                        $wingetBootstrapMessage += " WinGet-Modulpaketupdate fehlgeschlagen ($moduleFailureOutput); CLI-Fallback verwendet."
                                     }
                                     else {
                                         $moduleUpdate = [PSCustomObject]@{
