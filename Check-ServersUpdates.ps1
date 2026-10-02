@@ -514,6 +514,7 @@ $RepBody = @"
 if ($ServerADList -ne $null) {
   Write-ScriptLog ''
   Write-ScriptLog "Verarbeite Windows-Zielliste..."
+  Write-ScriptLog ''
 
   # -----------------------------------------------------------------------
   # ÄNDERUNG: ScriptBlocks verwenden jetzt immer -Online

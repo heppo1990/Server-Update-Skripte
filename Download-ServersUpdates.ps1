@@ -215,6 +215,7 @@ $RepBody = @"
 if ($ServerADList -ne $null) {
   Write-ScriptLog ''
   Write-ScriptLog "Verarbeite AD-Serverliste..."
+  Write-ScriptLog ''
 
   $SucheOnline = $UpdateSettings.SucheOnline
 

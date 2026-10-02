@@ -1650,6 +1650,7 @@ $ManualActions = @()
 if ($ServerADList -ne $null) {
   Write-ScriptLog ''
   Write-ScriptLog "Verarbeite AD-Serverliste..."
+  Write-ScriptLog ''
   
   $RepBody += "<div class='section-title'>🖥️ Windows-Server Updates</div>"
 
