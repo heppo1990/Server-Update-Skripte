@@ -194,7 +194,6 @@ function Invoke-PackageManagerUpdates {
       $managerPackages = @($successfulPackagesByManager[$manager])
       Write-ScriptLog "$manager auf ${Servername}: $($managerPackages.Count) Paketupdates installiert"
       foreach ($package in $managerPackages) { Write-ScriptLog "  $package" }
-      Write-ScriptLog ''
     }
     if ($successfulPackagesByManager.Count -eq 0 -and $manualPackageCount -eq 0) { Write-ScriptLog '' }
     if ($manualPackageCount -gt 0) {
@@ -353,8 +352,6 @@ function Invoke-WindowsUpdates {
     if ($UpdResult) {
       $UpdResult = $UpdResult | Sort-Object -Property KB, ComputerName -Unique
       Write-ScriptLog "Windows-Updates installiert auf ${Servername}: $(@($UpdResult).Count) Update(s)"
-    } else {
-      Write-ScriptLog "Keine Windows-Updates installiert auf ${Servername}"
     }
     
     return @(,$UpdResult)
@@ -1673,7 +1670,10 @@ if ($ServerADList -ne $null) {
       Write-Progress -Activity "Verarbeite AD-Serverliste" -Status "Verarbeite Server [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
 
       Try {
-        if ($index -gt 1) { Write-ScriptLog '' }
+        if ($index -gt 1) {
+          Write-ScriptLog ''
+          Write-ScriptLog ''
+        }
         Write-ScriptLog "Starte Update-Installation auf AD-Server $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
@@ -1906,11 +1906,11 @@ if ($ServerADList -ne $null) {
             Write-ScriptLog "Installierte Updates auf ${Servername}: $(@($validUpdates).Count) (Gesamt: $UpdCount)"
           } else {
             Write-ScriptLog "Keine gültigen Update-Objekte gefunden" -IsDebug
-            Write-ScriptLog "... keine Updates installiert."
+            Write-ScriptLog "Keine Windows-Updates installiert auf ${Servername}."
             $RepBody += "<div class='no-updates'>Keine Updates installiert.</div>"
           }
         } else {
-          Write-ScriptLog "... keine Updates installiert."
+          Write-ScriptLog "Keine Windows-Updates installiert auf ${Servername}."
           $RepBody += "<div class='no-updates'>Keine Updates installiert.</div>"
         }
       }
