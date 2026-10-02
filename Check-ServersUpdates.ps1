@@ -833,13 +833,18 @@ if ($ServerADList -ne $null) {
           Write-ScriptLog "WARNUNG: Paketmanager-Prüfung auf ${Servername} übersprungen: $($_.Exception.Message)"
           $packageResults = @()
         }
+        $packageOutputWritten = $false
         foreach ($packageResult in $packageResults) {
           if ($packageResult.Skipped) {
+            if ($packageOutputWritten) { Write-ScriptLog '' }
             $skipReason = if ([string]::IsNullOrWhiteSpace([string]$packageResult.SkipReason)) { 'ohne Angabe eines Grundes' } else { [string]$packageResult.SkipReason }
             Write-ScriptLog "$($packageResult.Manager)-Prüfung auf ${Servername} übersprungen: $skipReason."
+            $packageOutputWritten = $true
             continue
           }
           if (-not $packageResult.Available) { continue }
+          if ($packageOutputWritten) { Write-ScriptLog '' }
+          $packageOutputWritten = $true
           $packages = @($packageResult.Packages)
           if (-not $packageResult.Success) {
             $hasPackageResults = $packageResult.Manager -eq 'Winget' -and $packages.Count -gt 0
@@ -863,7 +868,6 @@ if ($ServerADList -ne $null) {
           $packageCount = $packages.Count
           if ($packageCount -eq 0) {
             Write-ScriptLog "$($packageResult.Manager) auf ${Servername}: keine Paketupdates verfügbar."
-            Write-ScriptLog ''
             continue
           }
 
@@ -872,7 +876,6 @@ if ($ServerADList -ne $null) {
           if ($packageResult.Manager -eq 'Chocolatey') { $ChocolateyUpdateCount += $packageCount }
           Write-ScriptLog "$($packageResult.Manager) auf ${Servername}: $packageCount Paketupdate(s) verfügbar."
           foreach ($package in $packages) { Write-ScriptLog "  ${Servername}: $package" }
-          Write-ScriptLog ''
 
           $RepBody += "<div class='info-box'><strong>$($packageResult.Manager)-Updates auf $Servername ($packageCount):</strong><br>"
           $RepBody += (($packages | ForEach-Object { [System.Net.WebUtility]::HtmlEncode([string]$_) }) -join '<br>')

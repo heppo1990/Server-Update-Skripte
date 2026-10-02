@@ -77,6 +77,9 @@ function Write-WindowsUpdateConsoleLine {
         $script:WindowsUpdateConsoleTableActive = $false
         $script:WindowsUpdateConsoleTableHasRows = $false
     }
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $script:WindowsUpdateConsolePackageRowsActive = $false
+    }
 
     $displayMessage = if ($IsDebug) { $Message } else { Format-WindowsUpdateConsoleError -Message $Message }
     if ([string]::IsNullOrWhiteSpace($displayMessage)) {
