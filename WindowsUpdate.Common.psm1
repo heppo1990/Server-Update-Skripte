@@ -10,6 +10,7 @@ function Write-CommonLog {
 }
 
 $script:WindowsUpdateConsoleTableActive = $false
+$script:WindowsUpdateConsoleTableHasRows = $false
 $script:WindowsUpdateConsoleSummaryActive = $false
 $script:WindowsUpdateConsoleSummaryDividerCount = 0
 $script:WindowsUpdateConsolePackageRowsActive = $false
@@ -61,15 +62,17 @@ function Write-WindowsUpdateConsoleLine {
     )
 
     $wasTableActive = $script:WindowsUpdateConsoleTableActive
+    $wasTableHasRows = $script:WindowsUpdateConsoleTableHasRows
     $wasPackageRowsActive = $script:WindowsUpdateConsolePackageRowsActive
     $show = $AlreadyFiltered -or (Test-WindowsUpdateConsoleMessage -Message $Message -IsDebug:$IsDebug)
     if (-not $show) { return }
 
     $isTableLine = $Message -match '^\s*ComputerName\s+Status\s+KB\b|^\s*-{3,}(?:\s+-{2,})+|^\s*\S+\s+[A-Za-z-]{7}\s+(?:KB\d+)?(?:\s+\S.*)?$'
     $isPackageRow = $Message -match '^\s{2,}\S+\s*:'
-    if (-not [string]::IsNullOrWhiteSpace($Message) -and (($wasTableActive -and -not $script:WindowsUpdateConsoleTableActive -and -not $isTableLine) -or ($wasPackageRowsActive -and -not $script:WindowsUpdateConsolePackageRowsActive -and -not $isPackageRow))) {
+    if (-not [string]::IsNullOrWhiteSpace($Message) -and (($wasTableActive -and -not $script:WindowsUpdateConsoleTableActive -and -not $isTableLine -and $wasTableHasRows) -or ($wasPackageRowsActive -and -not $script:WindowsUpdateConsolePackageRowsActive -and -not $isPackageRow))) {
         Write-Host ''
     }
+    if ($wasTableActive -and -not $script:WindowsUpdateConsoleTableActive) { $script:WindowsUpdateConsoleTableHasRows = $false }
 
     $displayMessage = if ($IsDebug) { $Message } else { Format-WindowsUpdateConsoleError -Message $Message }
     if ([string]::IsNullOrWhiteSpace($displayMessage)) {
@@ -114,7 +117,10 @@ function Test-WindowsUpdateConsoleMessage {
     }
     if ($script:WindowsUpdateConsoleTableActive) {
         if ($Message -match '^\s*ComputerName\s+Status\s+KB\b' -or $Message -match '^\s*-{3,}(?:\s+-{2,})+') { return $true }
-        if ($Message -match '^\s*\S+\s+[A-Za-z-]{7}\s+(?:KB\d+)?(?:\s+\S.*)?$') { return $true }
+        if ($Message -match '^\s*\S+\s+[A-Za-z-]{7}\s+(?:KB\d+)?(?:\s+\S.*)?$') {
+            $script:WindowsUpdateConsoleTableHasRows = $true
+            return $true
+        }
         $script:WindowsUpdateConsoleTableActive = $false
     }
     if ($script:WindowsUpdateConsolePackageRowsActive) {
@@ -124,6 +130,7 @@ function Test-WindowsUpdateConsoleMessage {
 
     if ($Message -match '^\s*Ergebnis (der (Update-Suche|Installation)|des Downloads)\s*:') {
         $script:WindowsUpdateConsoleTableActive = $true
+        $script:WindowsUpdateConsoleTableHasRows = $false
         return $true
     }
     if ($Message -match '(?i)^\s*(WARNUNG|WARNING|\[WARN\]|\[ERROR\]|FEHLER\b|ERROR\b)|\bfehlgeschlagen\b|\bkonnte nicht\b|aufgetreten!|manuelle Prüfung|manuelle Aktion erforderlich') { return $true }

@@ -814,11 +814,12 @@ if ($ServerADList -ne $null) {
         } elseif ($rawUpdateRows.Count -gt 0) {
           Write-ScriptLog "WARNUNG: Die Update-Suche auf $Servername lieferte keine auswertbaren Update-Daten."
           $RepBody += "<div class='warning-box'>Die Update-Suche lieferte keine auswertbaren Update-Daten.</div>"
+          Write-ScriptLog ''
         } else {
           Write-ScriptLog "... es sind keine Windows-Updates verfügbar."
           $RepBody += "<div class='no-updates'>Es sind keine Updates zu installieren.</div>"
+          Write-ScriptLog ''
         }
-        Write-ScriptLog ''
 
         # Zusätzlich installierte Anwendungen über die zentrale Paketverwaltung prüfen.
         try {

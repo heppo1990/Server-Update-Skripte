@@ -722,6 +722,7 @@ function Invoke-ServerUpdateScripts {
     }
 
     if ($restartRequired) {
+        Write-Host ''
         Write-Host ("Skript-Update aus GitHub übernommen ({0} benötigte Datei(en)); starte mit aktualisiertem Stand neu." -f $changedFiles.Count) -ForegroundColor Cyan
         $global:LASTEXITCODE = 0
         & $ScriptPath @BoundParameters @RemainingArguments
