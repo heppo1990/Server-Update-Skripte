@@ -1744,6 +1744,22 @@ catch {
             return $Line -match '(?i)(Fehler beim Durchsuchen der Quelle|Fehler beim Versuch, die Quelle zu aktualisieren|An error occurred while searching the source|Failed when searching (?:the )?source|Failed in attempting to update the source)'
         }
 
+        function Get-WingetCompactOutput {
+            param([AllowNull()][string]$Text, [int]$MaximumLength = 500)
+            if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+            $clean = [regex]::Replace($Text, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+            $lines = @($clean -split "`r?`n" | ForEach-Object { ([string]$_).Trim() } | Where-Object {
+                $_ -and
+                $_ -notmatch '[\u2580-\u259F]' -and
+                $_ -notmatch '\u00e2\u2013' -and
+                $_ -notmatch '^[-\\|/](?:\s*[-\\|/]){2,}' -and
+                $_ -notmatch '(?i)\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)'
+            })
+            $summary = $lines -join ' '
+            if ($summary.Length -gt $MaximumLength) { $summary = $summary.Substring(0, $MaximumLength - 3) + '...' }
+            return $summary
+        }
+
         function Get-WingetUpgradeLines {
             param([string]$Output)
             $rowPattern = '^\s*(?<Name>.+)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)(?:\s+(?<Source>\S+))?\s*$'
