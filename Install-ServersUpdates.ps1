@@ -973,7 +973,7 @@ try {
     return `$mail
   }
   `$waitForReboot = `$false
-  `$mainRunRebootRequired = $($RebootRequired.ToString().ToLowerInvariant())
+  `$mainRunRebootRequired = $(if ($RebootRequired) { '$true' } else { '$false' })
   `$scheduledAt = if ($scheduledAtFileTime -gt 0) { [DateTime]::FromFileTimeUtc($scheduledAtFileTime) } else { [DateTime]::MinValue }
   `$maintenanceEndTime = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$maintenanceEndBase64'))
   Write-DeferredLog 'Nachinstallationsaufgabe gestartet.'
