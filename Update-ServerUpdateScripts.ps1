@@ -870,7 +870,24 @@ catch {
 }
 '@
                 $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrapSource))
-                & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedBootstrap
+                $bootstrapOutputRoot = Join-Path ([IO.Path]::GetTempPath()) ('ServerUpdate-PowerShell7-{0}' -f [guid]::NewGuid().ToString('N'))
+                $bootstrapStdoutPath = Join-Path $bootstrapOutputRoot 'stdout.txt'
+                $bootstrapStderrPath = Join-Path $bootstrapOutputRoot 'stderr.txt'
+                try {
+                    New-Item -ItemType Directory -Path $bootstrapOutputRoot -Force -ErrorAction Stop | Out-Null
+                    $bootstrapProcess = Start-Process -FilePath $windowsPowerShell `
+                        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedBootstrap) `
+                        -Wait -PassThru -WindowStyle Hidden `
+                        -RedirectStandardOutput $bootstrapStdoutPath -RedirectStandardError $bootstrapStderrPath -ErrorAction Stop
+                    foreach ($outputPath in @($bootstrapStdoutPath, $bootstrapStderrPath)) {
+                        if (Test-Path -LiteralPath $outputPath -PathType Leaf) {
+                            Get-Content -LiteralPath $outputPath -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ([string]$_) }
+                        }
+                    }
+                }
+                finally {
+                    Remove-Item -LiteralPath $bootstrapOutputRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
                 if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
                     $restartStatus = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
                     if ($restartStatus.Restarted) { exit ([int]$restartStatus.ExitCode) }
