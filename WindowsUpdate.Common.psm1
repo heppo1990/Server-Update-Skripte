@@ -1406,7 +1406,8 @@ function Reset-WindowsUpdateRemoteWinGetSources {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
         $AuthInfo,
-        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300,
+        [scriptblock]$WriteLog
     )
 
     $resetScript = {
@@ -1441,10 +1442,33 @@ function Reset-WindowsUpdateRemoteWinGetSources {
         [pscustomobject]@{ Success = $true; Message = 'WinGet-Standardquellen wurden zurückgesetzt.' }
     }
 
-    $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
-        -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName "Quellenreset auf $ComputerName")
-    if ($result.Count -eq 0 -or -not $result[-1].Success) { throw "Quellenreset auf $ComputerName lieferte keine Erfolgsbestätigung." }
-    return $result[-1]
+    $firstFailure = ''
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            # Invoke-Command verwendet pro Aufruf eine neue Remoting-Sitzung.
+            # AppX kann vorübergehend mit einem zum Löschen markierten Schlüssel
+            # scheitern; nur diesen bekannten transienten Fehler einmal erneut versuchen.
+            $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
+                -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName "Quellenreset auf $ComputerName")
+            if ($result.Count -eq 0 -or -not $result[-1].Success) { throw "Quellenreset auf $ComputerName lieferte keine Erfolgsbestätigung." }
+            if ($attempt -gt 1) { Write-CommonLog $WriteLog "WinGet-Quellenreset auf $ComputerName nach einmaliger Wiederholung erfolgreich." }
+            return $result[-1]
+        }
+        catch {
+            $resetFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+            $transientAppxFailure = $resetFailure -match '(?i)(marked for deletion|zum Löschen markiert|Error trying to initialize the application data container settings server)'
+            if (-not $transientAppxFailure) { throw }
+            if ($attempt -ge 2) {
+                throw "Quellenreset auf $ComputerName schlug nach einmaliger Wiederholung fehl. Erster Fehler: $firstFailure Zweiter Fehler: $resetFailure"
+            }
+
+            $firstFailure = $resetFailure
+            Write-CommonLog $WriteLog "WinGet-Quellenreset auf $ComputerName traf auf einen vorübergehenden AppX-Fehler; neuer Versuch in 10 Sekunden über eine frische Verbindung."
+            Start-Sleep -Seconds 10
+        }
+    }
+
+    throw "Quellenreset auf $ComputerName fehlgeschlagen. Erster Fehler: $firstFailure"
 }
 
 function Invoke-WindowsUpdateLocalCommandWithTimeout {
@@ -2405,7 +2429,7 @@ catch {
                     if ($isLocalTarget) {
                         $null = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds $wingetTimeoutSeconds
                     } else {
-                        $null = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds $wingetTimeoutSeconds
+                        $null = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds $wingetTimeoutSeconds -WriteLog $WriteLog
                     }
                     Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen Sitzung."
                 }
