@@ -9,6 +9,41 @@ function Write-CommonLog {
     if ($WriteLog) { & $WriteLog $Message }
 }
 
+function Write-WindowsUpdateDiagnostic {
+    [CmdletBinding()]
+    param(
+        [scriptblock]$WriteLog,
+        [Parameter(Mandatory)][string]$Operation,
+        [string]$Target,
+        [System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [AllowEmptyString()][string]$DiagnosticText,
+        [string[]]$Context = @()
+    )
+
+    if (-not $WriteLog) { return }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("Operation=$Operation")
+    if (-not [string]::IsNullOrWhiteSpace($Target)) { $lines.Add("Target=$Target") }
+    foreach ($item in $Context) {
+        if (-not [string]::IsNullOrWhiteSpace($item)) { $lines.Add("Context=$item") }
+    }
+    if ($ErrorRecord) {
+        $lines.Add("ErrorId=$($ErrorRecord.FullyQualifiedErrorId)")
+        $lines.Add("Category=$($ErrorRecord.CategoryInfo.Category)")
+        if ($ErrorRecord.InvocationInfo -and $ErrorRecord.InvocationInfo.PositionMessage) {
+            $lines.Add("Position=$($ErrorRecord.InvocationInfo.PositionMessage.Trim())")
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$ErrorRecord.ScriptStackTrace)) {
+            $lines.Add("ScriptStackTrace=$($ErrorRecord.ScriptStackTrace)")
+        }
+        $DiagnosticText = $ErrorRecord.Exception.ToString()
+    }
+    foreach ($line in ([string]$DiagnosticText -split "`r?`n")) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) { $lines.Add($line.TrimEnd()) }
+    }
+    foreach ($line in $lines) { Write-CommonLog $WriteLog "[DIAG] $line" }
+}
+
 $script:WindowsUpdateConsoleTableActive = $false
 $script:WindowsUpdateConsoleTableHasRows = $false
 $script:WindowsUpdateConsoleSummaryActive = $false
@@ -1356,7 +1391,10 @@ function Invoke-WindowsUpdateWithRetry {
         }
         catch {
             $lastError = $_
-            if ($WriteLog) { & $WriteLog "$OperationName fehlgeschlagen (Versuch $attempt von $RetryCount): $($_.Exception.Message)" }
+            if ($WriteLog) {
+                & $WriteLog "WARNUNG: $OperationName fehlgeschlagen (Versuch $attempt von $RetryCount); Details im Log."
+                Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation $OperationName -ErrorRecord $_ -Context @("Attempt=$attempt/$RetryCount")
+            }
             if ($attempt -lt $RetryCount -and $RetryDelaySeconds -gt 0) {
                 if ($WriteLog) { & $WriteLog "Wiederhole $OperationName in $RetryDelaySeconds Sekunden..." }
                 Start-Sleep -Seconds $RetryDelaySeconds
@@ -2830,10 +2868,7 @@ catch {
     foreach ($packageResult in $packageResults) {
         $diagnosticProperty = $packageResult.PSObject.Properties['DiagnosticOutput']
         if ($packageResult.Manager -eq 'Winget' -and $diagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticProperty.Value) -and $WriteLog) {
-            & $WriteLog "WinGet-Diagnose auf $ComputerName ($Mode):" $true
-            foreach ($diagnosticLine in ([string]$diagnosticProperty.Value -split "`r?`n")) {
-                if (-not [string]::IsNullOrWhiteSpace($diagnosticLine)) { & $WriteLog "  $diagnosticLine" $true }
-            }
+            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "WinGet-$Mode" -Target $ComputerName -DiagnosticText ([string]$diagnosticProperty.Value)
         }
         if ($packageResult.Manager -eq 'Winget') {
             $availableOutputProperty = $packageResult.PSObject.Properties['AvailableOutput']
@@ -2904,6 +2939,7 @@ function Write-WindowsUpdateLog {
 
     if ($IsDebug -and -not $DebugEnabled) { return }
     $prefix = if ($IsDebug) { '[DEBUG] ' } else { '' }
+    if ($Message -match '^\[DIAG\]') { $LogOnly = $true }
     if (-not $LogOnly) {
         if ($Host.Name -eq 'ConsoleHost') {
             try {
@@ -3024,4 +3060,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic
