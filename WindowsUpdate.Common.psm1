@@ -642,6 +642,49 @@ function Register-WindowsUpdateWinGetAppInstallerForCurrentUser {
     [CmdletBinding()]
     param()
 
+    # Die AppX-/WinGet-COM-Aktivierung schlägt bei erhöhtem PowerShell 7 fehl,
+    # während derselbe Benutzer und dieselben Pakete unter Windows PowerShell
+    # 5.1 funktionieren. AppX-Registrierung deshalb aus PS7 immer in einem
+    # frischen Windows-PowerShell-Prozess ausführen.
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        $registrationWorker = {
+            $ErrorActionPreference = 'Stop'
+            $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
+            $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
+            $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+            if ($latestPackage.Count -eq 0) {
+                return [pscustomobject]@{ AppInstallerVersion = ''; RegistrationChanged = $false }
+            }
+
+            $targetVersion = [version]$latestPackage[0].Version
+            $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+            $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
+            $registrationChanged = $currentVersion -lt $targetVersion
+            if ($registrationChanged) {
+                $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
+                if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                    throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
+                }
+                Add-AppxPackage -Path $manifestPath -Register -DisableDevelopmentMode -ErrorAction Stop | Out-Null
+            }
+
+            $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+                Where-Object { [version]$_.Version -ge $targetVersion } |
+                Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+            if ($registeredPackage.Count -eq 0 -or [string]$registeredPackage[0].Status -ne 'Ok') {
+                throw "App Installer $targetVersion wurde für den aktuellen Benutzer nicht erfolgreich registriert."
+            }
+            [pscustomobject]@{ AppInstallerVersion = [string]$registeredPackage[0].Version; RegistrationChanged = $registrationChanged }
+        }
+
+        $registrationResult = @(Invoke-WindowsUpdateLocalCommandWithTimeout -ScriptBlock $registrationWorker `
+            -TimeoutSeconds 300 -OperationName 'App-Installer-Registrierung unter Windows PowerShell 5.1')
+        if ($registrationResult.Count -eq 0) { throw 'Windows PowerShell 5.1 lieferte kein Ergebnis der App-Installer-Registrierung.' }
+        return $registrationResult[-1]
+    }
+
     $ErrorActionPreference = 'Stop'
     $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
         Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
@@ -678,6 +721,28 @@ function Repair-WindowsUpdateWinGetPackageManager {
     <# Repariert WinGet und registriert die bereitgestellte App-Installer-Version für den aktuellen Benutzer. #>
     [CmdletBinding()]
     param()
+
+    # Repair-WinGetPackageManager verwendet dieselbe WinRT/COM-Schnittstelle
+    # wie Get-WinGetPackage. In erhöhtem PS7 schlägt deren Aktivierung mit
+    # 0x800706BA fehl; der PS5.1-Prozess läuft mit demselben Benutzer-Token.
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        $repairWorker = {
+            $ErrorActionPreference = 'Stop'
+            Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
+            $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+            Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
+            [pscustomobject]@{ WinGetVersion = [string](Get-WinGetVersion -ErrorAction Stop) }
+        }
+        $repairResult = @(Invoke-WindowsUpdateLocalCommandWithTimeout -ScriptBlock $repairWorker `
+            -TimeoutSeconds 1800 -OperationName 'WinGet-Reparatur über Microsoft.WinGet.Client')
+        if ($repairResult.Count -eq 0) { throw 'Windows PowerShell 5.1 lieferte kein Ergebnis der WinGet-Reparatur.' }
+        $registration = Register-WindowsUpdateWinGetAppInstallerForCurrentUser
+        return [pscustomobject]@{
+            WinGetVersion = [string]$repairResult[-1].WinGetVersion
+            AppInstallerVersion = [string]$registration.AppInstallerVersion
+            RegistrationChanged = [bool]$registration.RegistrationChanged
+        }
+    }
 
     $ErrorActionPreference = 'Stop'
     Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
