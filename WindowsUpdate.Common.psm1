@@ -1891,7 +1891,7 @@ catch {
         }
 
         function Get-WingetUpgradeLines {
-            param([string]$Output)
+            param([string]$Output, [string]$DefaultSource = 'winget')
             $rowPattern = '^\s*(?<Name>.+)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)(?:\s+(?<Source>\S+))?\s*$'
             $rows = foreach ($line in ($Output -split "`r?`n")) {
                 if (Test-WingetSourceFailureLine -Line $line) { continue }
@@ -1904,7 +1904,7 @@ catch {
                 if ($match.Groups['Id'].Value -in @('Id', 'SearchId') -or
                     $match.Groups['InstalledVersion'].Value -in @('Version', 'SearchVersion') -or
                     $match.Groups['AvailableVersion'].Value -in @('Available', 'AvailableHeader')) { continue }
-                $source = if ($match.Groups['Source'].Success) { $match.Groups['Source'].Value } else { 'winget' }
+                $source = if ($match.Groups['Source'].Success) { $match.Groups['Source'].Value } else { $DefaultSource }
                 [string]::Format('{0}  {1}  {2}  {3}  {4}',
                     $match.Groups['Name'].Value.Trim(), $match.Groups['Id'].Value,
                     $match.Groups['InstalledVersion'].Value, $match.Groups['AvailableVersion'].Value, $source)
@@ -1919,8 +1919,42 @@ catch {
             }
             $cliJob = Start-Job -ArgumentList $Path -ScriptBlock {
                 param([string]$WingetPath)
-                $output = (& $WingetPath upgrade --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-                [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
+                $sourceListOutput = (& $WingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+                $sourceListExitCode = $LASTEXITCODE
+                $sourceNames = @()
+                if ($sourceListExitCode -eq 0) {
+                    foreach ($line in ($sourceListOutput -split "`r?`n")) {
+                        if ($line -match '^\s*Name\b' -or $line -match '^\s*[-=]{3,}') { continue }
+                        if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+\S+\s*$') {
+                            $sourceNames += $Matches.Name
+                        }
+                    }
+                    $sourceNames = @($sourceNames | Select-Object -Unique)
+                }
+
+                if ($sourceListExitCode -ne 0 -or $sourceNames.Count -eq 0) {
+                    [pscustomobject]@{
+                        Success = $false; SourceListOutput = $sourceListOutput; SourceListExitCode = $sourceListExitCode
+                        Sources = @(); Results = @()
+                    }
+                    return
+                }
+
+                $sourceResults = @()
+                foreach ($sourceName in $sourceNames) {
+                    $arguments = @(
+                        'upgrade', '--source', $sourceName,
+                        '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'
+                    )
+                    $output = (& $WingetPath @arguments 2>&1 | Out-String -Width 1200).Trim()
+                    $sourceResults += [pscustomobject]@{
+                        Source = $sourceName; Output = $output; ExitCode = $LASTEXITCODE
+                    }
+                }
+                [pscustomobject]@{
+                    Success = $true; SourceListOutput = $sourceListOutput; SourceListExitCode = $sourceListExitCode
+                    Sources = @($sourceNames); Results = @($sourceResults)
+                }
             }
             try {
                 $jobState = Wait-Job -Job $cliJob -Timeout 210
@@ -1930,20 +1964,49 @@ catch {
                 }
                 $cliResult = Receive-Job -Job $cliJob -ErrorAction Stop | Select-Object -Last 1
                 if (-not $cliResult) { throw 'WinGet-CLI-Abfrage lieferte keine Rückgabe.' }
-                $output = [string]$cliResult.Output
-                $exitCode = [int]$cliResult.ExitCode
             }
             finally {
                 Remove-Job -Job $cliJob -Force -ErrorAction SilentlyContinue
             }
-            if ($exitCode -ne 0) {
-                $detail = ($output -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1)
-                if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe upgrade endete mit Exitcode $exitCode." }
-                $exception = [System.InvalidOperationException]::new([string]$detail)
-                $exception.Data['WinGetDiagnosticOutput'] = $output
+
+            $diagnostics = @("Quellenliste (Exitcode $($cliResult.SourceListExitCode)):`r`n$($cliResult.SourceListOutput)")
+            if (-not $cliResult.Success) {
+                $exception = [System.InvalidOperationException]::new('WinGet-Quellen konnten für den CLI-Fallback nicht zuverlässig ermittelt werden.')
+                $exception.Data['WinGetDiagnosticOutput'] = $diagnostics -join "`r`n"
                 throw $exception
             }
-            return $output
+
+            $allRows = @()
+            $sourceFailures = @()
+            $seenPackages = @{}
+            foreach ($sourceResult in @($cliResult.Results)) {
+                $sourceName = [string]$sourceResult.Source
+                $sourceOutput = [string]$sourceResult.Output
+                $sourceExitCode = [int]$sourceResult.ExitCode
+                $diagnostics += "Quelle '$sourceName' (Exitcode $sourceExitCode):`r`n$sourceOutput"
+                if ($sourceExitCode -ne 0) {
+                    $detail = Get-WingetCompactOutput -Text $sourceOutput -MaximumLength 500
+                    if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe upgrade endete mit Exitcode $sourceExitCode." }
+                    $sourceFailures += "Fehler beim Versuch, die Quelle zu aktualisieren: $sourceName — $detail"
+                    continue
+                }
+
+                foreach ($row in @(Get-WingetUpgradeLines -Output $sourceOutput -DefaultSource $sourceName)) {
+                    $match = [regex]::Match($row, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
+                    if (-not $match.Success) { continue }
+                    $packageKey = '{0}|{1}' -f $match.Groups['Id'].Value.ToLowerInvariant(), $match.Groups['Source'].Value.ToLowerInvariant()
+                    if ($seenPackages.ContainsKey($packageKey)) { continue }
+                    $seenPackages[$packageKey] = $true
+                    $allRows += $row
+                }
+            }
+
+            [pscustomobject]@{
+                Output = (@($allRows) + @($sourceFailures)) -join [Environment]::NewLine
+                DiagnosticOutput = $diagnostics -join "`r`n"
+                Sources = @($cliResult.Sources)
+                FailedSources = @($sourceFailures)
+            }
         }
 
         function Invoke-WingetCliPackageUpdate {
@@ -2260,9 +2323,14 @@ catch {
                     $moduleQueryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
                     $moduleQueryDiagnostic = [string]$_.Exception.ToString()
                     try {
-                        $availableOutput = Invoke-WingetCliUpgradeQuery -Path $wingetPath
+                        $cliQueryResult = Invoke-WingetCliUpgradeQuery -Path $wingetPath
+                        $availableOutput = [string]$cliQueryResult.Output
                         $wingetCliFallback = $true
-                        $wingetDiagnosticOutput = "Modulabfrage fehlgeschlagen; CLI-Fallback erfolgreich.`r`n$moduleQueryDiagnostic"
+                        $fallbackSummary = "Modulabfrage fehlgeschlagen; CLI-Fallback über Quellen $(@($cliQueryResult.Sources) -join ', ')."
+                        if (@($cliQueryResult.FailedSources).Count -gt 0) {
+                            $fallbackSummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
+                        }
+                        $wingetDiagnosticOutput = "$fallbackSummary`r`n$moduleQueryDiagnostic`r`nCLI-Fallback:`r`n$([string]$cliQueryResult.DiagnosticOutput)"
                     }
                     catch {
                         $cliDiagnosticProperty = $_.Exception.Data['WinGetDiagnosticOutput']
@@ -2275,11 +2343,22 @@ catch {
                     Test-WingetSourceFailureLine -Line ([string]$_)
                 })
                 $wingetSourceRefreshOutput = ''
+                # Auswertbare Pakettreffer behalten, auch wenn eine andere
+                # Quelle im selben CLI-Lauf einen Fehler zurückliefert.
+                $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
                 if ($sourceFailureLines.Count -gt 0) {
                     $sourceFailureText = @($sourceFailureLines | ForEach-Object { Get-WingetCompactOutput -Text ([string]$_) }) -join ' '
+                    if ($ExecutionMode -eq 'Install' -and $packageLines.Count -gt 0) {
+                        $result += [PSCustomObject]@{
+                            Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                            Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=''
+                            DiagnosticOutput=$wingetDiagnosticOutput
+                        }
+                    }
                     $result += [PSCustomObject]@{
                         Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=1
-                        Packages=@(); AvailableOutput=$availableOutput; ActionOutput=$sourceFailureText
+                        Packages=$(if ($ExecutionMode -eq 'Check') { $packageLines } else { @() }); AvailableOutput=$availableOutput; ActionOutput=$sourceFailureText
+                        DiagnosticOutput=$wingetDiagnosticOutput
                         RetryAfterSourceReset=($ExecutionMode -eq 'Check')
                     }
                     return @($result)
@@ -2288,7 +2367,6 @@ catch {
                 # enden mit ihrer Paketquelle (winget oder msstore); Status- und
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
-                $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
                 if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0) {
                     if ($SourceResetPerformed) {
                         $wingetBootstrapMessage += ' WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar.'
@@ -2626,9 +2704,18 @@ catch {
                 if ([string]::IsNullOrWhiteSpace($retryDiagnostic)) { $retryDiagnostic = [string]$_.Exception.ToString() }
                 $failureMessage = "WinGet-Prüfung auf $ComputerName fehlgeschlagen; Details im Log."
                 $fullDiagnostic = "Erste WinGet-Prüfung:`r`n$firstDiagnostic`r`nWiederholungsprüfung:`r`n$retryDiagnostic"
+                $partialResult = $retryResult
+                if (-not $partialResult -or @($partialResult.Packages).Count -eq 0) { $partialResult = $firstWingetResult }
+                $partialPackages = @()
+                $partialOutput = ''
+                if ($partialResult) {
+                    $partialPackages = @($partialResult.Packages)
+                    $partialOutput = [string]$partialResult.AvailableOutput
+                }
                 $packageResults += [pscustomobject]@{
                     Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
-                    ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$failureMessage; DiagnosticOutput=$fullDiagnostic
+                    ExitCode=$null; Packages=$partialPackages; AvailableOutput=$partialOutput
+                    ActionOutput=$failureMessage; DiagnosticOutput=$fullDiagnostic
                 }
             }
         }
