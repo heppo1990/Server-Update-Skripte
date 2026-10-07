@@ -212,30 +212,13 @@ function Clear-WindowsUpdateCache {
   }
 
   try {
-    if ($Servername -eq $env:COMPUTERNAME) {
-      $result = & $clearCacheScript -DetectNowWaitSec $detectWait
-    } else {
-      try {
-        $invokeParams = @{
-          ComputerName = $Servername
-          ScriptBlock  = $clearCacheScript
-          ArgumentList = $detectWait
-          ErrorAction  = 'Stop'
-        }
-        if ($AuthInfo) {
-          $authParams = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-          foreach ($key in $authParams.Keys) {
-            if ($key -ne 'ComputerName') {
-              $invokeParams[$key] = $authParams[$key]
-            }
-          }
-        }
-        $result = Invoke-Command @invokeParams
-      }
-      catch {
-        Write-ScriptLog "WARNUNG: Cache-Bereinigung remote fehlgeschlagen: $($_.Exception.Message)"
-        $result = "SKIPPED"
-      }
+    try {
+      $result = Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $Servername -AuthInfo $AuthInfo `
+        -ScriptBlock $clearCacheScript -ArgumentList @($detectWait) -TimeoutSeconds 300 -OperationName "Cache-Bereinigung auf $Servername"
+    }
+    catch {
+      Write-ScriptLog "WARNUNG: Cache-Bereinigung via WinRM auf $Servername fehlgeschlagen: $($_.Exception.Message)"
+      $result = "SKIPPED"
     }
     
     switch -Wildcard ($result) {
