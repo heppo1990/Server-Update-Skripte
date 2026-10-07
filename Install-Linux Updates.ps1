@@ -79,7 +79,7 @@ function Write-LinuxLog {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info')
     $color = @{ Info='White'; Success='Green'; Warning='Yellow'; Error='Red' }[$Level]
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    if (-not $script:QuietMode) { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color }
+    if (-not $script:QuietMode -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color }
     if ($script:WriteExecutionLog) {
         [IO.File]::AppendAllText($LogFile, $Message + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
     }
@@ -476,7 +476,8 @@ foreach ($entry in $hostEntries) {
         if ($result.UpdateCount -gt 0) { Write-LinuxLog -Message $completionText -LogFile $logFile -Level Success }
     } catch {
         $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; UpdateCount=0; Packages=''; Error=$_.Exception.Message; LogFile=$logFile }
-        Write-LinuxLog -Message "Fehler bei ${remoteHost}: $($_.Exception.Message)" -LogFile $logFile -Level Error
+        Write-LinuxLog -Message "Fehler bei ${remoteHost}; Details im Laufprotokoll." -LogFile $logFile -Level Error
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $logFile } -Operation 'Linux-Host-Update' -Target $remoteHost -ErrorRecord $_
     } finally {
         Invoke-LinuxLogRetention -RemoteHost $remoteHost
     }
