@@ -79,12 +79,25 @@ catch {
 
 # Zertifikatsvalidierung temporär speichern (für Retry-Logik)
 $OriginalCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+$script:SetupLogPath = $null
+try {
+    $setupLogDirectory = Join-Path $env:ProgramData 'WindowsUpdateAdm\Logs'
+    New-Item -Path $setupLogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $script:SetupLogPath = Join-Path $setupLogDirectory ('Setup_{0}_{1}.log' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+}
+catch {
+    Write-Verbose "Setup-Protokoll konnte nicht vorbereitet werden: $($_.Exception.Message)"
+}
 
 # Logging-Funktion (farbneutral für Remote-Ausführung)
 function Write-SetupLog {
     param([string]$Message, [string]$Level = "INFO")
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $LogMessage = "[$Timestamp] [$Level] $Message"
+    if ($script:SetupLogPath) {
+        try { Add-Content -LiteralPath $script:SetupLogPath -Value $LogMessage -Encoding UTF8 -ErrorAction Stop }
+        catch { Write-Verbose "Setup-Protokoll konnte nicht geschrieben werden: $($_.Exception.Message)" }
+    }
     
     # Farben nur wenn Terminal tatsaechlich Farben unterstuetzt
     $SupportsColor = $false
@@ -106,8 +119,34 @@ function Write-SetupLog {
     }
 }
 
+function Write-SetupDiagnostic {
+    param(
+        [Parameter(Mandatory)][string]$Operation,
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string[]]$Context = @()
+    )
+
+    if (-not $script:SetupLogPath) { return }
+    $details = [System.Collections.Generic.List[string]]::new()
+    $details.Add("[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DIAG] Operation=$Operation")
+    $details.Add("[DIAG] Target=$env:COMPUTERNAME")
+    foreach ($item in $Context) { if (-not [string]::IsNullOrWhiteSpace($item)) { $details.Add("[DIAG] Context=$item") } }
+    $details.Add("[DIAG] ErrorId=$($ErrorRecord.FullyQualifiedErrorId)")
+    $details.Add("[DIAG] Category=$($ErrorRecord.CategoryInfo.Category)")
+    if ($ErrorRecord.InvocationInfo -and $ErrorRecord.InvocationInfo.PositionMessage) {
+        $details.Add("[DIAG] Position=$($ErrorRecord.InvocationInfo.PositionMessage.Trim())")
+    }
+    if ($ErrorRecord.ScriptStackTrace) { $details.Add("[DIAG] ScriptStackTrace=$($ErrorRecord.ScriptStackTrace)") }
+    foreach ($line in ($ErrorRecord.Exception.ToString() -split "`r?`n")) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) { $details.Add("[DIAG] $($line.TrimEnd())") }
+    }
+    try { Add-Content -LiteralPath $script:SetupLogPath -Value $details.ToArray() -Encoding UTF8 -ErrorAction Stop }
+    catch { Write-Verbose "Setup-Diagnose konnte nicht geschrieben werden: $($_.Exception.Message)" }
+}
+
 try {
     Write-SetupLog "=== Start WindowsUpdateAdm Configuration Setup ===" "INFO"
+    if ($script:SetupLogPath) { Write-SetupLog "Protokoll: $script:SetupLogPath" "INFO" }
     Write-SetupLog "Computer: $env:COMPUTERNAME" "INFO"
     Write-SetupLog "PowerShell Version: $($PSVersionTable.PSVersion)" "INFO"
     Write-SetupLog "TLS-Protokolle: $([Net.ServicePointManager]::SecurityProtocol)" "INFO"
@@ -154,7 +193,8 @@ try {
         }
     }
     catch {
-        Write-SetupLog "PSGallery Konfiguration uebersprungen: $($_.Exception.Message)" "WARN"
+        Write-SetupLog 'PSGallery-Konfiguration übersprungen; Details im Setup-Protokoll.' 'WARN'
+        Write-SetupDiagnostic -Operation 'PSGallery-Konfiguration' -ErrorRecord $_
     }
     
     # =========================================================
@@ -195,7 +235,8 @@ try {
         foreach ($Cmd in $ImportantCmdlets) { Write-SetupLog "  - $($Cmd.Name)" "INFO" }
     }
     catch {
-        throw "PSWindowsUpdate konnte nicht geladen werden: $($_.Exception.Message)"
+        Write-SetupDiagnostic -Operation 'PSWindowsUpdate-Modultest' -ErrorRecord $_
+        throw 'PSWindowsUpdate konnte nicht geladen werden; Details stehen im Setup-Protokoll.'
     }
     
     # =========================================================
@@ -250,7 +291,8 @@ try {
                 Write-SetupLog "Modul nach $Label kopiert: $VersionPath" "SUCCESS"
             }
             catch {
-                Write-SetupLog "Warnung beim Kopieren nach ${Label}: $($_.Exception.Message)" "WARN"
+                Write-SetupLog "Modul konnte nicht nach ${Label} kopiert werden; Details im Setup-Protokoll." 'WARN'
+                Write-SetupDiagnostic -Operation 'PSWindowsUpdate-Modulkopie' -ErrorRecord $_ -Context @("Destination=$Label")
             }
         } else {
             Write-SetupLog "Modul bereits korrekt in $Label vorhanden (Version: $installedVersion)" "SUCCESS"
@@ -287,7 +329,8 @@ try {
             }
         }
         catch {
-            Write-SetupLog "PS-Remoting bereits aktiv oder Fehler: $($_.Exception.Message)" "INFO"
+            Write-SetupLog 'PS-Remoting ist bereits aktiv oder konnte nicht erneut aktiviert werden; Details im Setup-Protokoll.' 'INFO'
+            Write-SetupDiagnostic -Operation 'PS-Remoting-Konfiguration' -ErrorRecord $_
         }
     }
 
@@ -368,7 +411,8 @@ try {
                 Write-SetupLog "Zertifikat erstellt: $($cert.Thumbprint) (inkl. Server-EKU)" "SUCCESS"
             }
             catch {
-                throw "Zertifikat konnte nicht erstellt werden: $($_.Exception.Message)"
+                Write-SetupDiagnostic -Operation 'WinRM-HTTPS-Zertifikat' -ErrorRecord $_ -Context @("Computer=$hostname")
+                throw 'WinRM-HTTPS-Zertifikat konnte nicht erstellt werden; Details stehen im Setup-Protokoll.'
             }
         }
         
@@ -395,7 +439,8 @@ try {
                 Write-SetupLog "WinRM HTTPS-Listener erstellt (Port 5986)" "SUCCESS"
             }
             catch {
-                throw "HTTPS-Listener konnte nicht erstellt werden: $($_.Exception.Message)"
+                Write-SetupDiagnostic -Operation 'WinRM-HTTPS-Listener' -ErrorRecord $_ -Context @("Computer=$hostname")
+                throw 'WinRM-HTTPS-Listener konnte nicht erstellt werden; Details stehen im Setup-Protokoll.'
             }
         }
 
@@ -415,7 +460,8 @@ try {
                 Write-SetupLog "Firewall-Regel für Port 5986 (WinRM HTTPS) erstellt." "SUCCESS"
             }
             catch {
-                Write-SetupLog "WARNUNG: Firewall-Regel konnte nicht erstellt werden: $($_.Exception.Message)" "WARN"
+                Write-SetupLog 'Firewall-Regel konnte nicht erstellt werden; Details im Setup-Protokoll.' 'WARN'
+                Write-SetupDiagnostic -Operation 'WinRM-Firewallregel' -ErrorRecord $_
             }
         }
 
@@ -435,7 +481,8 @@ try {
             Write-SetupLog "WinRM Zertifikat-Authentifizierung aktiviert." "SUCCESS"
         }
         catch {
-            Write-SetupLog "WARNUNG: Zertifikat-Auth konnte nicht aktiviert werden: $($_.Exception.Message)" "WARN"
+            Write-SetupLog 'Zertifikatsauthentifizierung konnte nicht aktiviert werden; Details im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'WinRM-Zertifikatsauthentifizierung' -ErrorRecord $_
         }
 
         # LocalAccountTokenFilterPolicy setzen (nötig für lokale Accounts via Zertifikat)
@@ -445,7 +492,8 @@ try {
             Write-SetupLog "LocalAccountTokenFilterPolicy gesetzt." "SUCCESS"
         }
         catch {
-            Write-SetupLog "WARNUNG: LocalAccountTokenFilterPolicy konnte nicht gesetzt werden: $($_.Exception.Message)" "WARN"
+            Write-SetupLog 'LocalAccountTokenFilterPolicy konnte nicht gesetzt werden; Details im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'LocalAccountTokenFilterPolicy' -ErrorRecord $_
         }
 
         # Client-Zertifikat (Public Key) aus Skriptordner importieren
@@ -511,12 +559,14 @@ try {
                         Write-SetupLog "Zertifikat mit Account '$localUser' verknüpft." "SUCCESS"
                     }
                     catch {
-                        Write-SetupLog "WARNUNG: Zertifikat-Mapping fehlgeschlagen: $($_.Exception.Message)" "WARN"
+                        Write-SetupLog 'Zertifikat-Mapping fehlgeschlagen; Details im Setup-Protokoll.' 'WARN'
+                        Write-SetupDiagnostic -Operation 'WinRM-Zertifikatmapping' -ErrorRecord $_ -Context @("User=$localUser")
                     }
                 }
             }
             catch {
-                Write-SetupLog "WARNUNG: Client-Zertifikat konnte nicht importiert werden: $($_.Exception.Message)" "WARN"
+                Write-SetupLog 'Client-Zertifikat konnte nicht importiert werden; Details im Setup-Protokoll.' 'WARN'
+                Write-SetupDiagnostic -Operation 'WinRM-Clientzertifikat-Import' -ErrorRecord $_ -Context @("Path=$clientCertPath")
                 Write-SetupLog "Passwort-Authentifizierung bleibt als Fallback aktiv." "INFO"
             }
         } else {
@@ -753,7 +803,8 @@ RoleDefinitions = @{
             $NeedWinRMRestart = $true
         }
         catch {
-            Write-SetupLog "Warnung beim Entfernen: $($_.Exception.Message)" "WARN"
+            Write-SetupLog 'Alte WinRM-Endpunktregistrierung konnte nicht entfernt werden; Details im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'WinRM-Endpunktbereinigung' -ErrorRecord $_
             $NeedWinRMRestart = $true
         }
     }
@@ -899,7 +950,8 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
             Write-SetupLog "Loopback-Verbindungstest erfolgreich - Get-WindowsUpdate erreichbar" "SUCCESS"
         }
         catch {
-            Write-SetupLog "Loopback-Test nicht moeglich (normal bei Remote-Einrichtung): $($_.Exception.Message)" "WARN"
+            Write-SetupLog 'Loopback-Test nicht möglich; Details im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'WinRM-Loopback-Test' -ErrorRecord $_ -Context @('RemoteSetup=True')
             Write-SetupLog "Endpunkt ist korrekt konfiguriert - manueller Test empfohlen" "INFO"
         }
     } else {
@@ -984,11 +1036,8 @@ catch {
     Write-SetupLog "             FEHLER beim Setup                              " "ERROR"
     Write-SetupLog "============================================================" "ERROR"
     Write-SetupLog "" "INFO"
-    Write-SetupLog "Fehlermeldung: $($_.Exception.Message)" "ERROR"
-    
-    if ($_.InvocationInfo.ScriptLineNumber) { Write-SetupLog "Fehlerzeile: $($_.InvocationInfo.ScriptLineNumber)" "ERROR" }
-    if ($_.InvocationInfo.Line)             { Write-SetupLog "Fehlerkommando: $($_.InvocationInfo.Line.Trim())"   "ERROR" }
-    if ($_.ScriptStackTrace)               { Write-SetupLog "Stack Trace:`n$($_.ScriptStackTrace)"               "ERROR" }
+    Write-SetupLog "Setup fehlgeschlagen; vollständige Diagnose: $script:SetupLogPath" 'ERROR'
+    Write-SetupDiagnostic -Operation 'WindowsUpdateAdm-Setup' -ErrorRecord $_
     Write-SetupLog "" "INFO"
     
     exit 1
