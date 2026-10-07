@@ -215,7 +215,8 @@ function Invoke-PackageManagerUpdates {
     return $results
   }
   catch {
-    Write-ScriptLog "Fehler bei Package-Manager-Updates auf ${Servername}: $($_.Exception.Message)"
+    Write-ScriptLog "WARNUNG: Package-Manager-Updates auf ${Servername} fehlgeschlagen; Details im Log."
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'PackageManager-Install' -Target $Servername -ErrorRecord $_
     return @()
   }
 }
@@ -346,7 +347,8 @@ function Invoke-WindowsUpdates {
             Write-ScriptLog "Verbindung mit Client-Zertifikat via HTTPS erfolgreich." -IsDebug
           }
           catch {
-            Write-ScriptLog "Fehler mit Client-Zertifikat via HTTPS: $($_.Exception.Message)"
+            Write-ScriptLog "WARNUNG: Client-Zertifikat-Verbindung zu $Servername fehlgeschlagen; Details im Log."
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'WinRM-Install-Certificate' -Target $Servername -ErrorRecord $_
           }
         }
 
@@ -380,7 +382,8 @@ function Invoke-WindowsUpdates {
     return @(,$UpdResult)
   }
   catch {
-    Write-ScriptLog "Fehler bei Windows-Updates auf ${Servername}: $($_.Exception.Message)"
+    Write-ScriptLog "WARNUNG: Windows-Updates auf ${Servername} fehlgeschlagen; Details im Log."
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'WindowsUpdate-Install' -Target $Servername -ErrorRecord $_
     return @()
   }
 }
@@ -533,7 +536,8 @@ function Get-DeferredWindowsUpdates {
     return [PSCustomObject]@{ Success = $true; Updates = $validUpdates; Error = '' }
   }
   catch {
-    Write-ScriptLog "WARNUNG: Zurückgestellte Updates auf $Servername konnten nicht geprüft werden: $($_.Exception.Message)"
+    Write-ScriptLog "WARNUNG: Zurückgestellte Updates auf $Servername konnten nicht geprüft werden; Details im Log."
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'DeferredUpdates-Check' -Target $Servername -ErrorRecord $_
     return [PSCustomObject]@{ Success = $false; Updates = @(); Error = $_.Exception.Message }
   }
 }
@@ -1427,7 +1431,8 @@ if ($IsWindowsOnlyRun) {
     }
   }
   catch {
-    Write-ScriptLog "Fehler beim Ausführen des Linux-Updates Skripts: $($_.Exception.Message)"
+    Write-ScriptLog 'WARNUNG: Linux-Update-Skript fehlgeschlagen; Details im Log.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Linux-Install' -Target 'Linux' -ErrorRecord $_
     # Die Hauptmeldung einer verschachtelten Skriptausführung enthält häufig
     # keine Zeilennummer. Für einen eventuellen Folgefehler wird deshalb die
     # echte Position des Linux-Skripts mitprotokolliert.
@@ -1489,7 +1494,8 @@ if ($IsWindowsOnlyRun) {
     }
   }
   catch {
-    Write-ScriptLog "Fehler beim Ausführen des Home Assistant-Updates Skripts: $($_.Exception.Message)"
+    Write-ScriptLog 'WARNUNG: Home-Assistant-Update-Skript fehlgeschlagen; Details im Log.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'HomeAssistant-Install' -Target 'Home Assistant' -ErrorRecord $_
   }
 }
 
@@ -1946,8 +1952,8 @@ if ($ServerADList -ne $null) {
       }
       Catch {
         Write-ScriptLog ("Es ist ein Fehler bei Server " + $Servername + " aufgetreten!")
-        Write-ScriptLog ($_.Exception.Message)
-        $RepBody += "<div class='warning-box'><strong>Fehler aufgetreten!</strong><br>$($_.Exception.Message)</div>"
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Server-Update-Install' -Target $Servername -ErrorRecord $_
+        $RepBody += "<div class='warning-box'><strong>Fehler aufgetreten!</strong><br>Details stehen im Laufprotokoll.</div>"
         $ErrorCount++
       }
     }
