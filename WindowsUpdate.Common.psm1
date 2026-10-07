@@ -1528,7 +1528,9 @@ function Invoke-WindowsUpdateLocalCommandWithTimeout {
 param([Parameter(Mandatory)][string]$PayloadPath, [Parameter(Mandatory)][string]$ResponsePath)
 $ErrorActionPreference = 'Stop'
 try {
-    $payload = Get-Content -LiteralPath $PayloadPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    # Payload is written as UTF-8 without a BOM. Windows PowerShell 5.1 otherwise
+    # reads it with the legacy ANSI code page and corrupts non-ASCII script text.
+    $payload = Get-Content -LiteralPath $PayloadPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     $runnerArguments = @($payload.ArgumentList)
     $items = @(& ([scriptblock]::Create([string]$payload.Script)) @runnerArguments)
     $response = @{ Success = $true; Results = @($items) }
