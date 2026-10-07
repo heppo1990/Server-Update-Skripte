@@ -591,8 +591,25 @@ catch {
             $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
             $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
-            $childOutput = @(& $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1 | ForEach-Object { [string]$_ })
-            $childExitCode = $LASTEXITCODE
+            $workerRoot = Join-Path ([IO.Path]::GetTempPath()) ('WinGetClientModule-{0}' -f [guid]::NewGuid().ToString('N'))
+            $stdoutPath = Join-Path $workerRoot 'stdout.txt'
+            $stderrPath = Join-Path $workerRoot 'stderr.txt'
+            $childExitCode = -1
+            $childOutput = @()
+            try {
+                New-Item -ItemType Directory -Path $workerRoot -Force -ErrorAction Stop | Out-Null
+                $workerProcess = Start-Process -FilePath $windowsPowerShell `
+                    -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand) `
+                    -Wait -PassThru -WindowStyle Hidden `
+                    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+                $childExitCode = $workerProcess.ExitCode
+                $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { @(Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue) } else { @() }
+                $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue) } else { @() }
+                $childOutput = @($stdout + $stderr | ForEach-Object { [string]$_ })
+            }
+            finally {
+                Remove-Item -LiteralPath $workerRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
             $resultLine = @($childOutput | Where-Object { $_ -match '^__WINGETCLIENT__(SUCCESS|ERROR)\t' } | Select-Object -Last 1)
             if ($resultLine.Count -gt 0 -and $resultLine[0] -match '^__WINGETCLIENT__SUCCESS\t(?<Version>[^\t]+)\t(?<State>.+)$') {
                 if ($Matches.State -eq 'aktuell') { $logs.Add([pscustomobject]@{ Type = 'Log'; Message = "Microsoft.WinGet.Client ist aktuell (Version $($Matches.Version))."; Level = 'SUCCESS' }) }
