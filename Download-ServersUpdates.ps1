@@ -292,7 +292,8 @@ if ($ServerADList -ne $null) {
             $null = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Verbindungstest auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
           } catch {
             $useJEA = $false
-            Write-ScriptLog "INFO: '$Servername' nutzt Standard-Remoting"
+            Write-ScriptLog "INFO: '$Servername' nutzt Standard-Remoting (WindowsUpdateAdm nicht verfügbar; Details im Log)."
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Standard-Remoting')
           }
         }
 
@@ -324,6 +325,7 @@ if ($ServerADList -ne $null) {
             $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Download auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaParams }
           } catch {
             $msg = $_.Exception.Message
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Download' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Download wird als Fehler behandelt; keine alternative Quelle angenommen')
             if ($msg -match "Get-WindowsUpdate.*not recognized") {
               throw "WindowsUpdateAdm Endpoint hat kein Get-WindowsUpdate verfügbar."
             }
