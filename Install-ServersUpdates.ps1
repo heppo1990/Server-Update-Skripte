@@ -239,18 +239,30 @@ function Invoke-WindowsUpdates {
                $Servername -ieq $LocalFqdn2
     
     if ($IsLocal) {
-      if (-not (Get-Module -Name PSWindowsUpdate)) { Import-Module PSWindowsUpdate -ErrorAction Stop }
-      $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
-      if ($SucheOnline) { $wuParams.MicrosoftUpdate = $true }
-            if (-not $DeferredOnly) {
-              if ($DeferredCategories.Count -gt 0) { $wuParams.NotCategory = $DeferredCategories }
-              if ($DeferredKBs.Count -gt 0) { $wuParams.NotKBArticleID = $DeferredKBs }
-            }
-      if ($DeferredOnly) {
-        $UpdResult = @()
-        foreach ($kb in $DeferredKBs) { $UpdResult += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
-        foreach ($category in $DeferredCategories) { $UpdResult += @(Get-WindowsUpdate @wuParams -Category $category) }
-      } else { $UpdResult = Get-WindowsUpdate @wuParams }
+      Write-ScriptLog "Windows-Update-Installation via Loopback-WinRM auf ${Servername}..."
+      $loopbackParams = @{
+        ComputerName  = $Servername
+        ErrorAction   = 'Stop'
+        SessionOption = New-PSSessionOption -IncludePortInSPN
+      }
+      $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Installation auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
+        Invoke-Command @loopbackParams -ArgumentList @($SucheOnline, $DeferredCategories, $DeferredKBs, $DeferredOnly) -ScriptBlock {
+          param($Online, $Categories, $KBs, $OnlyDeferred)
+          Import-Module PSWindowsUpdate -ErrorAction Stop
+          $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
+          if ($Online) { $wuParams.MicrosoftUpdate = $true }
+          if (-not $OnlyDeferred) {
+            if ($Categories.Count -gt 0) { $wuParams.NotCategory = $Categories }
+            if ($KBs.Count -gt 0) { $wuParams.NotKBArticleID = $KBs }
+          }
+          if ($OnlyDeferred) {
+            $updates = @()
+            foreach ($kb in $KBs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+            foreach ($category in $Categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
+            $updates
+          } else { Get-WindowsUpdate @wuParams }
+        }
+      }
     } else {
       $useJEA = $false
       $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-ScriptLog $message }
