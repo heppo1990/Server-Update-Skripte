@@ -52,7 +52,7 @@ if ($null -eq $linuxSettings -or -not $linuxSettings.PSObject.Properties['Hosts'
 $configuredKeyPath = if ($linuxSettings.PSObject.Properties['KeyPath']) { [string]$linuxSettings.KeyPath } else { '' }
 $configuredSSHPath = if ($linuxSettings.PSObject.Properties['SSHPath']) { [string]$linuxSettings.SSHPath } else { '' }
 
-if (-not $PSBoundParameters.ContainsKey('KeyPath')) {
+if (-not $PSBoundParameters.ContainsKey('KeyPath') -or [string]::IsNullOrWhiteSpace($KeyPath)) {
     $KeyPath = if ([string]::IsNullOrWhiteSpace($configuredKeyPath)) { Join-Path $env:USERPROFILE '.ssh\id_rsa_linux' } else { $configuredKeyPath }
 }
 if (-not $PSBoundParameters.ContainsKey('SSHPath')) {
