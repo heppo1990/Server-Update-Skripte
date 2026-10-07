@@ -74,6 +74,14 @@ Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
 
 $clientCertificateLogPath = Join-Path (Join-Path $env:ProgramData 'ServerUpdateSkripte\Logs') ("Setup-ClientCertificate_{0}_{1}.log" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd'))
+try {
+    $certLogDirectory = Split-Path -Parent $clientCertificateLogPath
+    $retention = Invoke-WindowsUpdateFileRetention -Directory $certLogDirectory -Filter ("Setup-ClientCertificate_{0}_*.log" -f $env:COMPUTERNAME) -KeepFiles 13
+    if (@($retention.FailedFiles).Count -gt 0) { Write-Verbose 'Ältere Zertifikatsprotokolle konnten nicht vollständig bereinigt werden.' }
+}
+catch {
+    Write-Verbose "Zertifikatsprotokolle konnten nicht bereinigt werden: $($_.Exception.Message)"
+}
 function Write-ClientCertificateDiagnostic {
     param(
         [Parameter(Mandatory)][string]$Operation,
