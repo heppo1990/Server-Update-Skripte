@@ -84,6 +84,8 @@ try {
     $setupLogDirectory = Join-Path $env:ProgramData 'WindowsUpdateAdm\Logs'
     New-Item -Path $setupLogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
     $script:SetupLogPath = Join-Path $setupLogDirectory ('Setup_{0}_{1}.log' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $retention = Invoke-WindowsUpdateFileRetention -Directory $setupLogDirectory -Filter ("Setup_{0}_*.log" -f $env:COMPUTERNAME) -KeepFiles 9
+    if (@($retention.FailedFiles).Count -gt 0) { Write-Verbose 'Ältere Setup-Protokolle konnten nicht vollständig bereinigt werden.' }
 }
 catch {
     Write-Verbose "Setup-Protokoll konnte nicht vorbereitet werden: $($_.Exception.Message)"
