@@ -705,9 +705,16 @@ if ($ServerADList -ne $null) {
           # mit einer frischen SYSTEM-Aufgabe erneut geprüft.
           if (-not $systemTaskHasUpdateData) {
             $emptyResultReason = if ($systemTaskRows.Count -eq 0) { 'keine Ergebniszeilen' } else { 'nur leere Ergebniszeilen' }
-            Write-ScriptLog "WARNUNG: SYSTEM-Update-Suche auf $Servername lieferte $emptyResultReason; wiederhole die Suche einmal nach 20 Sekunden."
+            Write-ScriptLog "Erste SYSTEM-Update-Suche auf $Servername lieferte $emptyResultReason; Wiederholung in 20 Sekunden." $true
             Start-Sleep -Seconds 20
-            $UpdResult = Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $svcCredential -Mode Check -SearchOnline $SucheOnline -WriteLog { param($message) Write-ScriptLog $message }
+            try {
+              $UpdResult = Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $svcCredential -Mode Check -SearchOnline $SucheOnline -WriteLog { param($message) Write-ScriptLog $message }
+            }
+            catch {
+              Write-ScriptLog "WARNUNG: SYSTEM-Update-Suche auf $Servername ist auch nach der Wiederholung fehlgeschlagen; Details im Log."
+              Write-ScriptLog "Erste Suche: $emptyResultReason. Fehler der Wiederholung: $($_.Exception.ToString())" $true
+              throw
+            }
             $retryRows = @($UpdResult | Where-Object { $null -ne $_ })
             $retryHasUpdateData = @($retryRows | Where-Object {
               $row = $_
@@ -725,7 +732,9 @@ if ($ServerADList -ne $null) {
               # Invoke-WindowsUpdateSystemTask wirft bei einem fehlgeschlagenen
               # Worker; eine leere Rückgabe hier bedeutet daher zwei erfolgreich
               # abgeschlossene, leere Suchen und ist kein Suchfehler.
-              Write-ScriptLog "SYSTEM-Update-Suche auf $Servername nach erfolgreicher Folgeprüfung mit 0 Updates abgeschlossen."
+              Write-ScriptLog "SYSTEM-Update-Suche auf $Servername nach Wiederholung erfolgreich; keine Windows-Updates verfügbar."
+            } else {
+              Write-ScriptLog "SYSTEM-Update-Suche auf $Servername nach Wiederholung erfolgreich ($($retryRows.Count) Ergebniszeile(n) mit Daten)." $true
             }
           }
         } else {
