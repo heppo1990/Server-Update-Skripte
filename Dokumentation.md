@@ -320,15 +320,6 @@ Normaler Lauf für alle konfigurierten Ziele:
 .\Install-ServersUpdates.ps1
 ```
 
-### `PendingReboot.ps1`
-
-Prüft ausstehende Neustarts zentral. Ohne Parameter werden die AD-Ziele sowie `AdditionalComputers` und `HypervisorComputers` aus der Konfiguration verwendet. AD-Ziele werden per Kerberos abgefragt, Nicht-AD-Ziele per Client-Zertifikat. Berücksichtigt Windows Update, Component-Based Servicing, ausstehende Dateiumbenennungen und – sofern vorhanden – SCCM.
-
-```powershell
-.\PendingReboot.ps1
-.\PendingReboot.ps1 -ComputerName SRVSVC,SrvHv01
-```
-
 ### `Updateverlauf auslesen.ps1`
 
 Liest den Windows-Updateverlauf aus. Für eine schnelle lokale Prüfung eignet sich auch:
