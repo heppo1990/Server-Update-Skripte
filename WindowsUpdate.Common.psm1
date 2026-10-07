@@ -1702,11 +1702,16 @@ function ConvertTo-WindowsUpdatePackageHtmlTable {
     )
     $rows = @(ConvertTo-WindowsUpdatePackageRows -ComputerName $ComputerName -Manager $Manager -Packages $Packages)
     if ($rows.Count -eq 0) { return '' }
-    $html = '<table><tr><th>ComputerName</th><th>Name</th><th>ID</th><th>Installiert</th><th>Verfügbar</th><th>Quelle</th></tr>'
+    # Paket-IDs und Versionsstrings enthalten oft lange, nicht umbrechende
+    # Zeichenfolgen. Ohne feste Tabellenaufteilung wächst die HTML-Tabelle in
+    # Outlook über die verfügbare Mailbreite hinaus. Die Tabelle nutzt daher
+    # immer 100 % des verfügbaren Inhaltsbereichs und verteilt die Spalten
+    # proportional; lange Zellen umbrechen innerhalb ihrer Spalte.
+    $html = '<table class="package-update-table" style="width:100%; table-layout:fixed; border-collapse:collapse;"><colgroup><col style="width:12%;"><col style="width:24%;"><col style="width:25%;"><col style="width:14%;"><col style="width:14%;"><col style="width:11%;"></colgroup><tr><th>ComputerName</th><th>Name</th><th>ID</th><th>Installiert</th><th>Verfügbar</th><th>Quelle</th></tr>'
     foreach ($row in $rows) {
         $html += '<tr>'
         foreach ($field in @('ComputerName', 'Name', 'Id', 'InstalledVersion', 'AvailableVersion', 'Source')) {
-            $html += '<td>' + [System.Net.WebUtility]::HtmlEncode([string]$row.$field) + '</td>'
+            $html += '<td style="word-wrap:break-word; overflow-wrap:anywhere;">' + [System.Net.WebUtility]::HtmlEncode([string]$row.$field) + '</td>'
         }
         $html += '</tr>'
     }
