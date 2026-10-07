@@ -190,18 +190,19 @@ function Clear-WindowsUpdateCache {
       & wuauclt.exe /detectnow 2>$null
       
       # Methode 2: COM-Objekt (zuverlässiger auf neueren Systemen)
+      $detectNowDiagnostic = $null
       try {
         $AutoUpdate = New-Object -ComObject Microsoft.Update.AutoUpdate
         $AutoUpdate.DetectNow()
-      } catch { }
+      } catch { $detectNowDiagnostic = $_.Exception.ToString() }
 
       # Warten bis der WU-Scan abgeschlossen ist
       Start-Sleep -Seconds $DetectNowWaitSec
 
-      return $result
+      return [PSCustomObject]@{ Status = $result; DetectNowDiagnostic = $detectNowDiagnostic; Diagnostic = $null }
     }
     catch {
-      return "ERROR: $($_.Exception.Message)"
+      return [PSCustomObject]@{ Status = 'ERROR'; Diagnostic = $_.Exception.ToString() }
     }
   }
   
@@ -217,8 +218,19 @@ function Clear-WindowsUpdateCache {
         -ScriptBlock $clearCacheScript -ArgumentList @($detectWait) -TimeoutSeconds 300 -OperationName "Cache-Bereinigung auf $Servername"
     }
     catch {
-      Write-ScriptLog "WARNUNG: Cache-Bereinigung via WinRM auf $Servername fehlgeschlagen: $($_.Exception.Message)"
+      Write-ScriptLog "WARNUNG: Cache-Bereinigung via WinRM auf $Servername fehlgeschlagen; Details im Log."
+      Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'Cache-Bereinigung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Update-Check wird fortgesetzt')
       $result = "SKIPPED"
+    }
+
+    if ($result -is [System.Management.Automation.PSCustomObject]) {
+      if ($result.DetectNowDiagnostic) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'WindowsUpdate-AutoUpdate.DetectNow-Fallback' -Target $Servername -DiagnosticText $result.DetectNowDiagnostic -Context @('wuauclt /detectnow wurde zuvor ausgeführt')
+      }
+      if ($result.Diagnostic) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'Cache-Bereinigung remote' -Target $Servername -DiagnosticText $result.Diagnostic
+      }
+      $result = [string]$result.Status
     }
     
     switch -Wildcard ($result) {
@@ -230,7 +242,8 @@ function Clear-WindowsUpdateCache {
     }
   }
   catch {
-    Write-ScriptLog "Fehler beim Cache-Clearing auf ${Servername}: $($_.Exception.Message)"
+    Write-ScriptLog "WARNUNG: Cache-Bereinigung auf ${Servername} fehlgeschlagen; Details im Log."
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'Cache-Bereinigung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Update-Check wird fortgesetzt')
   }
 }
 
@@ -251,7 +264,8 @@ function Import-PSWindowsUpdate {
     return $true
   }
   catch {
-    Write-ScriptLog "Standard-Import fehlgeschlagen: $($_.Exception.Message)"
+    Write-ScriptLog 'Standard-Import von PSWindowsUpdate fehlgeschlagen; prüfe alternative Modulpfade.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'PSWindowsUpdate-Import Standardpfad' -ErrorRecord $_
   }
   
   $possiblePaths = @(
@@ -270,7 +284,8 @@ function Import-PSWindowsUpdate {
         return $true
       }
       catch {
-        Write-ScriptLog "Import aus $path fehlgeschlagen: $($_.Exception.Message)"
+        Write-ScriptLog "Import aus '$path' fehlgeschlagen; Details im Log."
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'PSWindowsUpdate-Import Alternativpfad' -Target $path -ErrorRecord $_
       }
     }
   }
@@ -547,6 +562,7 @@ if ($ServerADList -ne $null) {
         "${env:ProgramFiles(x86)}\WindowsPowerShell\Modules\PSWindowsUpdate",
         "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules\PSWindowsUpdate"
       )
+      $importErrors = [System.Collections.Generic.List[string]]::new()
       foreach ($path in $possiblePaths) {
         if (Test-Path $path) {
           try {
@@ -554,13 +570,13 @@ if ($ServerADList -ne $null) {
             $moduleLoaded = $true
             break
           }
-          catch { }
+          catch { $importErrors.Add("Pfad '$path': $($_.Exception.ToString())") }
         }
       }
     }
     
     if (-not $moduleLoaded) {
-      throw "PSWindowsUpdate konnte nicht geladen werden"
+      throw "PSWindowsUpdate konnte nicht geladen werden. Importfehler: $($importErrors -join ' || ')"
     }
     
     # Kein -Online Flag - wird von älteren PSWindowsUpdate-Versionen nicht unterstützt.
@@ -634,7 +650,8 @@ if ($ServerADList -ne $null) {
             $null = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Verbindungstest auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
           } catch {
             $useJEA = $false
-            Write-ScriptLog "INFO: '$Servername' nutzt Standard-Remoting (WindowsUpdateAdm nicht verfügbar)"
+            Write-ScriptLog "INFO: '$Servername' nutzt Standard-Remoting (WindowsUpdateAdm nicht verfügbar; Details im Log)."
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Standard-Remoting')
           }
         }
 
