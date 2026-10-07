@@ -145,7 +145,7 @@ function Invoke-PackageManagerUpdates {
     if ($enableWinget) {
       $null = Update-WinGetClientModule -ComputerName $Servername -AuthInfo $AuthInfo -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
     }
-    $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -WriteLog { param($message, $logOnly) Write-ScriptLog $message -LogOnly:$logOnly })
+    $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:([bool]$logOnly) })
     # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
     $successfulPackagesByManager = @{}
     $manualPackageCount = 0

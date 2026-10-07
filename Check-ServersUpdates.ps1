@@ -837,7 +837,7 @@ if ($ServerADList -ne $null) {
 
         # Zusätzlich installierte Anwendungen über die zentrale Paketverwaltung prüfen.
         try {
-          $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly) Write-ScriptLog $message $logOnly })
+          $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
         }
         catch {
           # Paketmanager sind optional. Ein separater Remoting-Fehler darf
@@ -863,6 +863,8 @@ if ($ServerADList -ne $null) {
             $hasPackageResults = $packageResult.Manager -eq 'Winget' -and $packages.Count -gt 0
             if ($hasPackageResults) {
               Write-ScriptLog "WARNUNG: WinGet auf ${Servername} meldet eine Quellenwarnung; gefundene Updates werden trotzdem übernommen. Details: $($packageResult.ActionOutput)"
+            } elseif ($packageResult.Manager -eq 'Winget') {
+              Write-ScriptLog "WARNUNG: WinGet-Prüfung auf ${Servername} fehlgeschlagen; Details im Log."
             } else {
               Write-ScriptLog "WARNUNG: $($packageResult.Manager)-Prüfung auf ${Servername} fehlgeschlagen: $($packageResult.ActionOutput)"
             }

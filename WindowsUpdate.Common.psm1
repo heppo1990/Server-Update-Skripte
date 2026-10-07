@@ -1939,7 +1939,9 @@ catch {
             if ($exitCode -ne 0) {
                 $detail = ($output -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1)
                 if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe upgrade endete mit Exitcode $exitCode." }
-                throw $detail
+                $exception = [System.InvalidOperationException]::new([string]$detail)
+                $exception.Data['WinGetDiagnosticOutput'] = $output
+                throw $exception
             }
             return $output
         }
@@ -2189,6 +2191,7 @@ catch {
         else {
             $wingetPath = Resolve-WingetExecutable
             $wingetBootstrapMessage = ''
+            $wingetDiagnosticOutput = ''
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
             $serverCaption = ''
@@ -2255,11 +2258,16 @@ catch {
                 }
                 catch {
                     $moduleQueryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                    $moduleQueryDiagnostic = [string]$_.Exception.ToString()
                     try {
                         $availableOutput = Invoke-WingetCliUpgradeQuery -Path $wingetPath
                         $wingetCliFallback = $true
+                        $wingetDiagnosticOutput = "Modulabfrage fehlgeschlagen; CLI-Fallback erfolgreich.`r`n$moduleQueryDiagnostic"
                     }
                     catch {
+                        $cliDiagnosticProperty = $_.Exception.Data['WinGetDiagnosticOutput']
+                        $cliQueryDiagnostic = if ($cliDiagnosticProperty) { [string]$cliDiagnosticProperty } else { [string]$_.Exception.ToString() }
+                        $wingetDiagnosticOutput = "Modulabfrage fehlgeschlagen:`r`n$moduleQueryDiagnostic`r`nCLI-Fallback fehlgeschlagen:`r`n$cliQueryDiagnostic"
                         throw "WinGet-Modulabfrage fehlgeschlagen ($moduleQueryFailure); CLI-Fallback ebenfalls fehlgeschlagen: $($_.Exception.Message)"
                     }
                 }
@@ -2469,8 +2477,15 @@ catch {
                     $retryFreshConnection = $retryFreshConnection -or ($queryTimedOut -and $ExecutionMode -eq 'Install')
                     $result += [PSCustomObject]@{
                         Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
-                        Packages=@(); AvailableOutput=''; ActionOutput=$exceptionMessage; DiagnosticOutput=$_.Exception.ToString()
+                        Packages=@(); AvailableOutput=''; ActionOutput=$exceptionMessage; DiagnosticOutput=$(if ($wingetDiagnosticOutput) { "$wingetDiagnosticOutput`r`nAbfragefehler:`r`n$($_.Exception.ToString())" } else { $_.Exception.ToString() })
                         RetryFreshConnection=$retryFreshConnection; RetryAfterSourceReset=$retryAfterSourceReset
+                    }
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($wingetDiagnosticOutput)) {
+                foreach ($wingetResult in @($result | Where-Object { $_.Manager -eq 'Winget' })) {
+                    if (-not $wingetResult.PSObject.Properties['DiagnosticOutput']) {
+                        Add-Member -InputObject $wingetResult -NotePropertyName DiagnosticOutput -NotePropertyValue $wingetDiagnosticOutput
                     }
                 }
             }
@@ -2507,7 +2522,9 @@ catch {
         $retryRequired = $false
         $retryRequiresSourceReset = $false
         $retryReason = ''
-        $firstFailure = ''
+        $firstDiagnostic = ''
+        $retryDiagnostic = ''
+        $retryResult = $null
         if ($hasCheckTimeout) { Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName gestartet (Zeitlimit: 5 Minuten)." }
 
         try {
@@ -2524,13 +2541,14 @@ catch {
             $wingetResults = @(Invoke-WindowsUpdatePackageWorker @initialParameters | Where-Object { $_.Manager -eq 'Winget' })
             if ($wingetResults.Count -eq 0) { throw 'Die WinGet-Prüfung lieferte kein Ergebnis.' }
             $firstWingetResult = $wingetResults[-1]
+            $firstDiagnosticProperty = $firstWingetResult.PSObject.Properties['DiagnosticOutput']
+            if ($firstDiagnosticProperty) { $firstDiagnostic = [string]$firstDiagnosticProperty.Value }
             $resetProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourceReset']
             $connectionProperty = $firstWingetResult.PSObject.Properties['RetryFreshConnection']
             if ($resetProperty -and [bool]$resetProperty.Value) {
                 $retryRequired = $true
                 $retryRequiresSourceReset = $true
                 $retryReason = 'Quellenreset erforderlich'
-                $firstFailure = [string]$firstWingetResult.ActionOutput
             }
             elseif ($connectionProperty -and [bool]$connectionProperty.Value) {
                 $retryRequired = $true
@@ -2540,7 +2558,6 @@ catch {
                 } else {
                     'WinGet-RPC-Fehler; frische Verbindung erforderlich'
                 }
-                $firstFailure = [string]$firstWingetResult.ActionOutput
             }
             else { $packageResults += $wingetResults }
         }
@@ -2548,7 +2565,7 @@ catch {
             $retryRequired = $true
             $retryRequiresSourceReset = $true
             $retryReason = 'Zeitlimit erreicht; Quellenreset erforderlich'
-            $firstFailure = $_.Exception.Message
+            $firstDiagnostic = $_.Exception.ToString()
         }
 
         if ($retryRequired) {
@@ -2579,6 +2596,8 @@ catch {
                 $retryResults = @(Invoke-WindowsUpdatePackageWorker @retryParameters | Where-Object { $_.Manager -eq 'Winget' })
                 if ($retryResults.Count -eq 0) { throw 'Die Wiederholungsprüfung lieferte kein WinGet-Ergebnis.' }
                 $retryResult = $retryResults[-1]
+                $retryDiagnosticProperty = $retryResult.PSObject.Properties['DiagnosticOutput']
+                if ($retryDiagnosticProperty) { $retryDiagnostic = [string]$retryDiagnosticProperty.Value }
                 $retryResetProperty = $retryResult.PSObject.Properties['RetryAfterSourceReset']
                 $retryConnectionProperty = $retryResult.PSObject.Properties['RetryFreshConnection']
                 if (($retryResetProperty -and [bool]$retryResetProperty.Value) -or
@@ -2604,21 +2623,24 @@ catch {
                 $packageResults += $retryResults
             }
             catch {
-                $retryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-                if ($retryFailure.Length -gt 300) { $retryFailure = $retryFailure.Substring(0, 297) + '...' }
-                $compactFirstFailure = ([string]$firstFailure -replace '\s+', ' ').Trim()
-                if ($compactFirstFailure.Length -gt 300) { $compactFirstFailure = $compactFirstFailure.Substring(0, 297) + '...' }
-                $failureMessage = "Erste WinGet-Prüfung: $compactFirstFailure; Wiederherstellung fehlgeschlagen: $retryFailure"
-                Write-CommonLog $WriteLog "WinGet-Prüfung auf $ComputerName fehlgeschlagen; Details im Log."
+                if ([string]::IsNullOrWhiteSpace($retryDiagnostic)) { $retryDiagnostic = [string]$_.Exception.ToString() }
+                $failureMessage = "WinGet-Prüfung auf $ComputerName fehlgeschlagen; Details im Log."
+                $fullDiagnostic = "Erste WinGet-Prüfung:`r`n$firstDiagnostic`r`nWiederholungsprüfung:`r`n$retryDiagnostic"
                 $packageResults += [pscustomobject]@{
                     Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''
-                    ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$failureMessage
-                    BootstrapMessage="WinGet-Prüfung auf ${ComputerName}: Wiederholung nach Fehler fehlgeschlagen."
+                    ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$failureMessage; DiagnosticOutput=$fullDiagnostic
                 }
             }
         }
     }
     foreach ($packageResult in $packageResults) {
+        $diagnosticProperty = $packageResult.PSObject.Properties['DiagnosticOutput']
+        if ($packageResult.Manager -eq 'Winget' -and $diagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticProperty.Value) -and $WriteLog) {
+            & $WriteLog "WinGet-Diagnose auf $ComputerName ($Mode):" $true
+            foreach ($diagnosticLine in ([string]$diagnosticProperty.Value -split "`r?`n")) {
+                if (-not [string]::IsNullOrWhiteSpace($diagnosticLine)) { & $WriteLog "  $diagnosticLine" $true }
+            }
+        }
         if ($packageResult.Manager -eq 'Winget') {
             $availableOutputProperty = $packageResult.PSObject.Properties['AvailableOutput']
             if ($availableOutputProperty) {
