@@ -1,26 +1,13 @@
-# Offene Checkliste
+# Checkliste
 
-- [ ] Zählung in Check, Download und Install korrigieren: „Gesamtliste nach Zusammenführung“ muss Windows-, Linux- und Home-Assistant-Ziele enthalten. Prüfen, ob aktuell nur die Windows-Teilmenge gezählt wird; Beschriftung und Zahl in allen drei Skripten vereinheitlichen.
-- [ ] SYSTEM-Update-Suche auf Host-Server zuverlässig machen: Nach leeren/unbrauchbaren Ergebnisdaten feststellen, ob tatsächlich keine Updates verfügbar sind oder Suche/Ergebnisübertragung fehlgeschlagen ist. Gegebenenfalls mit einer verlässlichen Folgeabfrage erneut prüfen und echte Updates übernehmen; „keine Updates“ nur bei bestätigter leerer Suche melden.
-- [ ] WinGet-Ausgabe lesbar formatieren: Paketupdates je Server als sauber ausgerichtete Tabelle ähnlich der Windows-Update-Tabelle ausgeben. Lange Paketnamen und IDs dürfen nicht zu verschobenen oder umgebrochenen Spalten führen.
-- [ ] WinGet-Zustimmungen automatisch bestätigen, damit Abfragen nicht an Vereinbarungsdialogen hängen bleiben. Dialogtexte nur im Log ausgeben und niemals als Paketupdates zählen.
-- [x] WinGet-Quellenreset und Folgeabfrage eindeutig protokollieren: „Keine Updates“ nur bei erfolgreicher, leerer Abfrage melden. Auf SRVSVC waren tatsächlich keine Updates verfügbar; diese erfolgreiche Leersuche muss klar von Reset- oder Abfragefehlern unterscheidbar sein.
+- [x] Check, Download und Install zählen Windows-, Linux- und Home-Assistant-Ziele gemeinsam; nicht konfigurierte Typen bleiben ausgeblendet.
+- [x] SYSTEM-Update-Suche wiederholt leere Ergebnisse mit einer neuen Aufgabe. Nur erfolgreich abgeschlossene, erneut leere Suchen gelten als „keine Updates“; Aufgabenfehler bleiben Fehler.
+- [x] WinGet-Pakete werden in Check und Install als Tabelle mit Name, ID, installierter und verfügbarer Version sowie Quelle ausgegeben.
+- [x] WinGet-Abfragen bestätigen Quellen- und Paketvereinbarungen automatisch; abgefangene Vereinbarungstexte werden protokolliert und nicht als Paketzeilen gezählt.
+- [x] Chocolatey-Pakete werden in Check und Install als Tabelle mit installierter und verfügbarer Version ausgegeben. Download führt keine Paketmanager-Abfrage aus.
+- [x] WinGet- und Chocolatey-Ergebnisse erscheinen in Check- und Install-Mails als HTML-Tabellen. Download enthält keine Paketmanager-Ergebnisse.
 
-- [x] Automatische Skriptupdates über `UpdateSettings.AutoUpdateScripts` steuerbar; Standard `true`, direkte manuelle Ausführung des Updaters bleibt möglich.
+## Offene Nacharbeiten
 
-## WinGet auf Windows Server 2019 und 2022
-
-- [x] WinGet-Suche und Installation zuerst über `Microsoft.WinGet.Client` unter Windows PowerShell 5.1 ausführen; bei Modulfehlern `winget.exe` auf dem jeweiligen Zielsystem verwenden.
-- [x] CLI-Fallback in Check und Installation mit Quellen- und Paketvereinbarungen sowie stiller Einzelinstallation verwenden; CLI-Suche nach 3 Minuten 30 Sekunden abbrechen.
-- [x] Standardquellen nach leerer Modulsuche oder Quellenfehler mit `Reset-WinGetSource -All` zurücksetzen; eine leere CLI-Fallback-Suche löst keinen Reset aus.
-- [x] Unbekannte kundeneigene Quellen am Namen erkennen und einen vollständigen Reset in diesem Fall überspringen; keine Quell-URLs in Meldungen ausgeben.
-- [x] Chocolatey nur dann für das PS7-Update verwenden, wenn es bereits installiert ist; Chocolatey nicht automatisch nachinstallieren.
-- [x] Bei einer fehlerhaften WinGet-Quelle die Standardquellen einmal per Modul zurücksetzen und die Paketabfrage wiederholen.
-- [x] Alte `Mailsettings`-Bereiche und `SendMail` in allen vorhandenen allgemeinen und skriptspezifischen Settings-Dateien sichern und anhand des Dateinamens dem aktuellen Mail-Schema zuordnen; alte Betreffe verwerfen und aktuelle Standardbetreffe ergänzen.
-
-## Konkrete Updates in der Nachinstallationsplanung
-
-- [x] Zurückgestellte Updates in der Nachinstallationsplanung und im Installationsbericht im selben Tabellenformat wie in Check-, Download- und Installationsskript anzeigen (`ComputerName`, `Status`, `KB`, `Size`, `Title`). Verschachtelte Remoting-Ergebnisse werden aufgefächert, leere Zeilen verworfen und doppelte Update-Zeilen zusammengeführt. Die Anzahl geplanter Updates wird getrennt von bereits installierten Updates ausgewiesen.
-- [x] Optionale Metadatenmarker bei normalen Updateobjekten sicher auswerten, damit `MetadataMissing` unter aktiviertem `StrictMode` keinen falschen Prüfungsfehler auslöst.
-- [x] Bei nicht auflösbaren Nachinstallations-Ergebnissen Typ und verfügbare Eigenschaftsnamen protokollieren, damit abweichende Rückgabeobjekte eingegrenzt werden können.
-- [x] Redundante INFO- und SYSTEM-Aufgabenmeldungen bei Windows-Update-Check, Download und Installation reduzieren; die konkrete Aktion bleibt durch das Einstiegsskript angekündigt.
+- [ ] Erfolgsmeldung „WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar. Quellenreset wegen des 24-Stunden-Limits übersprungen.“ aus der Konsolenausgabe entfernen; ausschließlich im Log protokollieren.
+- [ ] Erfolgsmeldung „WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar. WinGet nach Quellenreset in neuer Sitzung erneut geprüft.“ aus der Konsolenausgabe entfernen; ausschließlich im Log protokollieren.

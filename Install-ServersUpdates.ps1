@@ -190,10 +190,14 @@ function Invoke-PackageManagerUpdates {
         $debugActionOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-ScriptLog "  $_" -IsDebug }
       }
     }
+    $managerOutputWritten = $false
     foreach ($manager in $successfulPackagesByManager.Keys) {
+      if ($managerOutputWritten) { Write-ScriptLog '' }
+      $managerOutputWritten = $true
       $managerPackages = @($successfulPackagesByManager[$manager])
       Write-ScriptLog "$manager auf ${Servername}: $($managerPackages.Count) Paketupdates installiert"
-      foreach ($package in $managerPackages) { Write-ScriptLog "  $package" }
+      $packageTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $Servername -Manager $manager -Packages $managerPackages
+      foreach ($tableLine in ($packageTable -split "`r?`n")) { if ($tableLine) { Write-ScriptLog $tableLine } }
     }
     if ($successfulPackagesByManager.Count -eq 0 -and $manualPackageCount -eq 0) { Write-ScriptLog '' }
     if ($manualPackageCount -gt 0) {
@@ -1982,10 +1986,13 @@ foreach ($pendingReboot in $script:PendingPhysicalReboots) {
 if ($PackageUpdateDetails.Count -gt 0) {
   $RepBody += "<div class='section-title'>📦 Anwendungsupdates</div>"
   foreach ($packageInfo in $PackageUpdateDetails) {
-    $packageList = @($packageInfo.Packages | ForEach-Object { [System.Net.WebUtility]::HtmlEncode([string]$_) }) -join '<br>'
-    $RepBody += "<div class='server-title'>Server: $($packageInfo.Server) – $($packageInfo.Manager)</div>"
+    $packageServerHtml = [System.Net.WebUtility]::HtmlEncode([string]$packageInfo.Server)
+    $packageManagerHtml = [System.Net.WebUtility]::HtmlEncode([string]$packageInfo.Manager)
+    $RepBody += "<div class='server-title'>Server: $packageServerHtml – $packageManagerHtml</div>"
     $packageLabel = if ($packageInfo.Success) { 'Aktualisierte Pakete' } else { 'Gefundene Pakete (nicht vollständig aktualisiert)' }
-    $RepBody += "<div class='linux-package-list'><strong>${packageLabel} ($(@($packageInfo.Packages).Count)):</strong><br>$packageList</div>"
+    $RepBody += "<div class='linux-package-list'><strong>${packageLabel} ($(@($packageInfo.Packages).Count)):</strong>"
+    $RepBody += ConvertTo-WindowsUpdatePackageHtmlTable -ComputerName $packageInfo.Server -Manager $packageInfo.Manager -Packages $packageInfo.Packages
+    $RepBody += '</div>'
   }
 }
 
@@ -2082,10 +2089,10 @@ if (@($ManualActions).Count -gt 0) {
   foreach ($manualAction in @($ManualActions)) {
     $manualServerHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Server)
     $manualManagerHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Manager)
-    $manualPackages = @($manualAction.Packages | ForEach-Object { [System.Net.WebUtility]::HtmlEncode([string]$_) }) -join '<br>'
+    $manualPackages = ConvertTo-WindowsUpdatePackageHtmlTable -ComputerName $manualAction.Server -Manager $manualAction.Manager -Packages $manualAction.Packages
     $manualTextHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Text) -replace "`r?`n", '<br>'
     $RepBody += "<li><strong>$manualServerHtml ($manualManagerHtml)</strong>"
-    if ($manualPackages) { $RepBody += "<br>$manualPackages" }
+    if ($manualPackages) { $RepBody += $manualPackages }
     $RepBody += "<br>$manualTextHtml</li>"
   }
   $RepBody += "</ul></div>"

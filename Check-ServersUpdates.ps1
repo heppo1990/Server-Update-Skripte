@@ -722,7 +722,10 @@ if ($ServerADList -ne $null) {
               $hasRowData
             }).Count -gt 0
             if (-not $retryHasUpdateData) {
-              Write-ScriptLog "WARNUNG: Auch die wiederholte SYSTEM-Update-Suche auf $Servername lieferte keine auswertbaren Update-Daten."
+              # Invoke-WindowsUpdateSystemTask wirft bei einem fehlgeschlagenen
+              # Worker; eine leere Rückgabe hier bedeutet daher zwei erfolgreich
+              # abgeschlossene, leere Suchen und ist kein Suchfehler.
+              Write-ScriptLog "SYSTEM-Update-Suche auf $Servername nach erfolgreicher Folgeprüfung mit 0 Updates abgeschlossen."
             }
           }
         } else {
@@ -885,10 +888,11 @@ if ($ServerADList -ne $null) {
           if ($packageResult.Manager -eq 'Winget') { $WingetUpdateCount += $packageCount }
           if ($packageResult.Manager -eq 'Chocolatey') { $ChocolateyUpdateCount += $packageCount }
           Write-ScriptLog "$($packageResult.Manager) auf ${Servername}: $packageCount Paketupdate(s) verfügbar."
-          foreach ($package in $packages) { Write-ScriptLog "  ${Servername}: $package" }
 
-          $RepBody += "<div class='info-box'><strong>$($packageResult.Manager)-Updates auf $Servername ($packageCount):</strong><br>"
-          $RepBody += (($packages | ForEach-Object { [System.Net.WebUtility]::HtmlEncode([string]$_) }) -join '<br>')
+          $packageConsoleTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $Servername -Manager $packageResult.Manager -Packages $packages
+          foreach ($tableLine in ($packageConsoleTable -split "`r?`n")) { if ($tableLine) { Write-ScriptLog $tableLine } }
+          $RepBody += "<div class='info-box'><strong>$($packageResult.Manager)-Updates auf $Servername ($packageCount):</strong>"
+          $RepBody += ConvertTo-WindowsUpdatePackageHtmlTable -ComputerName $Servername -Manager $packageResult.Manager -Packages $packages
           $RepBody += '</div>'
         }
 

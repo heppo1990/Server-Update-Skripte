@@ -14,6 +14,7 @@ $script:WindowsUpdateConsoleTableHasRows = $false
 $script:WindowsUpdateConsoleSummaryActive = $false
 $script:WindowsUpdateConsoleSummaryDividerCount = 0
 $script:WindowsUpdateConsolePackageRowsActive = $false
+$script:WindowsUpdateConsolePackageTableActive = $false
 
 function Get-WindowsUpdateConsoleColor {
     param([AllowEmptyString()][string]$Message)
@@ -79,6 +80,7 @@ function Write-WindowsUpdateConsoleLine {
     }
     if ([string]::IsNullOrWhiteSpace($Message)) {
         $script:WindowsUpdateConsolePackageRowsActive = $false
+        $script:WindowsUpdateConsolePackageTableActive = $false
     }
 
     $displayMessage = if ($IsDebug) { $Message } else { Format-WindowsUpdateConsoleError -Message $Message }
@@ -134,6 +136,13 @@ function Test-WindowsUpdateConsoleMessage {
         if ($Message -match '^\s{2,}\S+\s*:') { return $true }
         $script:WindowsUpdateConsolePackageRowsActive = $false
     }
+    if ($script:WindowsUpdateConsolePackageTableActive) {
+        if ($Message -match '^\s*ComputerName\s+Name\s+Id\s+InstalledVersion\s+AvailableVersion\s+Source\s*$' -or
+            $Message -match '^\s*-{3,}(?:\s+-{2,})+' -or
+            $Message -match '^\s*\S+\s+.+\s{2,}\S+\s+\S+\s+\S+\s+\S+\s*$' -or
+            $Message -match '^\s{2,}\S.*$') { return $true }
+        $script:WindowsUpdateConsolePackageTableActive = $false
+    }
 
     if ($Message -match '^\s*Ergebnis (der (Update-Suche|Installation)|des Downloads)\s*:') {
         $script:WindowsUpdateConsoleTableActive = $true
@@ -147,6 +156,7 @@ function Test-WindowsUpdateConsoleMessage {
     if ($Message -match '(?i)keine Paketupdates verfügbar\.') { return $true }
     if ($Message -match '(?i)(Paketupdates? verfügbar|Paketupdate\(s\) (erkannt und verarbeitet|verfügbar)|\d+ Paketupdates installiert|Home-Assistant-Check: .*Update\(s\) verfügbar)') {
         $script:WindowsUpdateConsolePackageRowsActive = $Message -notmatch '(?i)Keine Paketupdates'
+        $script:WindowsUpdateConsolePackageTableActive = $Message -notmatch '(?i)Keine Paketupdates'
         return $true
     }
     if ($Message -match '(?i)(Windows-Updates installiert|Updates verfügbar|Nachinstallation auf .* geplant|Neustart(aufgabe)? auf .* geplant|Neustart auf .* verschoben|Linux-(Check|Zusammenfassung)|Linux-Update(-Prüfung)? auf .* abgeschlossen|Linux auf .* (keine Paketupdates|Paketupdates verfügbar|Paketupdates installiert)|Home-Assistant-Check|Home Assistant auf .*(keine Updates|Update\(s\) verfügbar|Update\(s\) installiert))') {
@@ -1621,6 +1631,86 @@ function Invoke-WindowsUpdatePackageWorker {
         -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds -OperationName $OperationName)
 }
 
+function ConvertTo-WindowsUpdatePackageRows {
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        [Parameter(Mandatory)][ValidateSet('Winget', 'Chocolatey')][string]$Manager,
+        [AllowNull()][object[]]$Packages
+    )
+
+    foreach ($package in @($Packages)) {
+        if ($null -eq $package) { continue }
+        $name = ''; $id = ''; $installed = ''; $available = ''; $source = $Manager.ToLowerInvariant()
+        if ($package -isnot [string] -and $package.PSObject.Properties['Name']) {
+            $name = [string]$package.Name
+            $idProperty = $package.PSObject.Properties['Id']
+            $installedProperty = $package.PSObject.Properties['InstalledVersion']
+            $availableProperty = $package.PSObject.Properties['AvailableVersion']
+            $sourceProperty = $package.PSObject.Properties['Source']
+            if ($idProperty) { $id = [string]$idProperty.Value }
+            if ($installedProperty) { $installed = [string]$installedProperty.Value }
+            if ($availableProperty) { $available = [string]$availableProperty.Value }
+            if ($sourceProperty -and -not [string]::IsNullOrWhiteSpace([string]$sourceProperty.Value)) { $source = [string]$sourceProperty.Value }
+        }
+        else {
+            $text = [string]$package
+            if ($Manager -eq 'Chocolatey' -and $text.Contains('|')) {
+                $parts = @($text -split '\|', 4)
+                $name = [string]$parts[0]
+                if ($parts.Count -gt 1) { $installed = [string]$parts[1] }
+                if ($parts.Count -gt 2) { $available = [string]$parts[2] }
+                if ($parts.Count -gt 3 -and $parts[3]) { $id = [string]$parts[3] } else { $id = $name }
+            }
+            elseif ($Manager -eq 'Winget') {
+                $match = [regex]::Match($text, '^\s*(?<Name>.+?)\s{2,}(?<Id>\S+)\s{2,}(?<Installed>\S+)\s{2,}(?<Available>\S+)\s{2,}(?<Source>\S+)\s*$')
+                if ($match.Success) {
+                    $name = $match.Groups['Name'].Value.Trim(); $id = $match.Groups['Id'].Value
+                    $installed = $match.Groups['Installed'].Value; $available = $match.Groups['Available'].Value
+                    $source = $match.Groups['Source'].Value
+                }
+                else { $name = $text.Trim() }
+            }
+            else { $name = $text.Trim(); $id = $name }
+        }
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        [pscustomobject]@{
+            ComputerName = $ComputerName; Name = $name; Id = $id
+            InstalledVersion = $installed; AvailableVersion = $available; Source = $source
+        }
+    }
+}
+
+function Format-WindowsUpdatePackageConsoleTable {
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        [Parameter(Mandatory)][ValidateSet('Winget', 'Chocolatey')][string]$Manager,
+        [AllowNull()][object[]]$Packages
+    )
+    $rows = @(ConvertTo-WindowsUpdatePackageRows -ComputerName $ComputerName -Manager $Manager -Packages $Packages)
+    if ($rows.Count -eq 0) { return '' }
+    return (($rows | Select-Object ComputerName, Name, Id, InstalledVersion, AvailableVersion, Source |
+        Format-Table -AutoSize -Wrap | Out-String -Width 240).TrimEnd())
+}
+
+function ConvertTo-WindowsUpdatePackageHtmlTable {
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        [Parameter(Mandatory)][ValidateSet('Winget', 'Chocolatey')][string]$Manager,
+        [AllowNull()][object[]]$Packages
+    )
+    $rows = @(ConvertTo-WindowsUpdatePackageRows -ComputerName $ComputerName -Manager $Manager -Packages $Packages)
+    if ($rows.Count -eq 0) { return '' }
+    $html = '<table><tr><th>ComputerName</th><th>Name</th><th>ID</th><th>Installiert</th><th>Verfügbar</th><th>Quelle</th></tr>'
+    foreach ($row in $rows) {
+        $html += '<tr>'
+        foreach ($field in @('ComputerName', 'Name', 'Id', 'InstalledVersion', 'AvailableVersion', 'Source')) {
+            $html += '<td>' + [System.Net.WebUtility]::HtmlEncode([string]$row.$field) + '</td>'
+        }
+        $html += '</tr>'
+    }
+    return ($html + '</table>')
+}
+
 function Invoke-WindowsUpdatePackageManagers {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
@@ -1815,7 +1905,7 @@ catch {
                     $match.Groups['InstalledVersion'].Value -in @('Version', 'SearchVersion') -or
                     $match.Groups['AvailableVersion'].Value -in @('Available', 'AvailableHeader')) { continue }
                 $source = if ($match.Groups['Source'].Success) { $match.Groups['Source'].Value } else { 'winget' }
-                [string]::Format('{0,-65} {1,-38} {2,-14} {3,-14} {4}',
+                [string]::Format('{0}  {1}  {2}  {3}  {4}',
                     $match.Groups['Name'].Value.Trim(), $match.Groups['Id'].Value,
                     $match.Groups['InstalledVersion'].Value, $match.Groups['AvailableVersion'].Value, $source)
             }
@@ -1829,7 +1919,7 @@ catch {
             }
             $cliJob = Start-Job -ArgumentList $Path -ScriptBlock {
                 param([string]$WingetPath)
-                $output = (& $WingetPath upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+                $output = (& $WingetPath upgrade --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
                 [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
             }
             try {
@@ -1892,7 +1982,7 @@ catch {
                             $availableVersion = if ($availableVersions.Count -gt 0) { [string]$availableVersions[0] } else { 'unbekannt' }
                             $sourceName = [string]$package.Source
                             if ([string]::IsNullOrWhiteSpace($sourceName)) { throw "Für '$($package.Name)' [$($package.Id)] wurde keine WinGet-Quelle zurückgegeben." }
-                            [string]::Format('{0,-65} {1,-38} {2,-14} {3,-14} {4}', [string]$package.Name, [string]$package.Id, [string]$package.InstalledVersion, $availableVersion, $sourceName)
+                            [string]::Format('{0}  {1}  {2}  {3}  {4}', [string]$package.Name, [string]$package.Id, [string]$package.InstalledVersion, $availableVersion, $sourceName)
                         }
                         [pscustomobject]@{ Success = $true; Output = (@($lines) -join [Environment]::NewLine); Error = '' }
                     }
@@ -2066,7 +2156,14 @@ catch {
         elseif (Test-Path -LiteralPath $chocoPath) {
             try {
                 $availableOutput = & $chocoPath outdated --limit-output 2>&1 | Out-String
-                $packages = @($availableOutput -split "`r?`n" | Where-Object { $_ -match '^[^|]+\|[^|]+\|[^|]+' } | ForEach-Object { ($_ -split '\|')[0].Trim() } | Select-Object -Unique)
+                $packages = @($availableOutput -split "`r?`n" | Where-Object { $_ -match '^[^|]+\|[^|]+\|[^|]+' } | ForEach-Object {
+                    $fields = @($_ -split '\|', 4)
+                    [pscustomobject]@{
+                        Name = ([string]$fields[0]).Trim(); Id = ([string]$fields[0]).Trim()
+                        InstalledVersion = ([string]$fields[1]).Trim(); AvailableVersion = ([string]$fields[2]).Trim()
+                        Source = 'chocolatey'
+                    }
+                } | Sort-Object Id -Unique)
                 $actionOutput = ''
                 $exitCode = 0
                 if ($ExecutionMode -eq 'Install' -and $packages.Count -gt 0) {
@@ -2522,6 +2619,17 @@ catch {
         }
     }
     foreach ($packageResult in $packageResults) {
+        if ($packageResult.Manager -eq 'Winget') {
+            $availableOutputProperty = $packageResult.PSObject.Properties['AvailableOutput']
+            if ($availableOutputProperty) {
+                $agreementLines = @(([string]$availableOutputProperty.Value -split "`r?`n") | Where-Object {
+                    $_ -match '(?i)(Terms of Transaction|Vereinbarungen der Quelle|Nutzungsbedingungen der Quelle|geographic region|geografische Region|accept.*agreement|Zustimmung.*Vereinbarung)'
+                })
+                foreach ($agreementLine in $agreementLines) {
+                    Write-CommonLog $WriteLog "[WinGet-Zustimmung] $(([string]$agreementLine).Trim())"
+                }
+            }
+        }
         $bootstrapMessageProperty = $packageResult.PSObject.Properties['BootstrapMessage']
         if ($packageResult.Manager -eq 'Winget' -and $bootstrapMessageProperty -and -not [string]::IsNullOrWhiteSpace([string]$bootstrapMessageProperty.Value)) {
             Write-CommonLog $WriteLog ([string]$bootstrapMessageProperty.Value)
@@ -2695,4 +2803,4 @@ function Add-WindowsUpdateTrustedHost {
     }
 }
 
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager
