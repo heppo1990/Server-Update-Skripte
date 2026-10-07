@@ -89,8 +89,8 @@ $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${Script
 # Funktionen
 ############################################################################################################################################################################
 
-function Write-ScriptLog ($Message) {
-  Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile))
+function Write-ScriptLog ($Message, [bool]$LogOnly = $false) {
+  Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) -LogOnly:$LogOnly
 }
 
 # Hauptskript
@@ -353,7 +353,8 @@ if ($ServerADList -ne $null) {
               Write-ScriptLog "Verbindung mit Client-Zertifikat via HTTPS erfolgreich."
             }
             catch {
-              Write-ScriptLog "Fehler mit Client-Zertifikat via HTTPS: $($_.Exception.Message)"
+              Write-ScriptLog "WARNUNG: Client-Zertifikat-Verbindung zu $Servername fehlgeschlagen; Details im Log."
+              Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'WinRM-Download-Certificate' -Target $Servername -ErrorRecord $_
             }
           }
 
@@ -370,7 +371,8 @@ if ($ServerADList -ne $null) {
               $success = $true
             }
             catch {
-              throw "Verbindung zu $Servername fehlgeschlagen: $($_.Exception.Message)"
+              Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'WinRM-Download' -Target $Servername -ErrorRecord $_
+              throw "Verbindung zu $Servername fehlgeschlagen; Details stehen im Laufprotokoll."
             }
           }
           if (-not $success) { throw "Zertifikats-Download auf $Servername fehlgeschlagen." }
@@ -414,7 +416,7 @@ if ($ServerADList -ne $null) {
       }
       Catch {
         Write-ScriptLog ("Es ist ein Fehler bei Server " + $Servername + " aufgetreten!")
-        Write-ScriptLog ($_.Exception.Message)
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'WindowsUpdate-Download' -Target $Servername -ErrorRecord $_
         $RepBody += "<div class='warning-box'><strong>Fehler aufgetreten!</strong> Details in der Logdatei.</div>"
       }
     }
@@ -462,7 +464,8 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
     }
   }
   catch {
-    Write-ScriptLog "WARNUNG: Linux-Prüfung im Download-Lauf fehlgeschlagen: $($_.Exception.Message)"
+    Write-ScriptLog 'WARNUNG: Linux-Prüfung im Download-Lauf fehlgeschlagen; Details im Log.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'Linux-Check-Download' -Target 'Linux' -ErrorRecord $_
     $RepBody += "<div class='warning-box'>Linux-Prüfung fehlgeschlagen. Details im Log.</div>"
   }
   finally {
@@ -490,7 +493,8 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
     }
   }
   catch {
-    Write-ScriptLog "WARNUNG: Home-Assistant-Prüfung im Download-Lauf fehlgeschlagen: $($_.Exception.Message)"
+    Write-ScriptLog 'WARNUNG: Home-Assistant-Prüfung im Download-Lauf fehlgeschlagen; Details im Log.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'HomeAssistant-Check-Download' -Target ([string]$haSettings.Host) -ErrorRecord $_
     $RepBody += "<div class='warning-box'>Home-Assistant-Prüfung fehlgeschlagen. Details im Log.</div>"
   }
   finally {
