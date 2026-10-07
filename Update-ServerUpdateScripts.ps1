@@ -54,6 +54,7 @@ function Get-ServerUpdateConfiguration {
             }
         }
         catch {
+            Write-ServerUpdateUpdaterDiagnostic -Operation 'Konfiguration lesen' -ErrorRecord $_ -Context ([IO.Path]::GetFileName($configurationFile))
             Write-Warning "Updateprüfung: Konfiguration '$([IO.Path]::GetFileName($configurationFile))' konnte nicht gelesen werden; optionale Skripte werden nicht zusätzlich geladen."
         }
     }
@@ -385,6 +386,7 @@ function Update-ServerUpdateSettingsDefaults {
         $defaults = Get-Content -LiteralPath $defaultsPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
     }
     catch {
+        Write-ServerUpdateUpdaterDiagnostic -Operation 'Standard-Einstellungen lesen' -ErrorRecord $_ -Context 'Settings-Migration'
         Write-Warning "Standard-Einstellungen konnten nicht eingelesen werden; Kundeneinstellungen bleiben unverändert. Ursache: $($_.Exception.Message)"
         return
     }
@@ -399,6 +401,7 @@ function Update-ServerUpdateSettingsDefaults {
         $settingsPasswordProtector = Get-Command -Name Protect-WindowsUpdateSettingsObjectPassword -ErrorAction Stop
     }
     catch {
+        Write-ServerUpdateUpdaterDiagnostic -Operation 'DPAPI-Schutz laden' -ErrorRecord $_ -Context 'Settings-Migration'
         Write-Warning "DPAPI-Schutz konnte nicht geladen werden; Settings bleiben unverändert. Ursache: $($_.Exception.Message)"
         return
     }
@@ -490,6 +493,7 @@ function Update-ServerUpdateSettingsDefaults {
             }
         }
         catch {
+            Write-ServerUpdateUpdaterDiagnostic -Operation 'Settings migrieren' -ErrorRecord $_ -Context ([IO.Path]::GetFileName($settingsPath))
             Write-Warning "Standardwerte konnten in '$([IO.Path]::GetFileName($settingsPath))' nicht ergänzt werden. Vorhandene Einstellungen bleiben erhalten. Ursache: $($_.Exception.Message)"
         }
         finally {
@@ -519,6 +523,7 @@ function Update-ServerUpdateSettingsDefaults {
             Write-Host 'Die migrierte default.settings.json wurde in settings.json umbenannt.' -ForegroundColor Cyan
         }
         catch {
+            Write-ServerUpdateUpdaterDiagnostic -Operation 'Legacy-Settings umbenennen' -ErrorRecord $_ -Context 'default.settings.json nach settings.json'
             Write-Warning "Die alte default.settings.json konnte nicht sicher in settings.json umbenannt werden. Sie bleibt erhalten. Ursache: $($_.Exception.Message)"
         }
     }
@@ -533,6 +538,7 @@ function Update-ServerUpdateSettingsDefaults {
         }
     }
     catch {
+        Write-ServerUpdateUpdaterDiagnostic -Operation 'Settings-Sicherungen bereinigen' -ErrorRecord $_ -Context 'Retention'
         Write-Warning "Alte Sicherungen der Einstellungen konnten nicht vollständig bereinigt werden. Ursache: $($_.Exception.Message)"
     }
 }
@@ -548,6 +554,7 @@ function Remove-ServerUpdateObsoleteScripts {
         Write-Host 'Veraltetes Skript PendingReboot.ps1 entfernt.' -ForegroundColor DarkGray
     }
     catch {
+        Write-ServerUpdateUpdaterDiagnostic -Operation 'Veraltetes Skript entfernen' -ErrorRecord $_ -Context 'PendingReboot.ps1'
         Write-Warning "Veraltetes Skript PendingReboot.ps1 konnte nicht entfernt werden: $(Get-ServerUpdateShortError -Exception $_.Exception)"
     }
 }
@@ -564,6 +571,8 @@ function Invoke-ServerUpdateScripts {
 
     $scriptRoot = Split-Path -Parent $ScriptPath
     $scriptName = [IO.Path]::GetFileName($ScriptPath)
+    $script:ServerUpdateUpdaterScriptName = $scriptName
+    $script:ServerUpdateUpdaterLogPath = Join-Path (Join-Path $env:ProgramData 'ServerUpdateSkripte\Logs') ("Updater_{0}_{1}.log" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd'))
     # Der direkte Aufruf dieses Updaters bleibt ein manueller Updateweg.
     # Automatische Aktualisierungen aus den übrigen Skripten sind abschaltbar.
     if ($scriptName -ine 'Update-ServerUpdateScripts.ps1') {
@@ -604,7 +613,10 @@ function Invoke-ServerUpdateScripts {
                     }
                 }
             }
-            catch { $repositoryBlobs = @{} }
+            catch {
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'Update-Cache lesen' -ErrorRecord $_ -Context $cachePath
+                $repositoryBlobs = @{}
+            }
         }
 
         if ($manifestCommit -ne $latestCommit -or $repositoryBlobs.Count -eq 0) {
@@ -637,7 +649,10 @@ function Invoke-ServerUpdateScripts {
                 [PSCustomObject]@{ ManifestCommit = $manifestCommit; RepositoryBlobs = $repositoryBlobs } |
                     ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cachePath -Encoding UTF8 -Force
             }
-            catch { Write-Warning 'Update-Metadaten konnten nicht lokal gespeichert werden; beim nächsten Lauf wird erneut geprüft.' }
+            catch {
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'Update-Metadaten speichern' -ErrorRecord $_ -Context $cachePath
+                Write-Warning 'Update-Metadaten konnten nicht lokal gespeichert werden; beim nächsten Lauf wird erneut geprüft.'
+            }
             if ($scriptName -eq 'Update-ServerUpdateScripts.ps1') {
                 Write-Host 'Alle benötigten Skriptdateien sind bereits aktuell. Die Settings wurden geprüft und gegebenenfalls migriert.' -ForegroundColor Green
             }
@@ -702,6 +717,7 @@ function Invoke-ServerUpdateScripts {
                 Remove-ServerUpdateObsoleteScripts -ScriptRoot $scriptRoot
             }
             catch {
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'Skriptdateien austauschen' -ErrorRecord $_ -Context ($changedFiles -join ', ')
                 foreach ($relativePath in $changedFiles) {
                     $localPath = Join-Path $scriptRoot $relativePath
                     $backupPath = Join-Path $backupDirectory $relativePath
@@ -723,6 +739,7 @@ function Invoke-ServerUpdateScripts {
                 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cachePath -Encoding UTF8 -Force
             }
             catch {
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'Update-Metadaten speichern' -ErrorRecord $_ -Context $cachePath
                 Write-Warning 'Update-Metadaten konnten nicht lokal gespeichert werden; beim nächsten Lauf wird erneut geprüft.'
             }
         }
@@ -734,6 +751,7 @@ function Invoke-ServerUpdateScripts {
     }
     catch {
         $shortCause = Get-ServerUpdateShortError -Exception $_.Exception
+        Write-ServerUpdateUpdaterDiagnostic -Operation 'Automatische Skriptaktualisierung' -ErrorRecord $_ -Context "Lokaler Stand bleibt aktiv; $shortCause"
         Write-Warning "Automatische Skriptaktualisierung fehlgeschlagen; lokaler Stand wird verwendet. Ursache: $shortCause"
     }
 
@@ -938,6 +956,37 @@ function Get-ServerUpdateShortError {
     return $message
 }
 
+function Write-ServerUpdateUpdaterDiagnostic {
+    param(
+        [Parameter(Mandatory)][string]$Operation,
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string]$Context
+    )
+
+    if ([string]::IsNullOrWhiteSpace([string]$script:ServerUpdateUpdaterLogPath)) { return }
+    try {
+        $logDirectory = Split-Path -Parent $script:ServerUpdateUpdaterLogPath
+        if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) {
+            New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        $details = @(
+            "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Updater: $Operation"
+            "Target: $script:ServerUpdateUpdaterScriptName"
+            "Context: $Context"
+            "ErrorId: $($ErrorRecord.FullyQualifiedErrorId)"
+            "Category: $($ErrorRecord.CategoryInfo)"
+            "Position: $($ErrorRecord.InvocationInfo.PositionMessage)"
+            "ScriptStackTrace: $($ErrorRecord.ScriptStackTrace)"
+            "Exception: $($ErrorRecord.Exception.ToString())"
+            ''
+        ) -join [Environment]::NewLine
+        Add-Content -LiteralPath $script:ServerUpdateUpdaterLogPath -Value $details -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-Verbose "Updater-Diagnose konnte nicht in Datei geschrieben werden: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-ServerUpdateGitHubRequest {
     param(
         [Parameter(Mandatory)][string]$Description,
@@ -950,6 +999,7 @@ function Invoke-ServerUpdateGitHubRequest {
         }
         catch {
             $shortCause = Get-ServerUpdateShortError -Exception $_.Exception
+            Write-ServerUpdateUpdaterDiagnostic -Operation "GitHub-$Description" -ErrorRecord $_ -Context "Versuch $attempt/3"
             $transient = $_.Exception.Message -match '(?i)(übertragungsverbindung|remotehost|connection|verbindung|timeout|zeitüberschreitung|temporar|429|\b5\d\d\b|unable to read data)'
             if (-not $transient -or $attempt -ge 3) {
                 throw "GitHub-$Description nach $attempt Versuch(en) fehlgeschlagen: $shortCause"
