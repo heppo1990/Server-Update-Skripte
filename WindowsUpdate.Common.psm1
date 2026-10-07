@@ -1619,7 +1619,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey)
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false)
 
         # Winget ist eine benutzerbezogene App-Installer-Anwendung. Im
         # LocalSystem-Kontext ist es nicht zuverlässig verfügbar und darf dort
@@ -2154,7 +2154,6 @@ catch {
                     Test-WingetSourceFailureLine -Line ([string]$_)
                 })
                 $wingetSourceRefreshOutput = ''
-                $sourceResetPerformed = $false
                 if ($sourceFailureLines.Count -gt 0) {
                     $sourceFailureText = @($sourceFailureLines | ForEach-Object { Get-WingetCompactOutput -Text ([string]$_) }) -join ' '
                     $result += [PSCustomObject]@{
@@ -2169,23 +2168,31 @@ catch {
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
-                if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0 -and -not $sourceResetPerformed -and -not $wingetCliFallback) {
-                    # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
-                    # beschädigten lokalen Quellenzustand hindeuten. Der nötige
-                    # vollständige Reset erfolgt nur, wenn keine kundeneigenen
-                    # Quellen vorhanden sind.
-                    $sourceResetState = Get-WingetSourceResetState
-                    if ($sourceResetState.Allowed) {
-                        $result += [PSCustomObject]@{
-                            Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
-                            Packages=@(); AvailableOutput=$availableOutput
-                            ActionOutput='WinGet-Suche war leer; Quellenreset und eine erneute Prüfung in neuer Verbindung erforderlich.'
-                            RetryAfterSourceReset=$true
-                        }
-                        return @($result)
+                if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0) {
+                    if ($SourceResetPerformed) {
+                        $wingetBootstrapMessage += ' WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar.'
                     }
-                    elseif (-not $sourceResetState.Allowed) {
-                        $wingetBootstrapMessage += " Die WinGet-Suche war leer; ein Quellenreset wurde übersprungen, da auf diesem Zielsystem innerhalb der letzten 24 Stunden bereits einer ausgeführt wurde."
+                    elseif ($wingetCliFallback) {
+                        $wingetBootstrapMessage += ' WinGet-CLI-Abfrage war erfolgreich; keine Paketupdates verfügbar.'
+                    }
+                    else {
+                        # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
+                        # beschädigten lokalen Quellenzustand hindeuten. Der nötige
+                        # vollständige Reset erfolgt nur, wenn keine kundeneigenen
+                        # Quellen vorhanden sind.
+                        $sourceResetState = Get-WingetSourceResetState
+                        if ($sourceResetState.Allowed) {
+                            $result += [PSCustomObject]@{
+                                Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                                Packages=@(); AvailableOutput=$availableOutput
+                                ActionOutput='WinGet-Suche war leer; Quellenreset und eine erneute Prüfung in neuer Verbindung erforderlich.'
+                                RetryAfterSourceReset=$true
+                            }
+                            return @($result)
+                        }
+                        else {
+                            $wingetBootstrapMessage += ' WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar. Quellenreset wegen des 24-Stunden-Limits übersprungen.'
+                        }
                     }
                 }
                 $actionOutput = ''
@@ -2370,14 +2377,14 @@ catch {
 
     if (-not $EnableWinget) {
         $packageResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Paketmanager-Prüfung auf $ComputerName")
     }
     else {
         # Chocolatey und WinGet getrennt ausführen. So bleiben Chocolatey-
         # Ergebnisse erhalten, auch wenn WinGet hängen bleibt oder wiederholt wird.
         $baseResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Chocolatey-Prüfung auf $ComputerName")
         $packageResults += @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
 
@@ -2395,7 +2402,7 @@ catch {
                 ComputerName = $ComputerName
                 AuthInfo = $AuthInfo
                 ScriptBlock = $packageScript
-                ArgumentList = @($Mode, $true, $false)
+                ArgumentList = @($Mode, $true, $false, $false)
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
             }
@@ -2433,6 +2440,7 @@ catch {
 
         if ($retryRequired) {
             $retryDescription = if ($retryRequiresSourceReset) { 'Quellenreset und einmalige Wiederholung' } else { 'einmalige Wiederholung' }
+            $sourceResetPerformed = $false
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
                 if ($retryRequiresSourceReset) {
@@ -2441,6 +2449,7 @@ catch {
                     } else {
                         $null = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds $wingetTimeoutSeconds -WriteLog $WriteLog
                     }
+                    $sourceResetPerformed = $true
                     Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen Sitzung."
                 }
 
@@ -2448,7 +2457,7 @@ catch {
                     ComputerName = $ComputerName
                     AuthInfo = $AuthInfo
                     ScriptBlock = $packageScript
-                    ArgumentList = @($Mode, $true, $false)
+                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed)
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
                 }

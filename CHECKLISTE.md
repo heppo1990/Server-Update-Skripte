@@ -1,5 +1,11 @@
 # Offene Checkliste
 
+- [ ] Zählung in Check, Download und Install korrigieren: „Gesamtliste nach Zusammenführung“ muss Windows-, Linux- und Home-Assistant-Ziele enthalten. Prüfen, ob aktuell nur die Windows-Teilmenge gezählt wird; Beschriftung und Zahl in allen drei Skripten vereinheitlichen.
+- [ ] SYSTEM-Update-Suche auf Host-Server zuverlässig machen: Nach leeren/unbrauchbaren Ergebnisdaten feststellen, ob tatsächlich keine Updates verfügbar sind oder Suche/Ergebnisübertragung fehlgeschlagen ist. Gegebenenfalls mit einer verlässlichen Folgeabfrage erneut prüfen und echte Updates übernehmen; „keine Updates“ nur bei bestätigter leerer Suche melden.
+- [ ] WinGet-Ausgabe lesbar formatieren: Paketupdates je Server als sauber ausgerichtete Tabelle ähnlich der Windows-Update-Tabelle ausgeben. Lange Paketnamen und IDs dürfen nicht zu verschobenen oder umgebrochenen Spalten führen.
+- [ ] WinGet-Zustimmungen automatisch bestätigen, damit Abfragen nicht an Vereinbarungsdialogen hängen bleiben. Dialogtexte nur im Log ausgeben und niemals als Paketupdates zählen.
+- [x] WinGet-Quellenreset und Folgeabfrage eindeutig protokollieren: „Keine Updates“ nur bei erfolgreicher, leerer Abfrage melden. Auf SRVSVC waren tatsächlich keine Updates verfügbar; diese erfolgreiche Leersuche muss klar von Reset- oder Abfragefehlern unterscheidbar sein.
+
 - [x] Automatische Skriptupdates über `UpdateSettings.AutoUpdateScripts` steuerbar; Standard `true`, direkte manuelle Ausführung des Updaters bleibt möglich.
 
 ## WinGet auf Windows Server 2019 und 2022
