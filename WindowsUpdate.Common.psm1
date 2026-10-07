@@ -1900,7 +1900,11 @@ catch {
                 # Je nach WinGet-Version und Umleitung heißen Tabellenköpfe
                 # Name/Id/Version oder SearchName/SearchId/SearchVersion.
                 # Sie sehen sonst wie eine Paketzeile aus und würden gezählt.
-                if ($line.Trim() -match '^(?:SearchName|Name)\s+(?:SearchId|Id)\s+(?:SearchVersion|Version)\s+(?:AvailableHeader|Available)(?:\s+(?:SearchSource|Source))?\b') { continue }
+                $headerColumns = @($line.Trim() -split '\s+')
+                if ($headerColumns.Count -ge 4 -and
+                    $headerColumns[0] -in @('Name', 'SearchName') -and
+                    $headerColumns[1] -in @('Id', 'SearchId') -and
+                    $headerColumns[2] -in @('Version', 'SearchVersion')) { continue }
                 $match = [regex]::Match($line, $rowPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
                 if (-not $match.Success) { continue }
                 if ($match.Groups['Id'].Value -in @('Id', 'SearchId') -or
