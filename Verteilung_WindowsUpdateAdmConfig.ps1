@@ -682,8 +682,23 @@ function Invoke-ServerDeployment {
         Message = ""
     }
 
+    # Auch das Verwaltungsgerät nach Möglichkeit über Loopback-WinRM behandeln.
+    # Nur wenn WinRM auf dem lokalen Gerät noch nicht eingerichtet ist, bleibt
+    # der direkte Aufruf als notwendiger Bootstrap erhalten.
+    $useWinRMSetup = $Servername -ne $env:COMPUTERNAME
+    if (-not $useWinRMSetup) {
+        try {
+            Test-WSMan -ComputerName $Servername -ErrorAction Stop | Out-Null
+            $useWinRMSetup = $true
+            Write-DeployLog "[$Servername] Loopback-WinRM verfügbar; Setup wird remote ausgeführt."
+        }
+        catch {
+            Write-DeployLog "[$Servername] WinRM ist noch nicht verfügbar; direkter Ersteinrichtungs-Bootstrap wird verwendet." -LogOnly
+        }
+    }
+
     # Remote ausschließlich per WinRM verteilen: kein C$ erforderlich.
-    if ($Servername -ne $env:COMPUTERNAME) {
+    if ($useWinRMSetup) {
         try {
             return Invoke-WinRMDeployment `
                 -Servername $Servername `
