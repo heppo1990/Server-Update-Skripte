@@ -1676,25 +1676,21 @@ function Invoke-WindowsUpdatePackageWorker {
         [Parameter(Mandatory)][string]$OperationName
     )
 
-    if ($IsLocalTarget) {
-        $localParameters = @{
-            ScriptBlock = $ScriptBlock
-            ArgumentList = $ArgumentList
-            OperationName = $OperationName
-        }
-        if ($NoTimeout) { $localParameters.NoTimeout = $true }
-        else { $localParameters.TimeoutSeconds = $TimeoutSeconds }
-        return @(Invoke-WindowsUpdateLocalCommandWithTimeout @localParameters)
-    }
+    # Lokale Paketmanager-Prüfungen liefen zuvor in einem versteckten
+    # Windows-PowerShell-Unterprozess. WinGet scheitert dort mit
+    # 0x800706BA, während derselbe Benutzer und dieselbe Abfrage über
+    # Loopback-WinRM funktionieren. Deshalb verwenden lokale und entfernte
+    # Ziele denselben Remoting-Pfad.
+    $workerComputerName = if ($IsLocalTarget) { $env:COMPUTERNAME } else { $ComputerName }
 
     if ($NoTimeout) {
-        $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
+        $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $workerComputerName -AuthInfo $AuthInfo
         $invokeParameters.ScriptBlock = $ScriptBlock
         if ($ArgumentList.Count -gt 0) { $invokeParameters.ArgumentList = $ArgumentList }
         return @(Invoke-Command @invokeParameters)
     }
 
-    return @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
+    return @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $workerComputerName -AuthInfo $AuthInfo `
         -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds -OperationName $OperationName)
 }
 
