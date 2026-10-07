@@ -86,7 +86,7 @@ function Write-LinuxLog {
 }
 
 function Invoke-LinuxLogRetention {
-    param([Parameter(Mandatory)][string]$RemoteHost)
+    param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile)
     if (-not $script:WriteExecutionLog) { return }
     $keepLogFiles = if ($settings.UpdateSettings.PSObject.Properties['KeepLogFiles']) { [int]$settings.UpdateSettings.KeepLogFiles } else { 5 }
     $retention = Invoke-WindowsUpdateFileRetention -Directory $script:LogDirectory -Filter ("{0}_*.log" -f $RemoteHost) -KeepFiles $keepLogFiles
@@ -94,7 +94,11 @@ function Invoke-LinuxLogRetention {
         if (-not $script:QuietMode) { Write-Host "Bereinige altes Linux-Log: $removedFile" -ForegroundColor DarkGray }
     }
     foreach ($failedFile in @($retention.FailedFiles)) {
-        Write-Warning "Linux-Log konnte nicht entfernt werden ($($failedFile.Path)): $($failedFile.Error)"
+        Write-LinuxLog -Message 'WARNUNG: Eine alte Linux-Protokolldatei konnte nicht entfernt werden; Details im Laufprotokoll.' -LogFile $LogFile -Level Warning
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-Logdatei entfernen' -Target ([string]$failedFile.Path) -DiagnosticText ([string]$failedFile.Diagnostic)
+    }
+    if ($retention.EnumerationError) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-Logdateien auflisten' -Target $script:LogDirectory -DiagnosticText ([string]$retention.EnumerationError)
     }
 }
 
@@ -475,11 +479,11 @@ foreach ($entry in $hostEntries) {
         }
         if ($result.UpdateCount -gt 0) { Write-LinuxLog -Message $completionText -LogFile $logFile -Level Success }
     } catch {
-        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; UpdateCount=0; Packages=''; Error=$_.Exception.Message; LogFile=$logFile }
+        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; UpdateCount=0; Packages=''; Error='Details im Laufprotokoll'; LogFile=$logFile }
         Write-LinuxLog -Message "Fehler bei ${remoteHost}; Details im Laufprotokoll." -LogFile $logFile -Level Error
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $logFile } -Operation 'Linux-Host-Update' -Target $remoteHost -ErrorRecord $_
     } finally {
-        Invoke-LinuxLogRetention -RemoteHost $remoteHost
+        Invoke-LinuxLogRetention -RemoteHost $remoteHost -LogFile $logFile
     }
 }
 $linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; VMRebootsScheduled=$vmRebootsScheduled; PendingPhysicalReboots=@($script:PendingPhysicalReboots); UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
