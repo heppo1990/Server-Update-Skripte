@@ -81,6 +81,7 @@ function Write-DeployLog {
     if (-not $ConsoleOnly -and $script:DeployLogEnabled -and $script:DeployLogFile) {
         "$(Get-Date -Format 'dd.MM.yyyy HH:mm:ss') [$Level] $Message" | Add-Content -LiteralPath $script:DeployLogFile -Encoding UTF8
     }
+    if ($Message -match '^\[DIAG\]') { $LogOnly = $true }
     if ($LogOnly) { return }
 
     $show = [string]::IsNullOrWhiteSpace($Message) -or $Level -in @('Warning', 'Error') -or
@@ -879,7 +880,7 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
         catch {
             if ($connectionSetup.Name -eq 'Linux') { $LinuxConnectionErrors = [Math]::Max(1, $LinuxSystemCount) } else { $HAConnectionErrors = 1 }
             Write-DeployLog "$($connectionSetup.Name)-Einrichtung nicht abgeschlossen; Details im Log." -Level Warning
-            Write-DeployLog "$($connectionSetup.Name)-Einrichtungsfehler: $($_.Exception.Message)" -LogOnly
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation "$($connectionSetup.Name)-Verbindungseinrichtung" -Target ([string]$connectionSetup.Host) -ErrorRecord $_
         }
         finally {
             Remove-Item -LiteralPath $statsPath -Force -ErrorAction SilentlyContinue
