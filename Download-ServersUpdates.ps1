@@ -298,12 +298,14 @@ if ($ServerADList -ne $null) {
 
         # Updates herunterladen
         if ($Servername -eq $env:COMPUTERNAME) {
-          Write-ScriptLog "Lokaler Download auf $Servername..."
-          if (-not (Get-Module -Name PSWindowsUpdate)) { Import-Module PSWindowsUpdate -ErrorAction Stop }
-          $UpdResult = if ($SucheOnline) {
-            Get-WindowsUpdate -MicrosoftUpdate -AcceptAll -Download
-          } else {
-            Get-WindowsUpdate -AcceptAll -Download
+          Write-ScriptLog "Update-Download via Loopback-WinRM auf $Servername..."
+          $loopbackParams = @{
+            ComputerName  = $Servername
+            ErrorAction   = 'Stop'
+            SessionOption = New-PSSessionOption -IncludePortInSPN
+          }
+          $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Download auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
+            Invoke-Command @loopbackParams -ArgumentList $SucheOnline -ScriptBlock $sbWU_Full
           }
         } elseif ($useJEA) {
           Write-ScriptLog "Remote Download via JEA auf $Servername..."
