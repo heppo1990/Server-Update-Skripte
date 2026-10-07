@@ -1634,34 +1634,10 @@ catch {
 
 function Reset-WindowsUpdateLocalWinGetSources {
     param([ValidateRange(1, 3600)][int]$TimeoutSeconds = 300)
-    $resetScript = {
-        $ErrorActionPreference = 'Stop'
-        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-        $knownDefaultSources = @('msstore', 'winget', 'winget-font')
-        $configuredSources = @(Get-WinGetSource -ErrorAction Stop)
-        if ($configuredSources.Count -eq 0) { throw 'WinGet-Quellenliste war leer; Quellenreset abgebrochen.' }
-        $customSources = @($configuredSources | Where-Object { [string]$_.Name -notin $knownDefaultSources } | ForEach-Object { [string]$_.Name } | Select-Object -Unique)
-        if ($customSources.Count -gt 0) {
-            throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); Reset wurde ausgelassen, damit diese erhalten bleiben."
-        }
-        Reset-WinGetSource -All -ErrorAction Stop | Out-Null
-        Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
-        $sourceNames = @(Get-WinGetSource -ErrorAction Stop | ForEach-Object { [string]$_.Name })
-        $missingDefaults = @($knownDefaultSources | Where-Object { $_ -notin $sourceNames })
-        if ($missingDefaults.Count -gt 0) { throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')." }
-        $stateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $env:ProgramData } else { $env:LOCALAPPDATA }
-        if (-not [string]::IsNullOrWhiteSpace($stateRoot)) {
-            $stateDirectory = Join-Path $stateRoot 'ServerUpdateSkripte'
-            try {
-                if (-not (Test-Path -LiteralPath $stateDirectory -PathType Container)) { New-Item -Path $stateDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null }
-                [IO.File]::WriteAllText((Join-Path $stateDirectory 'WingetAllSourcesResetUtc.txt'), [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
-            } catch { Write-Warning "24-Stunden-Marker für WinGet-Quellenreset konnte nicht gespeichert werden: $($_.Exception.Message)" }
-        }
-        [pscustomobject]@{ Success = $true; Message = 'WinGet-Standardquellen wurden zurückgesetzt.' }
-    }
-    $result = @(Invoke-WindowsUpdateLocalCommandWithTimeout -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName 'Lokaler WinGet-Quellenreset')
-    if ($result.Count -eq 0 -or -not $result[-1].Success) { throw 'Lokaler WinGet-Quellenreset lieferte keine Erfolgsbestätigung.' }
-    return $result[-1]
+    # Quellenreset wie jede andere WinGet-Aktion im Zielkontext ausführen;
+    # der lokale Start-Process-Worker löste denselben WinGet-COM-Fehler aus.
+    return Reset-WindowsUpdateRemoteWinGetSources -ComputerName $env:COMPUTERNAME `
+        -TimeoutSeconds $TimeoutSeconds
 }
 
 function Invoke-WindowsUpdatePackageWorker {
