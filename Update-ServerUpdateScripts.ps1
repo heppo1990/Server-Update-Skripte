@@ -92,7 +92,6 @@ function Get-ServerUpdateRequiredFiles {
 
         $leafName = [IO.Path]::GetFileName($relativePath)
         if ($leafName -ieq '.gitignore' -or [IO.Path]::GetExtension($leafName) -ieq '.md') { continue }
-        if ($leafName -ieq 'PendingReboot.ps1') { continue }
         if ($leafName -ieq 'settings.json' -or $leafName -like '*.settings.json') { continue }
         if ($leafName -match '\.(cer|pfx|p12|key)$') { continue }
         if ($leafName -match '^\.env($|\.)|(^|[._-])(secret|secrets|credential|credentials)([._-]|$)') { continue }
@@ -538,6 +537,21 @@ function Update-ServerUpdateSettingsDefaults {
     }
 }
 
+function Remove-ServerUpdateObsoleteScripts {
+    param([Parameter(Mandatory)][string]$ScriptRoot)
+
+    $obsoleteScriptPath = Join-Path $ScriptRoot 'PendingReboot.ps1'
+    if (-not (Test-Path -LiteralPath $obsoleteScriptPath -PathType Leaf)) { return }
+
+    try {
+        Remove-Item -LiteralPath $obsoleteScriptPath -Force -ErrorAction Stop
+        Write-Host 'Veraltetes Skript PendingReboot.ps1 entfernt.' -ForegroundColor DarkGray
+    }
+    catch {
+        Write-Warning "Veraltetes Skript PendingReboot.ps1 konnte nicht entfernt werden: $(Get-ServerUpdateShortError -Exception $_.Exception)"
+    }
+}
+
 # Schützt Klartextpasswörter vor jeder Settings-Migration, damit weder die
 # geänderte Datei noch eine dabei erzeugte Sicherung ein Klartextpasswort enthält.
 function Invoke-ServerUpdateScripts {
@@ -616,6 +630,7 @@ function Invoke-ServerUpdateScripts {
             (Get-ServerUpdateGitBlobSha1 -Path $localPath) -ne $_.Sha
         })
         if ($filesToFetch.Count -eq 0) {
+            Remove-ServerUpdateObsoleteScripts -ScriptRoot $scriptRoot
             if (-not $isConnectionOnlyRun) { Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot }
             try {
                 New-Item -Path $cacheDirectory -ItemType Directory -Force | Out-Null
@@ -684,6 +699,7 @@ function Invoke-ServerUpdateScripts {
                     Copy-Item -LiteralPath (Join-Path $stageDirectory $relativePath) -Destination $localPath -Force -ErrorAction Stop
                 }
                 if (-not $isConnectionOnlyRun) { Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot }
+                Remove-ServerUpdateObsoleteScripts -ScriptRoot $scriptRoot
             }
             catch {
                 foreach ($relativePath in $changedFiles) {
