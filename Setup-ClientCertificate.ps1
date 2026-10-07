@@ -73,6 +73,37 @@ Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
 
+$clientCertificateLogPath = Join-Path (Join-Path $env:ProgramData 'ServerUpdateSkripte\Logs') ("Setup-ClientCertificate_{0}_{1}.log" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd'))
+function Write-ClientCertificateDiagnostic {
+    param(
+        [Parameter(Mandatory)][string]$Operation,
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string]$Context
+    )
+
+    try {
+        $logDirectory = Split-Path -Parent $clientCertificateLogPath
+        if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) {
+            New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        $details = @(
+            "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] $Operation"
+            "Benutzer: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+            "Kontext: $Context"
+            "ErrorId: $($ErrorRecord.FullyQualifiedErrorId)"
+            "Kategorie: $($ErrorRecord.CategoryInfo)"
+            "Aufrufstelle: $($ErrorRecord.InvocationInfo.PositionMessage)"
+            "Stacktrace: $($ErrorRecord.ScriptStackTrace)"
+            "Ausnahme: $($ErrorRecord.Exception.ToString())"
+            ''
+        ) -join [Environment]::NewLine
+        Add-Content -LiteralPath $clientCertificateLogPath -Value $details -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-Verbose "Diagnose konnte nicht protokolliert werden: $($_.Exception.Message)"
+    }
+}
+
 Write-Host "`n=== Client-Zertifikat Setup für WinRM ===" -ForegroundColor Cyan
 Write-Host "Verwaltungsserver: $env:COMPUTERNAME" -ForegroundColor Gray
 
@@ -160,7 +191,8 @@ if (-not $existingCert) {
         Write-Host "  Gültig bis: $($cert.NotAfter.ToString('yyyy-MM-dd'))" -ForegroundColor White
     }
     catch {
-        Write-Host "FEHLER beim Erstellen des Zertifikats: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ClientCertificateDiagnostic -Operation 'Client-Zertifikat erstellen' -ErrorRecord $_ -Context $CertName
+        Write-Host "FEHLER beim Erstellen des Zertifikats. Details: $clientCertificateLogPath" -ForegroundColor Red
         exit 1
     }
 }
@@ -173,7 +205,8 @@ try {
     Write-Host "Public Key exportiert." -ForegroundColor Green
 }
 catch {
-    Write-Host "FEHLER beim Exportieren: $($_.Exception.Message)" -ForegroundColor Red
+    Write-ClientCertificateDiagnostic -Operation 'Client-Zertifikat exportieren' -ErrorRecord $_ -Context $exportPath
+    Write-Host "FEHLER beim Exportieren. Details: $clientCertificateLogPath" -ForegroundColor Red
     exit 1
 }
 
@@ -194,7 +227,8 @@ if ($settingsFiles.Count -gt 0) {
             Write-Host "Thumbprint eingetragen: $settingsFile" -ForegroundColor Green
         }
         catch {
-            Write-Host "WARNUNG: Konfiguration konnte nicht aktualisiert werden ($settingsFile): $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-ClientCertificateDiagnostic -Operation 'Client-Zertifikat in Konfiguration eintragen' -ErrorRecord $_ -Context $settingsFile
+            Write-Host "WARNUNG: Konfiguration konnte nicht aktualisiert werden ($settingsFile). Details: $clientCertificateLogPath" -ForegroundColor Yellow
         }
     }
 } else {
