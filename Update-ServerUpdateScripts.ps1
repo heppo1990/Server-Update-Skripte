@@ -572,7 +572,9 @@ function Invoke-ServerUpdateScripts {
     $scriptRoot = Split-Path -Parent $ScriptPath
     $scriptName = [IO.Path]::GetFileName($ScriptPath)
     $script:ServerUpdateUpdaterScriptName = $scriptName
-    $script:ServerUpdateUpdaterLogPath = Join-Path (Join-Path $env:ProgramData 'ServerUpdateSkripte\Logs') ("Updater_{0}_{1}.log" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd'))
+    $updaterLogDirectory = Join-Path $env:ProgramData 'ServerUpdateSkripte\Logs'
+    $script:ServerUpdateUpdaterLogPath = Join-Path $updaterLogDirectory ("Updater_{0}_{1}.log" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd'))
+    Remove-ServerUpdateUpdaterOldLogs -LogDirectory $updaterLogDirectory -ComputerName $env:COMPUTERNAME
     # Der direkte Aufruf dieses Updaters bleibt ein manueller Updateweg.
     # Automatische Aktualisierungen aus den übrigen Skripten sind abschaltbar.
     if ($scriptName -ine 'Update-ServerUpdateScripts.ps1') {
@@ -954,6 +956,20 @@ function Get-ServerUpdateShortError {
     if ($message.Length -gt 180) { $message = $message.Substring(0, 177) + '...' }
     if ([string]::IsNullOrWhiteSpace($message)) { return 'Unbekannter Netzwerkfehler.' }
     return $message
+}
+
+function Remove-ServerUpdateUpdaterOldLogs {
+    param([Parameter(Mandatory)][string]$LogDirectory, [Parameter(Mandatory)][string]$ComputerName)
+    try {
+        if (-not (Test-Path -LiteralPath $LogDirectory -PathType Container)) { return }
+        $pattern = 'Updater_{0}_*.log' -f [WildcardPattern]::Escape($ComputerName)
+        $oldLogs = @(Get-ChildItem -LiteralPath $LogDirectory -File -Filter $pattern -ErrorAction Stop |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -Skip 13)
+        foreach ($oldLog in $oldLogs) { Remove-Item -LiteralPath $oldLog.FullName -Force -ErrorAction Stop }
+    }
+    catch {
+        Write-Verbose "Ältere Updater-Protokolle konnten nicht vollständig bereinigt werden: $($_.Exception.Message)"
+    }
 }
 
 function Write-ServerUpdateUpdaterDiagnostic {
