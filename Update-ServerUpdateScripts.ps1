@@ -92,6 +92,7 @@ function Get-ServerUpdateRequiredFiles {
 
         $leafName = [IO.Path]::GetFileName($relativePath)
         if ($leafName -ieq '.gitignore' -or [IO.Path]::GetExtension($leafName) -ieq '.md') { continue }
+        if ($leafName -ieq 'PendingReboot.ps1') { continue }
         if ($leafName -ieq 'settings.json' -or $leafName -like '*.settings.json') { continue }
         if ($leafName -match '\.(cer|pfx|p12|key)$') { continue }
         if ($leafName -match '^\.env($|\.)|(^|[._-])(secret|secrets|credential|credentials)([._-]|$)') { continue }
