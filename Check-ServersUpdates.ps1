@@ -892,7 +892,11 @@ if ($ServerADList -ne $null) {
           Write-ScriptLog "$($packageResult.Manager) auf ${Servername}: $packageCount Paketupdate(s) verfügbar."
 
           $packageConsoleTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $Servername -Manager $packageResult.Manager -Packages $packages
-          foreach ($tableLine in ($packageConsoleTable -split "`r?`n")) { if ($tableLine) { Write-ScriptLog $tableLine } }
+          foreach ($tableLine in ($packageConsoleTable -split "`r?`n")) {
+            if (-not $tableLine) { continue }
+            Write-ScriptLog $tableLine $true
+            Write-WindowsUpdateConsoleLine -Message $tableLine -AlreadyFiltered
+          }
           $RepBody += "<div class='info-box'><strong>$($packageResult.Manager)-Updates auf $Servername ($packageCount):</strong>"
           $RepBody += ConvertTo-WindowsUpdatePackageHtmlTable -ComputerName $Servername -Manager $packageResult.Manager -Packages $packages
           $RepBody += '</div>'

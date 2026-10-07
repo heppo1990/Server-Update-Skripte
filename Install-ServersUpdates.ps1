@@ -200,7 +200,11 @@ function Invoke-PackageManagerUpdates {
       $managerPackages = @($successfulPackagesByManager[$manager])
       Write-ScriptLog "$manager auf ${Servername}: $($managerPackages.Count) Paketupdates installiert"
       $packageTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $Servername -Manager $manager -Packages $managerPackages
-      foreach ($tableLine in ($packageTable -split "`r?`n")) { if ($tableLine) { Write-ScriptLog $tableLine } }
+      foreach ($tableLine in ($packageTable -split "`r?`n")) {
+        if (-not $tableLine) { continue }
+        Write-ScriptLog $tableLine -LogOnly
+        Write-WindowsUpdateConsoleLine -Message $tableLine -AlreadyFiltered
+      }
     }
     if ($successfulPackagesByManager.Count -eq 0 -and $manualPackageCount -eq 0) { Write-ScriptLog '' }
     if ($manualPackageCount -gt 0) {
