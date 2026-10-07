@@ -293,6 +293,7 @@ function Invoke-WinRMDeployment {
                 }
                 catch {
                     Write-DeployLog "Vertrauenskette für $Servername wird einmalig eingerichtet." -LogOnly
+                    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-Zertifikatsverbindung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Zertifikat einmalig mit Vertrauensmigration erneut versuchen')
                     try {
                         $session = New-PSSession -ComputerName $Servername -UseSSL `
                             -CertificateThumbprint $clientCert.Thumbprint `
@@ -303,6 +304,7 @@ function Invoke-WinRMDeployment {
                     }
                     catch {
                         Write-DeployLog "Client-Zertifikat für $Servername nicht verfügbar; verwende Einrichtungsdaten." -LogOnly
+                        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-Zertifikatsverbindung mit Vertrauensmigration' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Einrichtungsdaten')
                     }
                 }
             }
@@ -322,6 +324,7 @@ function Invoke-WinRMDeployment {
                     # Vor der Einrichtung existiert bei manchen Geräten noch kein
                     # HTTPS-Listener. HTTP ist ausschließlich der einmalige Fallback.
                     Write-DeployLog "[$Servername] WinRM/HTTPS nicht verfügbar; HTTP-Fallback."
+                    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTPS-Verbindung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=HTTP für einmalige Ersteinrichtung')
                     try {
                         $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
                     }
@@ -330,6 +333,7 @@ function Invoke-WinRMDeployment {
                         # unterschiedlich heißen. Werden zwischengespeicherte
                         # Daten abgelehnt, fragen wir genau für dieses Ziel neu.
                         Write-DeployLog "Einrichtungsdaten für $Servername wurden abgelehnt." -Level Warning
+                        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTP-Anmeldung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Anmeldedaten erneut abfragen')
                         $bootstrapCredential = Get-Credential -Message "Lokale Administrator-Anmeldedaten für $Servername (z. B. .\Administrator)"
                         try {
                             $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
@@ -337,6 +341,7 @@ function Invoke-WinRMDeployment {
                         }
                         catch {
                             Write-DeployLog "WinRM/HTTPS auf $Servername nicht verfügbar; einmaliger HTTP-Fallback." -LogOnly
+                            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTPS-Wiederholungsverbindung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=HTTP für einmalige Ersteinrichtung')
                             $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
                         }
                         $script:BootstrapCredential = $bootstrapCredential
@@ -711,6 +716,7 @@ function Invoke-ServerDeployment {
         catch {
             $result.Status  = 'Failed'
             $errorText = $_.Exception.Message
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-Bereitstellung' -Target $Servername -ErrorRecord $_ -Context @('Retries=5; credentials omitted')
             if ($errorText -match 'Interner Fehler') {
                 $result.Message = 'Zertifikatsanmeldung zum JEA-Endpunkt nach 5 Versuchen abgelehnt.'
             } elseif ($errorText -match 'Access is denied|Zugriff verweigert|Unauthorized|Anmeldeinformationen|Credential') {
@@ -763,6 +769,7 @@ function Invoke-ServerDeployment {
     catch {
         $result.Status  = 'Failed'
         $result.Message = $_.Exception.Message
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'Lokales Setup' -Target $Servername -ErrorRecord $_
         return $result
     }
 
