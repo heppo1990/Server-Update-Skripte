@@ -686,7 +686,7 @@ function Invoke-ServerDeployment {
     # Nur wenn WinRM auf dem lokalen Gerät noch nicht eingerichtet ist, bleibt
     # der direkte Aufruf als notwendiger Bootstrap erhalten.
     $useWinRMSetup = $Servername -ne $env:COMPUTERNAME
-    if (-not $useWinRMSetup) {
+    if (-not $useWinRMSetup -and $DeployType -eq 'AD') {
         try {
             Test-WSMan -ComputerName $Servername -ErrorAction Stop | Out-Null
             $useWinRMSetup = $true
