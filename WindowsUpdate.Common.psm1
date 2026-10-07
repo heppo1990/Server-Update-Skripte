@@ -190,8 +190,25 @@ $updaterDefinition
 `$null = Update-PS7PackageManagementModule -WriteLog `$writeLog $forceArgument
 "@
         $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
-        $childOutput = @(& $pwsh.Source -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedCommand 2>&1 | ForEach-Object { [string]$_ })
-        $childExitCode = $LASTEXITCODE
+        $workerRoot = Join-Path ([IO.Path]::GetTempPath()) ('PS7PackageManagement-{0}' -f [guid]::NewGuid().ToString('N'))
+        $stdoutPath = Join-Path $workerRoot 'stdout.txt'
+        $stderrPath = Join-Path $workerRoot 'stderr.txt'
+        $childOutput = @()
+        $childExitCode = -1
+        try {
+            New-Item -ItemType Directory -Path $workerRoot -Force -ErrorAction Stop | Out-Null
+            $workerProcess = Start-Process -FilePath $pwsh.Source `
+                -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand) `
+                -Wait -PassThru -WindowStyle Hidden `
+                -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+            $childExitCode = $workerProcess.ExitCode
+            $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { @(Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue) } else { @() }
+            $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue) } else { @() }
+            $childOutput = @($stdout + $stderr | ForEach-Object { [string]$_ })
+        }
+        finally {
+            Remove-Item -LiteralPath $workerRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
         $unparsedOutput = @()
         foreach ($line in $childOutput) {
             if ($line -match '^__PMLOG__(INFO|WARN|SUCCESS|UPDATE)\t(.*)$') {
