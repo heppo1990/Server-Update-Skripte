@@ -744,7 +744,8 @@ if ($ServerADList -ne $null) {
               Write-ScriptLog "Verbindung mit Client-Zertifikat via HTTPS erfolgreich."
             }
             catch {
-              Write-ScriptLog "Fehler mit Client-Zertifikat via HTTPS: $($_.Exception.Message)"
+              Write-ScriptLog "WARNUNG: Client-Zertifikat-Verbindung zu $Servername fehlgeschlagen; Details im Log."
+              Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'WinRM-Check-Certificate' -Target $Servername -ErrorRecord $_
             }
           }
 
@@ -767,7 +768,8 @@ if ($ServerADList -ne $null) {
                 break
               }
               catch {
-                Write-ScriptLog "Fehler mit $authMethod : $($_.Exception.Message)"
+                Write-ScriptLog "WARNUNG: Verbindung zu $Servername über $authMethod fehlgeschlagen; Details im Log."
+                Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation "WinRM-Check-$authMethod" -Target $Servername -ErrorRecord $_
                 if ($authMethod -eq 'CredSSP' -and $_ -match "CredSSP") {
                   Write-ScriptLog "HINWEIS: CredSSP muss aktiviert werden mit: Enable-WSManCredSSP -Role Client -DelegateComputer $Servername"
                 }
@@ -842,7 +844,8 @@ if ($ServerADList -ne $null) {
           # Paketmanager sind optional. Ein separater Remoting-Fehler darf
           # einen erfolgreichen Windows-Update-Check nicht als Serverfehler
           # bewerten oder den Bericht abbrechen.
-          Write-ScriptLog "WARNUNG: Paketmanager-Prüfung auf ${Servername} übersprungen: $($_.Exception.Message)"
+          Write-ScriptLog "WARNUNG: Paketmanager-Prüfung auf ${Servername} fehlgeschlagen; Details im Log."
+          Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'PackageManager-Check' -Target $Servername -ErrorRecord $_
           $packageResults = @()
         }
         $packageOutputWritten = $false
@@ -904,8 +907,8 @@ if ($ServerADList -ne $null) {
       }
       Catch {
         Write-ScriptLog ("Es ist ein Fehler bei Server " + $Servername + " aufgetreten!")
-        Write-ScriptLog ($_.Exception.Message)
-        $RepBody += "<div class='error-box'><strong>Fehler aufgetreten!</strong><br>$($_.Exception.Message)</div>"
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'WindowsUpdate-Check' -Target $Servername -ErrorRecord $_
+        $RepBody += "<div class='error-box'><strong>Fehler aufgetreten!</strong><br>Details stehen im Laufprotokoll.</div>"
       }
     }
   }
@@ -964,8 +967,9 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
   }
   catch {
     $LinuxCheckErrors++
-    Write-ScriptLog "WARNUNG: Linux-Check konnte nicht ausgeführt werden: $($_.Exception.Message)"
-    $RepBody += "<div class='error-box'>Linux-Check fehlgeschlagen: $([System.Net.WebUtility]::HtmlEncode($_.Exception.Message))</div>"
+    Write-ScriptLog 'WARNUNG: Linux-Check konnte nicht ausgeführt werden; Details im Log.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'Linux-Check' -Target 'Linux' -ErrorRecord $_
+    $RepBody += "<div class='error-box'>Linux-Check fehlgeschlagen. Details stehen im Laufprotokoll.</div>"
   }
   finally {
     Remove-Item -LiteralPath $linuxCheckStatsPath -Force -ErrorAction SilentlyContinue
@@ -1011,8 +1015,9 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   }
   catch {
     $HACheckErrors++
-    Write-ScriptLog "WARNUNG: Home-Assistant-Check konnte nicht ausgeführt werden: $($_.Exception.Message)"
-    $RepBody += "<div class='error-box'>Home-Assistant-Check fehlgeschlagen: $([System.Net.WebUtility]::HtmlEncode($_.Exception.Message))</div>"
+    Write-ScriptLog 'WARNUNG: Home-Assistant-Check konnte nicht ausgeführt werden; Details im Log.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'HomeAssistant-Check' -Target ([string]$haSettings.Host) -ErrorRecord $_
+    $RepBody += "<div class='error-box'>Home-Assistant-Check fehlgeschlagen. Details stehen im Laufprotokoll.</div>"
   }
   finally {
     Remove-Item -LiteralPath $haCheckStatsPath -Force -ErrorAction SilentlyContinue
