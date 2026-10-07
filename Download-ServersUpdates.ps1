@@ -119,7 +119,14 @@ if ([string]::IsNullOrWhiteSpace($TargetComputers)) {
     $TargetComputers = "Server"
 }
 
-$ServerADList = Get-WindowsUpdateTargets -UpdateSettings $UpdateSettings -TargetComputers $TargetComputers -PowerShellMajor $psVersion -WriteLog { param($message) Write-ScriptLog $message }
+$ServerADList = Get-WindowsUpdateTargets `
+  -UpdateSettings $UpdateSettings `
+  -TargetComputers $TargetComputers `
+  -PowerShellMajor $psVersion `
+  -LinuxTargetCount $LinuxConfiguredHostCount `
+  -HomeAssistantTargetCount $(if ($HAConfigured) { 1 } else { 0 }) `
+  -IncludeAdditionalTargetCounts `
+  -WriteLog { param($message) Write-ScriptLog $message }
 
 # HTML-Report mit modernem Design
 $RepBody = @"

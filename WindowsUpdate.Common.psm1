@@ -1277,6 +1277,9 @@ function Get-WindowsUpdateTargets {
         [Parameter(Mandatory)]$UpdateSettings,
         [Parameter(Mandatory)][string]$TargetComputers,
         [int]$PowerShellMajor = $PSVersionTable.PSVersion.Major,
+        [ValidateRange(0, 100000)][int]$LinuxTargetCount = 0,
+        [ValidateRange(0, 100000)][int]$HomeAssistantTargetCount = 0,
+        [switch]$IncludeAdditionalTargetCounts,
         [scriptblock]$WriteLog
     )
 
@@ -1358,7 +1361,20 @@ function Get-WindowsUpdateTargets {
         }
     }
 
-    Write-CommonLog $WriteLog "Gesamtliste nach Zusammenführung: $($targets.Count) Gerät(e)"
+    if ($IncludeAdditionalTargetCounts) {
+        $targetParts = @()
+        if ($targets.Count -gt 0) { $targetParts += "Windows: $($targets.Count)" }
+        if ($LinuxTargetCount -gt 0) { $targetParts += "Linux: $LinuxTargetCount" }
+        if ($HomeAssistantTargetCount -gt 0) { $targetParts += "Home Assistant: $HomeAssistantTargetCount" }
+        $totalTargetCount = $targets.Count + $LinuxTargetCount + $HomeAssistantTargetCount
+        $targetBreakdown = $targetParts -join ', '
+        $targetMessage = "Gesamtliste nach Zusammenführung: Gesamt $totalTargetCount"
+        if ($targetBreakdown) { $targetMessage += " ($targetBreakdown)" }
+        Write-CommonLog $WriteLog $targetMessage
+    }
+    else {
+        Write-CommonLog $WriteLog "Gesamtliste nach Zusammenführung: $($targets.Count) Gerät(e)"
+    }
 
     return @($targets)
 }

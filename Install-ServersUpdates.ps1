@@ -1482,7 +1482,14 @@ if ($script:VMRebootIndex -gt 0) {
   }
 }
 
-$ServerADList = Get-WindowsUpdateTargets -UpdateSettings $UpdateSettings -TargetComputers $TargetComputers -PowerShellMajor $psVersion -WriteLog { param($message) Write-ScriptLog $message }
+$ServerADList = Get-WindowsUpdateTargets `
+  -UpdateSettings $UpdateSettings `
+  -TargetComputers $TargetComputers `
+  -PowerShellMajor $psVersion `
+  -LinuxTargetCount $(if ($IsWindowsOnlyRun) { 0 } else { $LinuxConfiguredHostCount }) `
+  -HomeAssistantTargetCount $(if ($IsWindowsOnlyRun -or -not $HAConfigured) { 0 } else { 1 }) `
+  -IncludeAdditionalTargetCounts `
+  -WriteLog { param($message) Write-ScriptLog $message }
 # Ein gezielter Testlauf verändert die allgemeine Serverliste nicht, sondern filtert sie nur für diesen Start.
 if ($TargetComputer -and $TargetComputer.Count -gt 0) {
   $requestedNames = @($TargetComputer | ForEach-Object { $_.Trim() } | Where-Object { $_ })

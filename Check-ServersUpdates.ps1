@@ -401,7 +401,14 @@ if ($enableWingetUpdates) {
   $null = Update-WinGetClientModule -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
 }
 
-$ServerADList = Get-WindowsUpdateTargets -UpdateSettings $UpdateSettings -TargetComputers $TargetComputers -PowerShellMajor $psVersion -WriteLog { param($message) Write-ScriptLog $message }
+$ServerADList = Get-WindowsUpdateTargets `
+  -UpdateSettings $UpdateSettings `
+  -TargetComputers $TargetComputers `
+  -PowerShellMajor $psVersion `
+  -LinuxTargetCount $LinuxConfiguredHostCount `
+  -HomeAssistantTargetCount $(if ($HAConfigured) { 1 } else { 0 }) `
+  -IncludeAdditionalTargetCounts `
+  -WriteLog { param($message) Write-ScriptLog $message }
 
 # HTML-Report initialisieren
 $RepBody = @"
