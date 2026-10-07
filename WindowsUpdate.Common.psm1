@@ -41,7 +41,10 @@ function Write-WindowsUpdateDiagnostic {
     foreach ($line in ([string]$DiagnosticText -split "`r?`n")) {
         if (-not [string]::IsNullOrWhiteSpace($line)) { $lines.Add($line.TrimEnd()) }
     }
-    foreach ($line in $lines) { Write-CommonLog $WriteLog "[DIAG] $line" }
+    foreach ($line in $lines) {
+        $safeLine = [string]$line -replace '(?i)\b(password|passwd|authpass|secret|token|clientsecret)\b(\s*[:=]\s*)(?:"[^"]*"|''[^'']*''|[^\s,;]+)', '$1$2<redacted>'
+        Write-CommonLog $WriteLog "[DIAG] $safeLine"
+    }
 }
 
 $script:WindowsUpdateConsoleTableActive = $false
@@ -271,6 +274,7 @@ $updaterDefinition
     catch {
         $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
         $currentVersion = if ($installedModule) { [string]$installedModule.Version } else { 'nicht ermittelt' }
+        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'PackageManagement für PowerShell 7 suchen' -ErrorRecord $_ -Context @('Fallback=vorhandene Version bleibt aktiv')
         $message = "PackageManagement-Version für PowerShell 7 konnte nicht geprüft werden (vorhanden: $currentVersion)."
         if ($detail) { $message += " Ursache: $detail" }
         if ($WriteLog) { & $WriteLog $message 'WARN' } else { Write-Warning $message }
@@ -1438,7 +1442,8 @@ function Get-WindowsUpdateTargets {
         $isDomainJoined = [bool](Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).PartOfDomain
     }
     catch {
-        Write-CommonLog $WriteLog "WARNUNG: Domänenstatus konnte nicht ermittelt werden: $($_.Exception.Message)"
+        Write-CommonLog $WriteLog 'WARNUNG: Domänenstatus konnte nicht ermittelt werden; lokales Ziel wird verwendet. Details im Log.'
+        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'Domänenstatus ermitteln' -ErrorRecord $_ -Context @('Fallback=lokales Ziel')
     }
 
     if ($isDomainJoined) {
@@ -1464,9 +1469,8 @@ function Get-WindowsUpdateTargets {
             }
         }
         catch {
-            Write-CommonLog $WriteLog 'WARNUNG: ActiveDirectory-Modul konnte nicht geladen werden'
-            Write-CommonLog $WriteLog "Fehlerdetails: $($_.Exception.Message)"
-            Write-CommonLog $WriteLog 'Verarbeite nur lokalen Rechner!'
+            Write-CommonLog $WriteLog 'WARNUNG: ActiveDirectory-Abfrage fehlgeschlagen; nur das lokale Ziel wird verarbeitet. Details im Log.'
+            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'ActiveDirectory-Zielliste' -ErrorRecord $_ -Context @('Fallback=lokales Ziel')
             $adComputers = @($localComputer)
         }
     }
@@ -2899,9 +2903,16 @@ function Invoke-WindowsUpdateFileRetention {
     )
 
     $keep = [Math]::Max(1, $KeepFiles)
-    $files = if (Test-Path -LiteralPath $Directory) {
-        @(Get-ChildItem -LiteralPath $Directory -File -Filter $Filter -ErrorAction SilentlyContinue | Sort-Object LastWriteTime)
-    } else { @() }
+    $enumerationError = $null
+    try {
+        $files = if (Test-Path -LiteralPath $Directory -PathType Container -ErrorAction Stop) {
+            @(Get-ChildItem -LiteralPath $Directory -File -Filter $Filter -ErrorAction Stop | Sort-Object LastWriteTime)
+        } else { @() }
+    }
+    catch {
+        $files = @()
+        $enumerationError = $_.Exception.ToString()
+    }
     # PowerShell entpackt Arrays mit genau einem Element bei einer Zuweisung.
     # Deshalb niemals direkt $files.Count verwenden.
     $fileCount = @($files).Count
@@ -2914,7 +2925,7 @@ function Invoke-WindowsUpdateFileRetention {
             $removedFiles += $file.FullName
         }
         catch {
-            $failedFiles += [PSCustomObject]@{ Path = $file.FullName; Error = $_.Exception.Message }
+            $failedFiles += [PSCustomObject]@{ Path = $file.FullName; Error = $_.Exception.Message; Diagnostic = $_.Exception.ToString() }
         }
     } }
 
@@ -2922,6 +2933,7 @@ function Invoke-WindowsUpdateFileRetention {
         ExistingCount = $fileCount
         RemovedFiles  = @($removedFiles)
         FailedFiles   = @($failedFiles)
+        EnumerationError = $enumerationError
     }
 }
 
@@ -2994,7 +3006,14 @@ function Invoke-WindowsUpdateRetentionWithLog {
         if ($WriteLog) { & $WriteLog "Es sind $($removedFiles.Count) Datei(en) zum Entfernen vorhanden." }
         foreach ($file in $removedFiles) { if ($WriteLog) { & $WriteLog "Entferne $file ..." } }
     }
-    foreach ($failed in $failedFiles) { if ($WriteLog) { & $WriteLog "WARNUNG: $($failed.Path) konnte nicht entfernt werden: $($failed.Error)" } }
+    if ($result.EnumerationError) {
+        if ($WriteLog) { & $WriteLog "WARNUNG: $Description konnte nicht vollständig gelesen werden; Details im Log." }
+        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "Log-Bereinigung: $Description" -Target $Directory -DiagnosticText $result.EnumerationError -Context @("Filter=$Filter")
+    }
+    foreach ($failed in $failedFiles) {
+        if ($WriteLog) { & $WriteLog "WARNUNG: Eine Datei aus $Description konnte nicht entfernt werden; Details im Log." }
+        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "Logdatei entfernen: $Description" -Target ([string]$failed.Path) -DiagnosticText ([string]$failed.Diagnostic)
+    }
     return $result
 }
 
@@ -3033,7 +3052,10 @@ function Send-WindowsUpdateHtmlMail {
             return $true
         }
         catch {
-            if ($WriteLog) { & $WriteLog "Fehler beim Versenden der E-Mail (Versuch $attempt von $RetryCount): $($_.Exception.Message)" }
+            if ($WriteLog) {
+                & $WriteLog "WARNUNG: E-Mailversand fehlgeschlagen (Versuch $attempt von $RetryCount); Details im Log."
+                Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'SMTP-Mailversand' -ErrorRecord $_ -Context @("Attempt=$attempt/$RetryCount", "Server=$($MailSettings.Host)", "Port=$($MailSettings.Port)")
+            }
             if ($attempt -lt $RetryCount -and $RetryDelaySeconds -gt 0) {
                 if ($WriteLog) { & $WriteLog "Nächster Mailversuch in $RetryDelaySeconds Sekunden..." }
                 Start-Sleep -Seconds $RetryDelaySeconds
@@ -3056,7 +3078,8 @@ function Add-WindowsUpdateTrustedHost {
         Set-Item WSMan:\localhost\Client\TrustedHosts -Value $newValue -Force -ErrorAction Stop
     }
     catch {
-        Write-CommonLog $WriteLog "WARNUNG: TrustedHosts konnte nicht aktualisiert werden."
+        Write-CommonLog $WriteLog 'WARNUNG: TrustedHosts konnte nicht aktualisiert werden; Details im Log.'
+        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'TrustedHosts aktualisieren' -Target $ComputerName -ErrorRecord $_
     }
 }
 
