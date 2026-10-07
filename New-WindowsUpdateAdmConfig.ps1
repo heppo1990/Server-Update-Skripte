@@ -848,7 +848,36 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
     
     # Pruefe ob der Endpunkt korrekt registriert ist (ohne Loopback-Verbindung)
     if ($PSVersionTable.PSEdition -eq 'Core') {
-        $registrationProbe = & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -NonInteractive -Command "(Get-PSSessionConfiguration -Name 'WindowsUpdateAdm' -ErrorAction SilentlyContinue).Name" 2>$null
+        $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $probeRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdateAdm-Probe-{0}' -f [guid]::NewGuid().ToString('N'))
+        $probeOutputPath = Join-Path $probeRoot 'stdout.txt'
+        $probeErrorPath = Join-Path $probeRoot 'stderr.txt'
+        $probeProcess = $null
+        try {
+            if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+                throw "Windows PowerShell 5.1 wurde nicht gefunden: $windowsPowerShell"
+            }
+            New-Item -ItemType Directory -Path $probeRoot -Force -ErrorAction Stop | Out-Null
+            $probeCommand = "(Get-PSSessionConfiguration -Name 'WindowsUpdateAdm' -ErrorAction SilentlyContinue).Name"
+            $encodedProbeCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeCommand))
+            $probeProcess = Start-Process -FilePath $windowsPowerShell `
+                -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedProbeCommand) `
+                -Wait -PassThru -WindowStyle Hidden `
+                -RedirectStandardOutput $probeOutputPath -RedirectStandardError $probeErrorPath -ErrorAction Stop
+            $registrationProbe = if (Test-Path -LiteralPath $probeOutputPath -PathType Leaf) {
+                @(Get-Content -LiteralPath $probeOutputPath -ErrorAction SilentlyContinue)
+            } else { @() }
+            if ($probeProcess.ExitCode -ne 0) {
+                $probeErrorText = if (Test-Path -LiteralPath $probeErrorPath -PathType Leaf) {
+                    (Get-Content -LiteralPath $probeErrorPath -Raw -ErrorAction SilentlyContinue).Trim()
+                } else { '' }
+                Write-SetupLog "WARN: PowerShell-5.1-Endpunktprüfung endete mit Exitcode $($probeProcess.ExitCode). $probeErrorText" 'WARN'
+            }
+        }
+        finally {
+            if ($probeProcess) { $probeProcess.Dispose() }
+            Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
         $RegisteredConfig = if (@($registrationProbe) -contains 'WindowsUpdateAdm') { [PSCustomObject]@{ Name = 'WindowsUpdateAdm' } } else { $null }
     }
     else {
