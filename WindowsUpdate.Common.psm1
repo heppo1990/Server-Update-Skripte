@@ -1873,7 +1873,7 @@ catch {
 
         function Test-WingetSourceFailureLine {
             param([string]$Line)
-            return $Line -match '(?i)(Fehler beim Durchsuchen der Quelle|Fehler beim Versuch, die Quelle zu aktualisieren|An error occurred while searching the source|Failed when searching (?:the )?source|Failed in attempting to update the source)'
+            return $Line -match '(?i)(Fehler bei der WinGet-Abfrage für Quelle|Fehler beim Durchsuchen der Quelle|Fehler beim Versuch, die Quelle zu aktualisieren|An error occurred while searching the source|Failed when searching (?:the )?source|Failed in attempting to update the source)'
         }
 
         function Get-WingetCompactOutput {
@@ -1923,31 +1923,47 @@ catch {
                 param([string]$WingetPath)
                 $sourceListOutput = (& $WingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
                 $sourceListExitCode = $LASTEXITCODE
-                $sourceNames = @()
+                $explicitSourceNames = @()
+                $skippedSources = @()
                 if ($sourceListExitCode -eq 0) {
                     foreach ($line in ($sourceListOutput -split "`r?`n")) {
                         if ($line -match '^\s*Name\b' -or $line -match '^\s*[-=]{3,}') { continue }
-                        if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+\S+\s*$') {
-                            $sourceNames += $Matches.Name
+                        if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?<Explicit>true|false)\s*$') {
+                            $sourceName = $Matches.Name
+                            if ($sourceName -ieq 'winget-font') {
+                                # Integrierte, standardmäßig explizite Quelle für Schriftarten;
+                                # sie ist keine allgemeine Quelle für App-Updates.
+                                $skippedSources += $sourceName
+                                continue
+                            }
+                            # Alle nicht expliziten Quellen werden gemeinsam abgefragt.
+                            # Kundeneigene explizite Quellen brauchen einen eigenen Aufruf.
+                            if ($Matches.Explicit -ieq 'true') { $explicitSourceNames += $sourceName }
                         }
                     }
-                    $sourceNames = @($sourceNames | Select-Object -Unique)
+                    $explicitSourceNames = @($explicitSourceNames | Select-Object -Unique)
                 }
 
-                if ($sourceListExitCode -ne 0 -or $sourceNames.Count -eq 0) {
+                if ($sourceListExitCode -ne 0) {
                     [pscustomobject]@{
                         Success = $false; SourceListOutput = $sourceListOutput; SourceListExitCode = $sourceListExitCode
-                        Sources = @(); Results = @()
+                        Sources = @(); SkippedSources = @($skippedSources); Results = @()
                     }
                     return
                 }
 
                 $sourceResults = @()
-                foreach ($sourceName in $sourceNames) {
+                $queryDefinitions = @([pscustomobject]@{ Source = '(Standardquellen)'; Explicit = $false })
+                foreach ($sourceName in $explicitSourceNames) {
+                    $queryDefinitions += [pscustomobject]@{ Source = $sourceName; Explicit = $true }
+                }
+                foreach ($queryDefinition in $queryDefinitions) {
+                    $sourceName = [string]$queryDefinition.Source
                     $arguments = @(
-                        'upgrade', '--source', $sourceName,
-                        '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity'
+                        'list', '--upgrade-available',
+                        '--accept-source-agreements', '--disable-interactivity'
                     )
+                    if ($queryDefinition.Explicit) { $arguments += @('--source', $sourceName) }
                     $output = (& $WingetPath @arguments 2>&1 | Out-String -Width 1200).Trim()
                     $sourceResults += [pscustomobject]@{
                         Source = $sourceName; Output = $output; ExitCode = $LASTEXITCODE
@@ -1955,7 +1971,8 @@ catch {
                 }
                 [pscustomobject]@{
                     Success = $true; SourceListOutput = $sourceListOutput; SourceListExitCode = $sourceListExitCode
-                    Sources = @($sourceNames); Results = @($sourceResults)
+                    Sources = @($queryDefinitions | ForEach-Object { $_.Source }); SkippedSources = @($skippedSources)
+                    Results = @($sourceResults)
                 }
             }
             try {
@@ -1972,6 +1989,9 @@ catch {
             }
 
             $diagnostics = @("Quellenliste (Exitcode $($cliResult.SourceListExitCode)):`r`n$($cliResult.SourceListOutput)")
+            if (@($cliResult.SkippedSources).Count -gt 0) {
+                $diagnostics += "Übersprungene integrierte Quellen ohne App-Updates: $(@($cliResult.SkippedSources) -join ', ')."
+            }
             if (-not $cliResult.Success) {
                 $exception = [System.InvalidOperationException]::new('WinGet-Quellen konnten für den CLI-Fallback nicht zuverlässig ermittelt werden.')
                 $exception.Data['WinGetDiagnosticOutput'] = $diagnostics -join "`r`n"
@@ -1986,14 +2006,18 @@ catch {
                 $sourceOutput = [string]$sourceResult.Output
                 $sourceExitCode = [int]$sourceResult.ExitCode
                 $diagnostics += "Quelle '$sourceName' (Exitcode $sourceExitCode):`r`n$sourceOutput"
-                if ($sourceExitCode -ne 0) {
+                # list --upgrade-available verwendet bei erfolgreicher Leerabfrage
+                # je nach WinGet-Version/Quelle einen Nicht-Null-Exitcode.
+                $successfulEmptyResult = $sourceOutput -match '(?i)(no installed package found matching input criteria|es wurde kein installiertes paket gefunden, das den eingabekriterien entspricht|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar|0 upgrades? available|0 paketupdates? verfügbar)'
+                if ($sourceExitCode -ne 0 -and -not $successfulEmptyResult) {
                     $detail = Get-WingetCompactOutput -Text $sourceOutput -MaximumLength 500
-                    if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe upgrade endete mit Exitcode $sourceExitCode." }
-                    $sourceFailures += "Fehler beim Versuch, die Quelle zu aktualisieren: $sourceName — $detail"
+                    if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe list --upgrade-available endete mit Exitcode $sourceExitCode." }
+                    $sourceFailures += "Fehler bei der WinGet-Abfrage für Quelle '$sourceName' - $detail"
                     continue
                 }
 
-                foreach ($row in @(Get-WingetUpgradeLines -Output $sourceOutput -DefaultSource $sourceName)) {
+                $defaultSource = if ($sourceName -eq '(Standardquellen)') { 'winget' } else { $sourceName }
+                foreach ($row in @(Get-WingetUpgradeLines -Output $sourceOutput -DefaultSource $defaultSource)) {
                     $match = [regex]::Match($row, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
                     if (-not $match.Success) { continue }
                     $packageKey = '{0}|{1}' -f $match.Groups['Id'].Value.ToLowerInvariant(), $match.Groups['Source'].Value.ToLowerInvariant()
@@ -2007,6 +2031,7 @@ catch {
                 Output = (@($allRows) + @($sourceFailures)) -join [Environment]::NewLine
                 DiagnosticOutput = $diagnostics -join "`r`n"
                 Sources = @($cliResult.Sources)
+                SkippedSources = @($cliResult.SkippedSources)
                 FailedSources = @($sourceFailures)
             }
         }
