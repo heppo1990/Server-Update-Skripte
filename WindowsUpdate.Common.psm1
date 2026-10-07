@@ -2294,14 +2294,7 @@ catch {
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
             $serverCaption = ''
-            $serverOsBuild = 0
-            $serverProductType = 0
-            try {
-                $serverOsInfo = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-                $serverCaption = [string]$serverOsInfo.Caption
-                $serverOsBuild = [int]$serverOsInfo.BuildNumber
-                $serverProductType = [int]$serverOsInfo.ProductType
-            } catch { }
+            try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
             if ($ExecutionMode -eq 'Check' -and $wingetPath -and $serverCaption -match 'Windows Server') {
                 try {
                     $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
@@ -2359,49 +2352,27 @@ catch {
                 try {
                 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
                 $wingetCliFallback = $false
-                $unsupportedServerModuleApi = $serverProductType -eq 3 -and $serverOsBuild -in @(17763, 20348)
-                if ($unsupportedServerModuleApi) {
-                    $unsupportedModuleMessage = "Microsoft.WinGet.Client-COM-Abfrage auf $serverCaption (Build $serverOsBuild) übersprungen; WinGet ist auf Windows Server 2019/2022 nicht unterstützt."
+                try {
+                    $availableOutput = Get-WingetModuleUpdateOutput
+                }
+                catch {
+                    $moduleQueryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                    $moduleQueryDiagnostic = [string]$_.Exception.ToString()
                     try {
                         $cliQueryResult = Invoke-WingetCliUpgradeQuery -Path $wingetPath
                         $availableOutput = [string]$cliQueryResult.Output
                         $wingetCliFallback = $true
-                        $fallbackSummary = "$unsupportedModuleMessage CLI-Abfrage über Quellen $(@($cliQueryResult.Sources) -join ', ')."
+                        $fallbackSummary = "Modulabfrage fehlgeschlagen; CLI-Fallback über Quellen $(@($cliQueryResult.Sources) -join ', ')."
                         if (@($cliQueryResult.FailedSources).Count -gt 0) {
                             $fallbackSummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
                         }
-                        $wingetDiagnosticOutput = "$fallbackSummary`r`nCLI-Abfrage:`r`n$([string]$cliQueryResult.DiagnosticOutput)"
+                        $wingetDiagnosticOutput = "$fallbackSummary`r`n$moduleQueryDiagnostic`r`nCLI-Fallback:`r`n$([string]$cliQueryResult.DiagnosticOutput)"
                     }
                     catch {
                         $cliDiagnosticProperty = $_.Exception.Data['WinGetDiagnosticOutput']
                         $cliQueryDiagnostic = if ($cliDiagnosticProperty) { [string]$cliDiagnosticProperty } else { [string]$_.Exception.ToString() }
-                        $wingetDiagnosticOutput = "$unsupportedModuleMessage`r`nCLI-Abfrage fehlgeschlagen:`r`n$cliQueryDiagnostic"
-                        throw "WinGet-CLI-Abfrage auf nicht unterstütztem Windows Server $serverOsBuild fehlgeschlagen: $($_.Exception.Message)"
-                    }
-                }
-                else {
-                    try {
-                        $availableOutput = Get-WingetModuleUpdateOutput
-                    }
-                    catch {
-                        $moduleQueryFailure = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-                        $moduleQueryDiagnostic = [string]$_.Exception.ToString()
-                        try {
-                            $cliQueryResult = Invoke-WingetCliUpgradeQuery -Path $wingetPath
-                            $availableOutput = [string]$cliQueryResult.Output
-                            $wingetCliFallback = $true
-                            $fallbackSummary = "Modulabfrage fehlgeschlagen; CLI-Fallback über Quellen $(@($cliQueryResult.Sources) -join ', ')."
-                            if (@($cliQueryResult.FailedSources).Count -gt 0) {
-                                $fallbackSummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
-                            }
-                            $wingetDiagnosticOutput = "$fallbackSummary`r`n$moduleQueryDiagnostic`r`nCLI-Fallback:`r`n$([string]$cliQueryResult.DiagnosticOutput)"
-                        }
-                        catch {
-                            $cliDiagnosticProperty = $_.Exception.Data['WinGetDiagnosticOutput']
-                            $cliQueryDiagnostic = if ($cliDiagnosticProperty) { [string]$cliDiagnosticProperty } else { [string]$_.Exception.ToString() }
-                            $wingetDiagnosticOutput = "Modulabfrage fehlgeschlagen:`r`n$moduleQueryDiagnostic`r`nCLI-Fallback fehlgeschlagen:`r`n$cliQueryDiagnostic"
-                            throw "WinGet-Modulabfrage fehlgeschlagen ($moduleQueryFailure); CLI-Fallback ebenfalls fehlgeschlagen: $($_.Exception.Message)"
-                        }
+                        $wingetDiagnosticOutput = "Modulabfrage fehlgeschlagen:`r`n$moduleQueryDiagnostic`r`nCLI-Fallback fehlgeschlagen:`r`n$cliQueryDiagnostic"
+                        throw "WinGet-Modulabfrage fehlgeschlagen ($moduleQueryFailure); CLI-Fallback ebenfalls fehlgeschlagen: $($_.Exception.Message)"
                     }
                 }
                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
