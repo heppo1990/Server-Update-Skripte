@@ -137,7 +137,7 @@ function Write-HostLog {
     } catch { }
 
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    if (-not $script:QuietMode) { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $fgColor }
+    if (-not $script:QuietMode -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $fgColor }
     if ($script:WriteExecutionLog) {
         Add-Content -LiteralPath $LogFile -Value $Message -Encoding utf8
     }
@@ -527,7 +527,8 @@ if ($CheckOnly) {
         $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$true; AvailableUpdates=$details.Count; UpdateDetails=$details; Error=''; LogFile=$LogFile }
     }
     catch {
-        Write-HostLog -Message "Home-Assistant-Check fehlgeschlagen: $($_.Exception.Message)" -RemoteHost $HAHost -LogFile $LogFile -Level Error
+        Write-HostLog -Message 'Home-Assistant-Check fehlgeschlagen; Details im Laufprotokoll.' -RemoteHost $HAHost -LogFile $LogFile -Level Error
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-Check' -Target $HAHost -ErrorRecord $_
         $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; AvailableUpdates=0; UpdateDetails=@(); Error=$_.Exception.Message; LogFile=$LogFile }
     }
     $checkStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
