@@ -1,13 +1,17 @@
-# Checkliste
+# Offene Checkliste
 
-- [x] Check, Download und Install zählen Windows-, Linux- und Home-Assistant-Ziele gemeinsam; nicht konfigurierte Typen bleiben ausgeblendet.
-- [x] SYSTEM-Update-Suche wiederholt leere Ergebnisse mit einer neuen Aufgabe. Nur erfolgreich abgeschlossene, erneut leere Suchen gelten als „keine Updates“; Aufgabenfehler bleiben Fehler.
-- [x] WinGet-Pakete werden in Check und Install als Tabelle mit Name, ID, installierter und verfügbarer Version sowie Quelle ausgegeben.
-- [x] WinGet-Abfragen bestätigen Quellen- und Paketvereinbarungen automatisch; abgefangene Vereinbarungstexte werden protokolliert und nicht als Paketzeilen gezählt.
-- [x] Chocolatey-Pakete werden in Check und Install als Tabelle mit installierter und verfügbarer Version ausgegeben. Download führt keine Paketmanager-Abfrage aus.
-- [x] WinGet- und Chocolatey-Ergebnisse erscheinen in Check- und Install-Mails als HTML-Tabellen. Download enthält keine Paketmanager-Ergebnisse.
+- [ ] Logging-Standard verbindlich und rückwirkend umsetzen: Alle bereits vorhandenen sowie neuen oder überarbeiteten Funktionen müssen vollständige technische Diagnosen, gewählte Pfade/Entscheidungen, Fallbacks, Wiederholungen, Zeitlimits und Fehlerursachen im Log erfassen. Die Konsole bleibt auf kurze, verständliche Status- und Warnmeldungen beschränkt; zusätzliche technische Konsolenausgaben nur bei ausdrücklich aktiviertem Debug-Modus.
+- [x] WinGet-COM-Fehler vorerst zurückgestellt: Der aktuelle Check findet Pakete und die Konsolenausgabe funktioniert. Bei erneutem Auftreten wieder aufnehmen.
+  - Erkenntnis vom 07.10.2026: Lokaler Check auf `SRVDOM01` ohne Windows-Updates lief erfolgreich. Die WinGet-Prüfung startete mit 5-Minuten-Limit, meldete nach ca. 40 Sekunden einen RPC-Fehler und wiederholte die Prüfung bereits einmal über eine neue Verbindung.
+  - Beide Versuche scheiterten identisch mit `System.Runtime.InteropServices.COMException (0x800706BA)` in `Microsoft.WinGet.Client.Engine.Helpers.ManagementDeploymentFactory.Create`; somit reicht der vorhandene „neue Verbindung“-Retry nicht aus.
+  - Am 07.10.2026 trat bei mehreren Servern zusätzlich `0x80040155` auf. Der zwischenzeitliche `LogOnly`-Callbackfehler wurde mit Commit `629f6e0` behoben; die neuen vollständigen Modul-/CLI-Diagnosen müssen noch ausgewertet werden.
+  - Gewünschtes Ergebnis: Fehlerursache bzw. belastbaren CLI-/Modul-Fallback prüfen; Konsole nur mit kurzer Warnung, vollständige COM-Details ins Log. Keine fehlerhafte Prüfung als „keine Paketupdates“ werten.
 
-## Offene Nacharbeiten
+- [ ] Host-Server: Die erste SYSTEM-Update-Suche liefert keine Ergebniszeilen und erzeugt eine Warnung, obwohl die Wiederholung erfolgreich mit 0 Updates abschließt. Bei erfolgreicher Wiederholung die Erstwarnung nicht als endgültigen Fehler ausgeben; den erfolgreichen Leerstand klar protokollieren.
 
-- [x] Erfolgsmeldung „WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar. Quellenreset wegen des 24-Stunden-Limits übersprungen.“ aus der Konsolenausgabe entfernen; ausschließlich im Log protokollieren.
-- [x] Erfolgsmeldung „WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar. WinGet nach Quellenreset in neuer Sitzung erneut geprüft.“ aus der Konsolenausgabe entfernen; ausschließlich im Log protokollieren.
+- [ ] WinGet-Modul in der zertifikatsbasierten WinRM-Sitzung auf Host-Server untersuchen: `Get-WinGetVersion` findet `winget.exe` nicht über den Alias; `Get-WinGetPackage` scheitert mit `0x80040155` (COM-Schnittstelle nicht registriert). Der CLI-Fallback findet im Check Pakete. Modul-/CLI-Diagnose getrennt halten und festlegen, ob das Modul in diesem Kontext reparierbar ist oder der CLI-Fallback der verlässliche Weg bleibt.
+  - Befund: Host-Server führt den Modulaufruf unter Windows PowerShell 5.1 aus. Die Microsoft-Dokumentation des Moduls empfiehlt PowerShell (nicht Windows PowerShell); als Nächstes den WinGet-Modulaufruf über den PowerShell-7-Remoting-Endpunkt testen. `Get-WinGetVersion` scheitert zusätzlich an der fehlenden Alias-Auflösung, obwohl der CLI-Fallback den tatsächlichen EXE-Pfad findet.
+  - Host-Server läuft auf Windows Server 2019 (Build 17763). Microsoft führt WinGet auf Server 2019/2022 als nicht unterstützt bzw. experimentell; auch der Test am PowerShell-7-Endpunkt scheitert mit `0x80040155`. Für Host-Server den Modulweg nicht weiter reparieren; den funktionierenden CLI-Fallback beibehalten. Daraus nicht auf Server 2025 schließen.
+
+- [ ] WinGet-Modul auf Windows Server 2025 reparieren: `Get-WinGetPackage` scheitert in erhöhter PowerShell mit `0x800706BA` (teils auch `0x80040155`), obwohl WinGet-CLI funktioniert. `Microsoft.WinGet.Client 1.29.280` funktioniert in nicht erhöhter PowerShell; in erhöhter Sitzung scheitert dieselbe Modulabfrage weiterhin. Ursache ermitteln und das Modul selbst wieder funktionsfähig machen; ein pauschales Überspringen oder CLI-Fallback gilt nicht als Lösung.
+- Hinweis: Die WinGet-Modulfehler auf Host-Server und Server 2025 werden als ein gemeinsamer Fehlerkomplex bearbeitet. Ziel ist die Funktionsfähigkeit des Moduls in beiden Umgebungen; pauschales Überspringen oder CLI als Ersatz ist keine Lösung.
