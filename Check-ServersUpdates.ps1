@@ -657,8 +657,15 @@ if ($ServerADList -ne $null) {
 
         # Updates abrufen
         if ($Servername -eq $env:COMPUTERNAME) {
-          Write-ScriptLog "Lokaler Update-Check auf $Servername..."
-          $UpdResult = if ($SucheOnline) { Get-WindowsUpdate -MicrosoftUpdate } else { Get-WindowsUpdate }
+          Write-ScriptLog "Update-Check via Loopback-WinRM auf $Servername..."
+          $loopbackParams = @{
+            ComputerName  = $Servername
+            ErrorAction   = 'Stop'
+            SessionOption = New-PSSessionOption -IncludePortInSPN
+          }
+          $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Check auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
+            Invoke-Command @loopbackParams -ArgumentList $SucheOnline, $modulePaths -ScriptBlock $sbWU_Full
+          }
         } elseif ($useJEA) {
           Write-ScriptLog "Remote Update-Check via JEA auf $Servername..."
           try {
