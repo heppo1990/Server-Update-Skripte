@@ -112,7 +112,7 @@ $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${Script
 # Funktionen
 ############################################################################################################################################################################
 
-function Write-ScriptLog ($Message) { Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) }
+function Write-ScriptLog ($Message, [bool]$LogOnly = $false) { Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) -LogOnly:$LogOnly }
 
 function Clear-WindowsUpdateCache {
   param(
@@ -837,7 +837,7 @@ if ($ServerADList -ne $null) {
 
         # Zusätzlich installierte Anwendungen über die zentrale Paketverwaltung prüfen.
         try {
-          $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message) Write-ScriptLog $message })
+          $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly) Write-ScriptLog $message $logOnly })
         }
         catch {
           # Paketmanager sind optional. Ein separater Remoting-Fehler darf

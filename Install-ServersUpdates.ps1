@@ -124,10 +124,13 @@ function Write-ScriptLog {
     [string]$Message = "",
     
     [Parameter(Mandatory=$false)]
-    [switch]$IsDebug
+    [switch]$IsDebug,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$LogOnly
   )
   
-  Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) -IsDebug:$IsDebug -DebugEnabled ([bool]$DebugMode)
+  Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) -IsDebug:$IsDebug -LogOnly:$LogOnly -DebugEnabled ([bool]$DebugMode)
 }
 
 function Invoke-PackageManagerUpdates {
@@ -142,7 +145,7 @@ function Invoke-PackageManagerUpdates {
     if ($enableWinget) {
       $null = Update-WinGetClientModule -ComputerName $Servername -AuthInfo $AuthInfo -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
     }
-    $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -WriteLog { param($message) Write-ScriptLog $message })
+    $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -WriteLog { param($message, $logOnly) Write-ScriptLog $message -LogOnly:$logOnly })
     # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
     $successfulPackagesByManager = @{}
     $manualPackageCount = 0

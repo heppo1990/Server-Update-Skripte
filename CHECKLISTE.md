@@ -9,5 +9,5 @@
 
 ## Offene Nacharbeiten
 
-- [ ] Erfolgsmeldung „WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar. Quellenreset wegen des 24-Stunden-Limits übersprungen.“ aus der Konsolenausgabe entfernen; ausschließlich im Log protokollieren.
-- [ ] Erfolgsmeldung „WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar. WinGet nach Quellenreset in neuer Sitzung erneut geprüft.“ aus der Konsolenausgabe entfernen; ausschließlich im Log protokollieren.
+- [x] Erfolgsmeldung „WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar. Quellenreset wegen des 24-Stunden-Limits übersprungen.“ aus der Konsolenausgabe entfernen; ausschließlich im Log protokollieren.
+- [x] Erfolgsmeldung „WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar. WinGet nach Quellenreset in neuer Sitzung erneut geprüft.“ aus der Konsolenausgabe entfernen; ausschließlich im Log protokollieren.

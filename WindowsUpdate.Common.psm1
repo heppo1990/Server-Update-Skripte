@@ -2632,7 +2632,9 @@ catch {
         }
         $bootstrapMessageProperty = $packageResult.PSObject.Properties['BootstrapMessage']
         if ($packageResult.Manager -eq 'Winget' -and $bootstrapMessageProperty -and -not [string]::IsNullOrWhiteSpace([string]$bootstrapMessageProperty.Value)) {
-            Write-CommonLog $WriteLog ([string]$bootstrapMessageProperty.Value)
+            $bootstrapMessage = [string]$bootstrapMessageProperty.Value
+            $logOnly = $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des 24-Stunden-Limits übersprungen\.|WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar\.'
+            if ($WriteLog) { & $WriteLog $bootstrapMessage ([bool]$logOnly) }
         }
     }
     return @($packageResults)
@@ -2680,19 +2682,22 @@ function Write-WindowsUpdateLog {
         [Parameter(Mandatory)][string]$RunTimestamp,
         [bool]$WriteLogFile,
         [switch]$IsDebug,
+        [switch]$LogOnly,
         [bool]$DebugEnabled
     )
 
     if ($IsDebug -and -not $DebugEnabled) { return }
     $prefix = if ($IsDebug) { '[DEBUG] ' } else { '' }
-    if ($Host.Name -eq 'ConsoleHost') {
-        try {
-            if (-not [Console]::IsOutputRedirected) {
-                $consoleColor = if ($IsDebug) { 'Cyan' } else { Get-WindowsUpdateConsoleColor -Message $Message }
-            } else { $consoleColor = $null }
-        } catch { $consoleColor = $null }
-    } else { $consoleColor = $null }
-    Write-WindowsUpdateConsoleLine -Message "$prefix$Message" -ForegroundColor $consoleColor -IsDebug:$IsDebug
+    if (-not $LogOnly) {
+        if ($Host.Name -eq 'ConsoleHost') {
+            try {
+                if (-not [Console]::IsOutputRedirected) {
+                    $consoleColor = if ($IsDebug) { 'Cyan' } else { Get-WindowsUpdateConsoleColor -Message $Message }
+                } else { $consoleColor = $null }
+            } catch { $consoleColor = $null }
+        } else { $consoleColor = $null }
+        Write-WindowsUpdateConsoleLine -Message "$prefix$Message" -ForegroundColor $consoleColor -IsDebug:$IsDebug
+    }
     if (-not $WriteLogFile) { return }
 
     $logDirectory = Split-Path -Path $LogFile -Parent
