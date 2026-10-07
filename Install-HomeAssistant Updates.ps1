@@ -425,8 +425,11 @@ function Invoke-HA {
     # Wirklicher Fehler
     # ---------------------------
     if ($exit -ne 0) {
-        Write-HostLog -Message ("Fehler bei HA-Befehl '{0}' (ExitCode {1}): {2}" -f $Command, $exit, $outText) `
+        Write-HostLog -Message ("Fehler bei HA-Befehl '{0}' (ExitCode {1}); Details im Laufprotokoll." -f $Command, $exit) `
             -RemoteHost $RemoteHost -LogFile $LogFile -Level Error
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } `
+            -Operation 'HomeAssistant-SSH-Befehl' -Target $RemoteHost -DiagnosticText $outText `
+            -Context @("Command=$Command", "ExitCode=$exit")
     }
 
     return $stdout
@@ -449,10 +452,11 @@ function Invoke-HAJson {
     try {
         return $joined | ConvertFrom-Json
     } catch {
-        Write-HostLog -Message ("Fehler beim Parsen der JSON-Antwort auf '{0}': {1}" -f $Command, $_.Exception.Message) `
+        Write-HostLog -Message ("Fehler beim Parsen der JSON-Antwort auf '{0}'; Details im Laufprotokoll." -f $Command) `
             -RemoteHost $RemoteHost -LogFile $LogFile -Level Error
-        Write-HostLog -Message ("Antwort war: {0}" -f $joined) `
-            -RemoteHost $RemoteHost -LogFile $LogFile -Level Error
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } `
+            -Operation 'HomeAssistant-JSON-Parsing' -Target $RemoteHost -ErrorRecord $_ `
+            -Context @("Command=$Command", "ResponseLength=$($joined.Length)", 'Response body omitted to avoid logging secrets')
         throw
     }
 }
@@ -461,16 +465,23 @@ function Wait-HAAfterReboot {
     Write-HostLog -Message "Warte maximal $script:HARebootWaitSeconds Sekunden auf Home Assistant nach dem Neustart ..." -RemoteHost $HAHost -LogFile $LogFile -Level Info
     Start-Sleep -Seconds 15
     $deadline = (Get-Date).AddSeconds($script:HARebootWaitSeconds)
+    $attempt = 0
+    $lastExitCode = $null
     do {
+        $attempt++
         $arguments = @(Get-WindowsUpdateSshArguments -KeyPath $KeyPath -Port $Port -BatchMode -AcceptNewHostKey)
         $arguments += ("{0}@{1}" -f $User, $HAHost), 'ha core info --raw-json'
         $response = & $SSHPath @arguments 2>$null
+        $lastExitCode = $LASTEXITCODE
         if ($LASTEXITCODE -eq 0 -and (($response -join [Environment]::NewLine) -match '"version"')) {
             Write-HostLog -Message 'Home Assistant ist nach dem Neustart wieder erreichbar.' -RemoteHost $HAHost -LogFile $LogFile -Level Success
             return
         }
         Start-Sleep -Seconds 10
     } while ((Get-Date) -lt $deadline)
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } `
+        -Operation 'HomeAssistant-Wiedererreichbarkeit nach Neustart' -Target $HAHost `
+        -Context @("TimeoutSeconds=$script:HARebootWaitSeconds", "Attempts=$attempt", "LastSSHExitCode=$lastExitCode")
     throw "Home Assistant war nach $script:HARebootWaitSeconds Sekunden noch nicht wieder bereit."
 }
 
@@ -529,7 +540,7 @@ if ($CheckOnly) {
     catch {
         Write-HostLog -Message 'Home-Assistant-Check fehlgeschlagen; Details im Laufprotokoll.' -RemoteHost $HAHost -LogFile $LogFile -Level Error
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-Check' -Target $HAHost -ErrorRecord $_
-        $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; AvailableUpdates=0; UpdateDetails=@(); Error=$_.Exception.Message; LogFile=$LogFile }
+        $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; AvailableUpdates=0; UpdateDetails=@(); Error='Details im Laufprotokoll'; LogFile=$LogFile }
     }
     $checkStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
     if (-not $script:QuietMode) { Write-Host "Home-Assistant-Check: $($checkStats.AvailableUpdates) Update(s) verfügbar." -ForegroundColor Cyan }
@@ -602,7 +613,8 @@ try {
         $Script:UpdateStats.CoreVersionOld = $coreInfo.data.version
     }
 } catch {
-    Write-HostLog -Message "Konnte Core-Version nicht ermitteln" -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+    Write-HostLog -Message "Konnte Core-Version nicht ermitteln; Details im Laufprotokoll." -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-Core-Version vor Update' -Target $HAHost -ErrorRecord $_
 }
 
 try {
@@ -611,7 +623,8 @@ try {
         $Script:UpdateStats.SupervisorVersionOld = $supervisorInfo.data.version
     }
 } catch {
-    Write-HostLog -Message "Konnte Supervisor-Version nicht ermitteln" -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+    Write-HostLog -Message "Konnte Supervisor-Version nicht ermitteln; Details im Laufprotokoll." -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-Supervisor-Version vor Update' -Target $HAHost -ErrorRecord $_
 }
 
 try {
@@ -620,7 +633,8 @@ try {
         $Script:UpdateStats.OSVersionOld = $osInfo.data.version
     }
 } catch {
-    Write-HostLog -Message "Konnte OS-Version nicht ermitteln" -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+    Write-HostLog -Message "Konnte OS-Version nicht ermitteln; Details im Laufprotokoll." -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-OS-Version vor Update' -Target $HAHost -ErrorRecord $_
 }
 
 Write-HostLog -Message "=== Update Home Assistant Core ===" -RemoteHost $HAHost -LogFile $LogFile -Level Info
@@ -634,7 +648,9 @@ if ($Script:UpdateStats.CoreUpdated) {
         if ($coreInfoNew.data.version) {
             $Script:UpdateStats.CoreVersionNew = $coreInfoNew.data.version
         }
-    } catch { }
+    } catch {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-Core-Version nach Update' -Target $HAHost -ErrorRecord $_
+    }
 }
 
 Write-HostLog -Message "=== Update Home Assistant Supervisor ===" -RemoteHost $HAHost -LogFile $LogFile -Level Info
@@ -648,7 +664,9 @@ if ($Script:UpdateStats.SupervisorUpdated) {
         if ($supervisorInfoNew.data.version) {
             $Script:UpdateStats.SupervisorVersionNew = $supervisorInfoNew.data.version
         }
-    } catch { }
+    } catch {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-Supervisor-Version nach Update' -Target $HAHost -ErrorRecord $_
+    }
 }
 
 Write-HostLog -Message "=== Update Home Assistant OS ===" -RemoteHost $HAHost -LogFile $LogFile -Level Info
