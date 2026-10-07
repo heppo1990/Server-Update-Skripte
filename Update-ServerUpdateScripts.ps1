@@ -563,20 +563,19 @@ function Invoke-ServerUpdateScripts {
     $branch = 'main'
     $cacheDirectory = Join-Path $env:ProgramData 'ServerUpdateSkripte'
     $cachePath = Join-Path $cacheDirectory 'UpdateCache.json'
-    $latestCommit = $env:SERVER_UPDATE_LATEST_COMMIT
+    # Immer frisch abfragen: ein in dieser PowerShell-Sitzung gesetzter
+    # Prozess-Environmentwert kann nach einem GitHub-Push veraltet sein.
+    $latestCommit = ''
     $restartRequired = $false
 
     try {
-        if ($latestCommit -notmatch '^[0-9a-f]{40}$') {
-            $feedUrl = "https://github.com/$repoOwner/$repoName/commits/$branch.atom"
-            $feed = Invoke-ServerUpdateGitHubRequest -Description 'Commitfeed' -Request {
-                Invoke-WebRequest -Uri $feedUrl -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
-            }
-            $commitMatch = [regex]::Match([string]$feed.Content, '::Commit/([0-9a-f]{40})')
-            if (-not $commitMatch.Success) { throw 'Die aktuelle Commit-ID konnte nicht aus dem GitHub-Feed gelesen werden.' }
-            $latestCommit = $commitMatch.Groups[1].Value
-            $env:SERVER_UPDATE_LATEST_COMMIT = $latestCommit
+        $feedUrl = "https://github.com/$repoOwner/$repoName/commits/$branch.atom"
+        $feed = Invoke-ServerUpdateGitHubRequest -Description 'Commitfeed' -Request {
+            Invoke-WebRequest -Uri $feedUrl -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
         }
+        $commitMatch = [regex]::Match([string]$feed.Content, '::Commit/([0-9a-f]{40})')
+        if (-not $commitMatch.Success) { throw 'Die aktuelle Commit-ID konnte nicht aus dem GitHub-Feed gelesen werden.' }
+        $latestCommit = $commitMatch.Groups[1].Value
 
         $manifestCommit = ''
         $repositoryBlobs = @{}
