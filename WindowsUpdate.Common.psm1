@@ -2077,6 +2077,7 @@ catch {
             $wingetPath = Resolve-WingetExecutable
             $wingetBootstrapMessage = ''
             $wingetPreparationSucceeded = $true
+            $wingetReconnectRequired = $false
             $serverCaption = ''
             try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
             if ($ExecutionMode -eq 'Check' -and $wingetPath -and $serverCaption -match 'Windows Server') {
@@ -2085,6 +2086,7 @@ catch {
                     if ($appInstallerRegistration.RegistrationChanged) {
                         $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) für den aktuellen Benutzer registriert."
                         $wingetPath = Resolve-WingetExecutable
+                        $wingetReconnectRequired = $true
                     }
                 }
                 catch {
@@ -2112,6 +2114,7 @@ catch {
                         $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
                         if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }
                         $wingetBootstrapMessage += " Reparatur erfolgreich; $($wingetHealth.Output)"
+                        $wingetReconnectRequired = $true
                     }
                     catch {
                         $wingetPreparationSucceeded = $false
@@ -2120,12 +2123,14 @@ catch {
                 }
             }
 
-            if (-not $wingetPreparationSucceeded) {
-                $retryFreshConnection = $wingetBootstrapMessage -match '(?i)(0x800706ba|-2147023174|Failed to create instance|RPC server is unavailable|RPC-Server nicht verfügbar)'
+            if (-not $wingetPreparationSucceeded -or $wingetReconnectRequired) {
+                $retryFreshConnection = $wingetReconnectRequired -or
+                    $wingetBootstrapMessage -match '(?i)(0x800706ba|-2147023174|Failed to create instance|RPC server is unavailable|RPC-Server nicht verfügbar)'
+                $retryReason = if ($wingetReconnectRequired) { 'WinGet nach Reparatur oder App-Installer-Registrierung' } else { '' }
                 $result += [PSCustomObject]@{
                     Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
                     Packages=@(); AvailableOutput=''; ActionOutput=$wingetBootstrapMessage; BootstrapMessage=$wingetBootstrapMessage
-                    RetryFreshConnection=$retryFreshConnection
+                    RetryFreshConnection=$retryFreshConnection; RetryReason=$retryReason
                 }
             }
             else {
@@ -2409,7 +2414,12 @@ catch {
             }
             elseif ($connectionProperty -and [bool]$connectionProperty.Value) {
                 $retryRequired = $true
-                $retryReason = 'WinGet-RPC-Fehler; frische Verbindung erforderlich'
+                $reasonProperty = $firstWingetResult.PSObject.Properties['RetryReason']
+                $retryReason = if ($reasonProperty -and -not [string]::IsNullOrWhiteSpace([string]$reasonProperty.Value)) {
+                    [string]$reasonProperty.Value
+                } else {
+                    'WinGet-RPC-Fehler; frische Verbindung erforderlich'
+                }
                 $firstFailure = [string]$firstWingetResult.ActionOutput
             }
             else { $packageResults += $wingetResults }
