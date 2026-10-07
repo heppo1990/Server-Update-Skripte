@@ -282,7 +282,8 @@ function Invoke-WindowsUpdates {
         $null = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Verbindungstest auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
         $useJEA = $true
       } catch {
-        Write-ScriptLog "INFO: WindowsUpdateAdm nicht verfügbar auf ${Servername}, nutze Standard-Remoting" -IsDebug
+        Write-ScriptLog "INFO: WindowsUpdateAdm nicht verfügbar auf ${Servername}; nutze Standard-Remoting. Details im Log." -IsDebug
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Standard-Remoting')
       }
       }
       
@@ -1979,7 +1980,10 @@ foreach ($pendingLinuxReboot in $script:PendingLinuxPhysicalReboots) {
     if ($LASTEXITCODE -ne 0) { throw "SSH lieferte Exit-Code $LASTEXITCODE." }
     Write-ScriptLog "Physischer Linux-Neustart auf $($pendingLinuxReboot.Host) für $($plannedAt.ToString('dd.MM.yyyy HH:mm')) eingeplant."
   }
-  catch { Write-ScriptLog "Physischer Linux-Neustart auf $($pendingLinuxReboot.Host) konnte nicht eingeplant werden: $($_.Exception.Message)" }
+  catch {
+    Write-ScriptLog "WARNUNG: Physischer Linux-Neustart auf $($pendingLinuxReboot.Host) konnte nicht eingeplant werden; Details im Log."
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Linux-Neustart planen' -Target ([string]$pendingLinuxReboot.Host) -ErrorRecord $_
+  }
 }
 foreach ($pendingHAReboot in $script:PendingHAPhysicalReboots) {
   try {
@@ -1994,7 +1998,10 @@ foreach ($pendingHAReboot in $script:PendingHAPhysicalReboots) {
     if ($LASTEXITCODE -ne 0) { throw "SSH lieferte Exit-Code $LASTEXITCODE." }
     Write-ScriptLog "Physischer Home-Assistant-Neustart auf $($pendingHAReboot.Host) für $($plannedAt.ToString('dd.MM.yyyy HH:mm')) eingeplant."
   }
-  catch { Write-ScriptLog "Physischer Home-Assistant-Neustart auf $($pendingHAReboot.Host) konnte nicht eingeplant werden: $($_.Exception.Message)" }
+  catch {
+    Write-ScriptLog "WARNUNG: Physischer Home-Assistant-Neustart auf $($pendingHAReboot.Host) konnte nicht eingeplant werden; Details im Log."
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Home-Assistant-Neustart planen' -Target ([string]$pendingHAReboot.Host) -ErrorRecord $_
+  }
 }
 
 foreach ($pendingReboot in $script:PendingPhysicalReboots) {
