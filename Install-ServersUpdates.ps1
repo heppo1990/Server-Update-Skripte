@@ -1608,14 +1608,21 @@ $state = [ordered]@{
 [IO.File]::WriteAllText([string]$configuration.StatePath, (ConvertTo-Json -InputObject $state -Depth 5), [Text.UTF8Encoding]::new($false))
 if ($exitCode -eq 0) { Write-HandoffLog "WinGet meldet PowerShell-Update erfolgreich; starte den Installationslauf in PowerShell 7 neu." 'SUCCESS' }
 else { Write-HandoffLog 'Der Installationslauf wird in PowerShell 7 fortgesetzt; das PowerShell-Paket wird nicht erneut installiert.' 'WARNING' }
-$resumeProcess = Start-Process -FilePath ([string]$configuration.PwshPath) -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',[string]$configuration.ContinuationEncoded) -PassThru -Wait -NoNewWindow
-Write-HandoffLog "PowerShell-7-Fortsetzung beendet (Prozess-Exitcode $($resumeProcess.ExitCode))." 'INFO'
-exit $resumeProcess.ExitCode
+try {
+    Write-HandoffLog "Starte die Installationsfortsetzung sichtbar in PowerShell 7: $($configuration.PwshPath)"
+    $resumeProcess = Start-Process -FilePath ([string]$configuration.PwshPath) -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',[string]$configuration.ContinuationEncoded) -PassThru -Wait -WindowStyle Normal
+    Write-HandoffLog "PowerShell-7-Fortsetzung beendet (Prozess-Exitcode $($resumeProcess.ExitCode))." 'INFO'
+    exit $resumeProcess.ExitCode
+} catch {
+    $resumeError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+    Write-HandoffLog "FEHLER: Sichtbare PowerShell-7-Fortsetzung konnte nicht gestartet oder überwacht werden: $resumeError" 'ERROR'
+    exit 31
+}
 '@.Replace('__CONFIGURATION__',$workerConfigurationBase64)
         $workerEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($workerScript))
-        Write-ScriptLog 'Starte den PS5.1-Übergabeprozess. Der bisherige Installationslauf wird erst nach der PS7-Fortsetzung beendet.'
+        Write-ScriptLog 'Starte den PS5.1-Übergabeprozess unabhängig von der aktuellen Konsole. Nach dem WinGet-Update öffnet er die Installationsfortsetzung sichtbar in PowerShell 7.'
         $managementPowerShellHandoffStarted = $true
-        $workerProcess = Start-Process -FilePath $windowsPowerShell51 -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$workerEncoded) -PassThru -Wait -NoNewWindow
+        $workerProcess = Start-Process -FilePath $windowsPowerShell51 -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$workerEncoded) -PassThru -Wait -WindowStyle Hidden
         if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { throw "PS5.1-Übergabeprozess lieferte keinen Fortsetzungsstatus (Exitcode $($workerProcess.ExitCode))." }
         if ($workerProcess.ExitCode -ne 0) {
           Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
