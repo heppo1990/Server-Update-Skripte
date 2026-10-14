@@ -1964,6 +1964,7 @@ function Invoke-WindowsUpdatePackageManagers {
         [ValidateSet('Check', 'Install')][string]$Mode = 'Check',
         [bool]$EnableWinget = $true,
         [bool]$EnableChocolatey = $true,
+        [string[]]$ExcludeWinGetIds = @(),
         [scriptblock]$WriteLog
     )
 
@@ -1971,7 +1972,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false)
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '')
 
         # Winget ist eine benutzerbezogene App-Installer-Anwendung. Im
         # LocalSystem-Kontext ist es nicht zuverlässig verfügbar und darf dort
@@ -2787,6 +2788,26 @@ catch {
                 # Auswertbare Pakettreffer behalten, auch wenn eine andere
                 # Quelle im selben CLI-Lauf einen Fehler zurückliefert.
                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
+                $excludedIdList = @($ExcludedWinGetIds -split ',' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($ExecutionMode -eq 'Install' -and $excludedIdList.Count -gt 0 -and $packageLines.Count -gt 0) {
+                    $eligiblePackageLines = @()
+                    foreach ($candidatePackageLine in $packageLines) {
+                        $candidateMatch = [regex]::Match(
+                            [string]$candidatePackageLine,
+                            '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)\s+(?<Source>[^\s]+)\s*$',
+                            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+                        )
+                        if ($candidateMatch.Success -and [string]$candidateMatch.Groups['Id'].Value -in $excludedIdList) {
+                            $result += [PSCustomObject]@{
+                                Manager='Winget'; Available=$true; Success=$true; Skipped=$true
+                                SkipReason="Paket '$($candidateMatch.Groups['Id'].Value)' wurde bereits im Verwaltungsserver-Vorabpfad behandelt und wird in diesem Installationslauf nicht erneut gestartet."
+                                ExitCode=0; Packages=@($candidatePackageLine); AvailableOutput=$availableOutput; ActionOutput=''
+                            }
+                        }
+                        else { $eligiblePackageLines += $candidatePackageLine }
+                    }
+                    $packageLines = @($eligiblePackageLines)
+                }
                 if ($sourceFailureLines.Count -gt 0) {
                     $sourceFailureText = @($sourceFailureLines | ForEach-Object { Get-WingetCompactOutput -Text ([string]$_) }) -join ' '
                     if ($ExecutionMode -eq 'Install' -and $packageLines.Count -gt 0) {
@@ -3052,7 +3073,7 @@ catch {
                 ComputerName = $ComputerName
                 AuthInfo = $AuthInfo
                 ScriptBlock = $packageScript
-                ArgumentList = @($Mode, $true, $false, $false)
+                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','))
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
             }
@@ -3107,7 +3128,7 @@ catch {
                     ComputerName = $ComputerName
                     AuthInfo = $AuthInfo
                     ScriptBlock = $packageScript
-                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed)
+                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','))
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
                 }
