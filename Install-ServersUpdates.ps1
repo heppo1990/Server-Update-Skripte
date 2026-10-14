@@ -1440,10 +1440,16 @@ if ($ManagementPowerShellResume) {
   }
   $script:ManagementPowerShellUpdateExcludeId = @('Microsoft.PowerShell')
   if ([bool]$script:ManagementPowerShellUpdateState.Success) {
-    $targetPowerShellVersion = [version]$script:ManagementPowerShellUpdateState.AvailableVersion
-    $currentPowerShellVersion = [version]::new($PSVersionTable.PSVersion.Major, $PSVersionTable.PSVersion.Minor, [Math]::Max(0, $PSVersionTable.PSVersion.Build))
+    try {
+      $targetPowerShellVersion = [version]::Parse([string]$script:ManagementPowerShellUpdateState.AvailableVersion)
+      $currentPowerShellVersion = [version]::Parse([string]$PSVersionTable.PSVersion)
+    }
+    catch {
+      throw "PowerShell-Versionen für die Fortsetzungsprüfung sind ungültig (aktuell='$($PSVersionTable.PSVersion)', erwartet='$($script:ManagementPowerShellUpdateState.AvailableVersion)')."
+    }
+    $currentComparableVersion = [version]::new($currentPowerShellVersion.Major, $currentPowerShellVersion.Minor, [Math]::Max(0, $currentPowerShellVersion.Build))
     $targetComparableVersion = [version]::new($targetPowerShellVersion.Major, $targetPowerShellVersion.Minor, [Math]::Max(0, $targetPowerShellVersion.Build))
-    if ($currentPowerShellVersion -lt $targetComparableVersion) {
+    if ($currentComparableVersion -lt $targetComparableVersion) {
       Write-ScriptLog "FEHLER: Verwaltungsserver wurde mit PowerShell $($PSVersionTable.PSVersion) statt der erwarteten Version $($script:ManagementPowerShellUpdateState.AvailableVersion) fortgesetzt."
       throw 'Das PowerShell-7-Update wurde nicht wirksam; der Lauf wird nicht mit der alten Version fortgesetzt.'
     }
