@@ -2601,21 +2601,50 @@ catch {
         elseif (Test-Path -LiteralPath $chocoPath) {
             try {
                 $availableOutput = & $chocoPath outdated --limit-output 2>&1 | Out-String
+                $chocoQueryExitCode = $LASTEXITCODE
+                $chocoSourceFailurePattern = '(?i)(Unable to connect to source|Failed to fetch results from .*feed|Der Antwortstatuscode gibt keinen Erfolg an|Response status code does not indicate success|Fehler beim Abrufen der Ergebnisse.*Quelle|Quelle.*nicht erreichbar)'
+                $chocoSourceFailures = @($availableOutput -split "`r?`n" | Where-Object { $_ -match $chocoSourceFailurePattern })
                 $packages = @($availableOutput -split "`r?`n" | Where-Object { $_ -match '^[^|]+\|[^|]+\|[^|]+' } | ForEach-Object {
                     $fields = @($_ -split '\|', 4)
-                    [pscustomobject]@{
-                        Name = ([string]$fields[0]).Trim(); Id = ([string]$fields[0]).Trim()
-                        InstalledVersion = ([string]$fields[1]).Trim(); AvailableVersion = ([string]$fields[2]).Trim()
-                        Source = 'chocolatey'
+                    if ($fields.Count -ge 3) {
+                        $installedVersion = ([string]$fields[1]).Trim()
+                        $availableVersion = ([string]$fields[2]).Trim()
+                        # Chocolatey kann bei einem nicht erreichbaren Feed trotzdem
+                        # eine Zeile mit der installierten Version in beiden
+                        # Versionsfeldern und Exitcode 0 ausgeben. Das ist kein Update.
+                        if (-not [string]::Equals($installedVersion, $availableVersion, [StringComparison]::OrdinalIgnoreCase)) {
+                            [pscustomobject]@{
+                                Name = ([string]$fields[0]).Trim(); Id = ([string]$fields[0]).Trim()
+                                InstalledVersion = $installedVersion; AvailableVersion = $availableVersion
+                                Source = 'chocolatey'
+                            }
+                        }
                     }
                 } | Sort-Object Id -Unique)
-                $actionOutput = ''
-                $exitCode = 0
+                $chocoQuerySucceeded = $chocoQueryExitCode -in @(0, 2) -and $chocoSourceFailures.Count -eq 0
+                $actionOutput = if ($chocoQuerySucceeded) { '' } else { 'Chocolatey-Abfrage unvollständig; Paketupdates sind nicht verlässlich bestimmbar. Details im Log.' }
+                $exitCode = $chocoQueryExitCode
                 if ($ExecutionMode -eq 'Install' -and $packages.Count -gt 0) {
-                    $actionOutput = & $chocoPath upgrade all -y 2>&1 | Out-String
-                    $exitCode = $LASTEXITCODE
+                    $upgradeOutput = & $chocoPath upgrade all -y 2>&1 | Out-String
+                    $upgradeExitCode = $LASTEXITCODE
+                    if (-not [string]::IsNullOrWhiteSpace($upgradeOutput)) {
+                        $actionOutput = (@($actionOutput, $upgradeOutput.Trim()) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`r`n"
+                    }
+                    $exitCode = $upgradeExitCode
                 }
-                $result += [PSCustomObject]@{ Manager='Chocolatey'; Available=$true; Success=($exitCode -eq 0); Skipped=$false; SkipReason=''; ExitCode=$exitCode; Packages=$packages; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
+                $chocoSuccess = $chocoQuerySucceeded -and ($ExecutionMode -ne 'Install' -or $exitCode -eq 0)
+                $chocoDiagnostic = if ($chocoSourceFailures.Count -gt 0) {
+                    (@($chocoSourceFailures | ForEach-Object {
+                        ([string]$_ -replace '(?i)(https?://)[^/@\s]+:[^/@\s]+@', '$1<redacted>@' -replace '(?i)([?&](?:password|passwd|token|apikey|api_key|key)=)[^&\s''"]+', '$1<redacted>')
+                    }) -join [Environment]::NewLine)
+                } elseif (-not $chocoQuerySucceeded) {
+                    ([string]$availableOutput -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 10) -join [Environment]::NewLine
+                } else { '' }
+                $chocoResult = [PSCustomObject]@{ Manager='Chocolatey'; Available=$true; Success=$chocoSuccess; Skipped=$false; SkipReason=''; ExitCode=$exitCode; Packages=$packages; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
+                if (-not [string]::IsNullOrWhiteSpace($chocoDiagnostic)) {
+                    Add-Member -InputObject $chocoResult -NotePropertyName DiagnosticOutput -NotePropertyValue $chocoDiagnostic
+                }
+                $result += $chocoResult
             }
             catch {
                 $result += [PSCustomObject]@{ Manager='Chocolatey'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='Chocolatey-Abfrage fehlgeschlagen; Details im Log.'; DiagnosticOutput=$_.Exception.ToString() }
