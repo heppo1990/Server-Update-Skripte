@@ -118,6 +118,33 @@ $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${Script
 
 function Write-ScriptLog ($Message, [bool]$LogOnly = $false) { Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) -LogOnly:$LogOnly }
 
+function Add-CheckRedistributionNotice {
+  param(
+    [Parameter(Mandatory)][string]$Target,
+    [Parameter(Mandatory)][string]$Reason
+  )
+
+  $message = "HANDLUNGSBEDARF: $Target – $Reason WindowsUpdateAdm-Verteilung und WinRM-Verbindung prüfen."
+  Write-ScriptLog $message
+  $safeTarget = [System.Net.WebUtility]::HtmlEncode($Target)
+  $safeReason = [System.Net.WebUtility]::HtmlEncode($Reason)
+  $script:RepBody += "<div class='warning-box'><strong>WindowsUpdateAdm-Verteilung auf $safeTarget prüfen.</strong><br>$safeReason Nach Zertifikatswechsel oder fehlgeschlagener Zertifikatsanmeldung die Verteilung erneut ausführen und die Verbindung testen.</div>"
+}
+
+function Get-CheckClientCertificate {
+  $thumbprint = [string]$UpdateSettings.ClientCertThumbprint
+  if (-not [string]::IsNullOrWhiteSpace($thumbprint)) {
+    return Get-ChildItem -Path 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
+      Where-Object { $_.Thumbprint -eq $thumbprint } |
+      Select-Object -First 1
+  }
+
+  return Get-ChildItem -Path 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Subject -eq "CN=WinRM-UpdateClient-$env:COMPUTERNAME" } |
+    Sort-Object NotAfter -Descending |
+    Select-Object -First 1
+}
+
 function Clear-WindowsUpdateCache {
   param(
     [string]$Servername,
@@ -650,6 +677,13 @@ if ($ServerADList -ne $null) {
         $remoting = Initialize-WindowsUpdateRemoting -UpdateSettings $UpdateSettings -TargetComputer $Servername -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
         $svcCredential = $remoting.AuthInfo
 
+        if ($remoting.IsNonAdTarget) {
+          $clientCertificate = Get-CheckClientCertificate
+          if ($clientCertificate -and $clientCertificate.NotAfter -le (Get-Date)) {
+            Add-CheckRedistributionNotice -Target $Servername -Reason "Das WinRM-Client-Zertifikat ist am $($clientCertificate.NotAfter.ToString('dd.MM.yyyy')) abgelaufen."
+          }
+        }
+
         if ($Servername -ne $env:COMPUTERNAME) {
           if (-not $script:IsLocalSystemRun) {
             $null = Update-PSWindowsUpdateModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
@@ -837,7 +871,11 @@ if ($ServerADList -ne $null) {
           }
 
           if (-not $success) {
-            if ($svcCredential) { throw "Zertifikats-Update-Check auf $Servername fehlgeschlagen." }
+            if ($remoting.IsNonAdTarget) {
+              $reason = if ($svcCredential) { 'Die WinRM-Zertifikatsanmeldung ist fehlgeschlagen.' } else { 'Es ist kein verwendbares WinRM-Client-Zertifikat verfügbar und die Alternativverbindungen sind fehlgeschlagen.' }
+              Add-CheckRedistributionNotice -Target $Servername -Reason $reason
+              throw "Zertifikats-Update-Check auf $Servername fehlgeschlagen. WindowsUpdateAdm-Verteilung und Zertifikatszuordnung prüfen."
+            }
             throw "Alle Authentifizierungsmethoden fehlgeschlagen. Siehe Log für Details."
           }
         }
