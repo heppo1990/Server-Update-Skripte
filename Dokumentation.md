@@ -1,4 +1,4 @@
- Server Updates
+Server Updates
 
 Diese Sammlung verwaltet Windows-, Linux- und Home-Assistant-Updates zentral. Alle Skripte erwarten, dass sie gemeinsam in einem Verzeichnis liegen. Pfade werden jeweils relativ zum Skriptverzeichnis bestimmt.
 
@@ -72,75 +72,75 @@ Die folgenden Tabellen beschreiben alle Felder aus `default_settings.json`. Opti
 
 ### `UpdateSettings`
 
-| Feld | Wirkung |
-|---|---|
-| `SucheOnline` | Bestimmt, ob PSWindowsUpdate auch die Quelle Microsoft Update statt nur der konfigurierten Windows-Update-Quelle durchsucht. |
-| `WriteReport` | Aktiviert oder deaktiviert das Speichern des HTML-Berichts. Ein Mailversand wird separat durch `MailSettings.<Skript>.SendMail` gesteuert. |
-| `KeepReportFiles` | Maximale Anzahl gespeicherter HTML-Berichte je Skript; ältere Berichte werden entfernt. |
-| `WriteLogFile` | Aktiviert oder deaktiviert lokale Logdateien, einschließlich der Verteilung. |
-| `KeepLogFiles` | Maximale Anzahl gespeicherter Logdateien je Skript, einschließlich der Verteilung; ältere Logs werden entfernt. |
-| `AutoUpdateScripts` | Steuert automatische Skriptupdates beim Start der übrigen Skripte. Standard `true`; bei `false` wird der lokale Stand verwendet. `Update-ServerUpdateScripts.ps1` kann weiterhin direkt zur manuellen Aktualisierung ausgeführt werden. |
-| `DetectNowWaitSeconds` | Wartezeit nach dem Anstoßen einer Windows-Update-Erkennung, bevor das Skript mit der Suche fortfährt. |
-| `ClearUpdateCacheBeforeCheck` | Bei `true` werden vor dem Check Download- und DataStore-Cache bereinigt und eine neue Erkennung angestoßen; `false` überspringt diese Bereinigung. |
-| `EnableWingetUpdates` | Bei `true` werden Winget-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Winget. |
-| `EnableChocolateyUpdates` | Bei `true` werden Chocolatey-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Chocolatey. Chocolatey wird dadurch nicht installiert. |
-| `TargetComputers` | AD-Auswahl: `Server` verarbeitet Windows-Server, `All` alle passenden Windows-Computer. Zusätzliche Geräte werden über die nächsten beiden Listen angegeben. |
-| `AdditionalComputers` | Liste zusätzlicher Computer, die unabhängig von der AD-Auswahl verarbeitet werden. |
-| `HypervisorComputers` | Liste der Hypervisoren außerhalb der AD-Auswahl; sie werden als eigene Zielgruppe für Remoting und Neustartplanung behandelt. |
-| `ClientCertThumbprint` | Fingerabdruck des Client-Zertifikats für zertifikatsbasiertes Remoting zu Nicht-AD-Zielen. Das Verteilungs-/Zertifikat-Setup kann diesen Wert synchronisieren. |
-| `DeferredUpdateCategories` | Kategorien, die beim regulären Update-Lauf ausgelassen und für die Nachinstallation vorgemerkt werden. Auswahl wird später gemeinsam abgearbeitet. Siehe [Kategorien für zurückgestellte Updates](#kategorien-für-zurückgestellte-updates). |
-| `DeferredUpdateKBs` | Einzelne KB-Nummern, die ausgelassen und für die Nachinstallation vorgemerkt werden, zum Beispiel `KB5122871`. |
-| `InstallDeferredUpdates` | Bei `true` richtet das Installationsskript eine Nachinstallationsaufgabe ein, wenn zurückgestellte Updates vorhanden sind; bei `false` bleiben diese Updates ausgelassen. |
-| `PhysicalRebootTime` | Beginn des Wartungsfensters und geplante Neustartzeit für physische Systeme im Format `HH:mm`. Leer bedeutet, dass kein zeitgesteuerter Neustart geplant wird. |
-| `PhysicalRebootWindowEndTime` | Ende des Wartungsfensters für physische Systeme. Neustarts dürfen spätestens zu dieser Zeit beginnen; leer lässt das Fensterende offen. |
-| `VMRebootStartTime` | Beginn des VM-Wartungsfensters und geplante Neustartzeit der ersten VM im Format `HH:mm`. |
-| `VMRebootWindowEndTime` | Ende des VM-Wartungsfensters. Neustarts dürfen spätestens zu dieser Zeit beginnen; leer lässt das Fensterende offen. |
-| `VMRebootImmediately` | Bei `true` werden VM-Neustarts zeitnah eingeplant, unter Beachtung der Staffelung und des Wartungsfensters. Bei `false` gilt der konfigurierte Start des Wartungsfensters. |
-| `VMRebootIntervalMinutes` | Abstand zwischen geplanten Neustarts von VMs. `0` erlaubt gleichzeitige Neustarts; ein positiver Wert staffelt die VMs. Die Staffelung wird bei der Planung physischer Neustarts berücksichtigt. |
+| Feld                          | Wirkung                                                                                                                                                                                                                                               |
+|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `SucheOnline`                 | Bestimmt, ob PSWindowsUpdate auch die Quelle Microsoft Update statt nur der konfigurierten Windows-Update-Quelle durchsucht.                                                                                                                          |
+| `WriteReport`                 | Aktiviert oder deaktiviert das Speichern des HTML-Berichts. Ein Mailversand wird separat durch `MailSettings.<Skript>.SendMail` gesteuert.                                                                                                            |
+| `KeepReportFiles`             | Maximale Anzahl gespeicherter HTML-Berichte je Skript; ältere Berichte werden entfernt.                                                                                                                                                               |
+| `WriteLogFile`                | Aktiviert oder deaktiviert lokale Logdateien, einschließlich der Verteilung.                                                                                                                                                                          |
+| `KeepLogFiles`                | Maximale Anzahl gespeicherter Logdateien je Skript, einschließlich der Verteilung; ältere Logs werden entfernt.                                                                                                                                       |
+| `AutoUpdateScripts`           | Steuert automatische Skriptupdates beim Start der übrigen Skripte. Standard `true`; bei `false` wird der lokale Stand verwendet. `Update-ServerUpdateScripts.ps1` kann weiterhin direkt zur manuellen Aktualisierung ausgeführt werden.               |
+| `DetectNowWaitSeconds`        | Wartezeit nach dem Anstoßen einer Windows-Update-Erkennung, bevor das Skript mit der Suche fortfährt.                                                                                                                                                 |
+| `ClearUpdateCacheBeforeCheck` | Bei `true` werden vor dem Check Download- und DataStore-Cache bereinigt und eine neue Erkennung angestoßen; `false` überspringt diese Bereinigung.                                                                                                    |
+| `EnableWingetUpdates`         | Bei `true` werden Winget-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Winget.                                                                                                                                       |
+| `EnableChocolateyUpdates`     | Bei `true` werden Chocolatey-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Chocolatey. Chocolatey wird dadurch nicht installiert.                                                                                    |
+| `TargetComputers`             | AD-Auswahl: `Server` verarbeitet Windows-Server, `All` alle passenden Windows-Computer. Zusätzliche Geräte werden über die nächsten beiden Listen angegeben.                                                                                          |
+| `AdditionalComputers`         | Liste zusätzlicher Computer, die unabhängig von der AD-Auswahl verarbeitet werden.                                                                                                                                                                    |
+| `HypervisorComputers`         | Liste der Hypervisoren außerhalb der AD-Auswahl; sie werden als eigene Zielgruppe für Remoting und Neustartplanung behandelt.                                                                                                                         |
+| `ClientCertThumbprint`        | Fingerabdruck des Client-Zertifikats für zertifikatsbasiertes Remoting zu Nicht-AD-Zielen. Das Verteilungs-/Zertifikat-Setup kann diesen Wert synchronisieren.                                                                                        |
+| `DeferredUpdateCategories`    | Kategorien, die beim regulären Update-Lauf ausgelassen und für die Nachinstallation vorgemerkt werden. Auswahl wird später gemeinsam abgearbeitet. Siehe [Kategorien für zurückgestellte Updates](#kategorien-f%C3%BCr-zur%C3%BCckgestellte-updates). |
+| `DeferredUpdateKBs`           | Einzelne KB-Nummern, die ausgelassen und für die Nachinstallation vorgemerkt werden, zum Beispiel `KB5122871`.                                                                                                                                        |
+| `InstallDeferredUpdates`      | Bei `true` richtet das Installationsskript eine Nachinstallationsaufgabe ein, wenn zurückgestellte Updates vorhanden sind; bei `false` bleiben diese Updates ausgelassen.                                                                             |
+| `PhysicalRebootTime`          | Beginn des Wartungsfensters und geplante Neustartzeit für physische Systeme im Format `HH:mm`. Leer bedeutet, dass kein zeitgesteuerter Neustart geplant wird.                                                                                        |
+| `PhysicalRebootWindowEndTime` | Ende des Wartungsfensters für physische Systeme. Neustarts dürfen spätestens zu dieser Zeit beginnen; leer lässt das Fensterende offen.                                                                                                               |
+| `VMRebootStartTime`           | Beginn des VM-Wartungsfensters und geplante Neustartzeit der ersten VM im Format `HH:mm`.                                                                                                                                                             |
+| `VMRebootWindowEndTime`       | Ende des VM-Wartungsfensters. Neustarts dürfen spätestens zu dieser Zeit beginnen; leer lässt das Fensterende offen.                                                                                                                                  |
+| `VMRebootImmediately`         | Bei `true` werden VM-Neustarts zeitnah eingeplant, unter Beachtung der Staffelung und des Wartungsfensters. Bei `false` gilt der konfigurierte Start des Wartungsfensters.                                                                            |
+| `VMRebootIntervalMinutes`     | Abstand zwischen geplanten Neustarts von VMs. `0` erlaubt gleichzeitige Neustarts; ein positiver Wert staffelt die VMs. Die Staffelung wird bei der Planung physischer Neustarts berücksichtigt.                                                      |
 
 ### `MailSettings`
 
-| Feld | Wirkung |
-|---|---|
-| `CompanyName` | Firmenname im Betreff. Das Skript setzt ihn automatisch genau einmal vor den Betreff des jeweiligen Laufs: `Firmenname - Betreff`. Ist der Name leer, wird nur der Betreff verwendet. |
-| `Host` | Hostname des SMTP-Servers. |
-| `Port` | TCP-Port des SMTP-Servers, üblicherweise `587` für STARTTLS oder `465` für implizites TLS, je nach Mailserver. |
-| `UseSSL` | Aktiviert die verschlüsselte SMTP-Verbindung gemäß der vom Mailserver erwarteten TLS-Verbindung. |
-| `Auth` | Legt fest, ob sich das Skript mit SMTP-Benutzerdaten anmeldet. |
-| `AuthUser` | Benutzername für die SMTP-Anmeldung, sofern `Auth` aktiviert ist. |
-| `AuthPass` | SMTP-Passwort. Ein Klartextwert wird beim Laden automatisch maschinengebunden mit DPAPI geschützt; in `default_settings.json` gehört kein echtes Passwort. |
-| `Sender` | Absenderadresse der E-Mail. Muss für den SMTP-Server gültig und zulässig sein. Wenn das Feld leer ist und `CompanyName` gesetzt ist, erzeugt das Skript automatisch `Updates@<Firmenname>.de` (mit bereinigtem Namen). |
-| `MailTo` | Empfängeradresse der E-Mail. |
-| `MailCC` | Optionale CC-Empfänger. |
-| `MailBCC` | Optionale BCC-Empfänger. |
-| `Check.SendMail` | Bei `true` versendet `Check-ServersUpdates.ps1` den Check-Bericht per E-Mail. |
-| `Check.Subject` | Betrefftext für den Check-Bericht; `CompanyName` wird automatisch davor gesetzt. |
-| `Download.SendMail` | Bei `true` versendet `Download-ServersUpdates.ps1` den Download-Bericht. |
-| `Download.Subject` | Betrefftext für den Download-Bericht; `CompanyName` wird automatisch davor gesetzt. |
-| `Install.SendMail` | Bei `true` versendet `Install-ServersUpdates.ps1` den Installationsbericht. |
-| `Install.Subject` | Betrefftext für den Installationsbericht; `CompanyName` wird automatisch davor gesetzt. |
+| Feld                | Wirkung                                                                                                                                                                                                                |
+|---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `CompanyName`       | Firmenname im Betreff. Das Skript setzt ihn automatisch genau einmal vor den Betreff des jeweiligen Laufs: `Firmenname - Betreff`. Ist der Name leer, wird nur der Betreff verwendet.                                  |
+| `Host`              | Hostname des SMTP-Servers.                                                                                                                                                                                             |
+| `Port`              | TCP-Port des SMTP-Servers, üblicherweise `587` für STARTTLS oder `465` für implizites TLS, je nach Mailserver.                                                                                                         |
+| `UseSSL`            | Aktiviert die verschlüsselte SMTP-Verbindung gemäß der vom Mailserver erwarteten TLS-Verbindung.                                                                                                                       |
+| `Auth`              | Legt fest, ob sich das Skript mit SMTP-Benutzerdaten anmeldet.                                                                                                                                                         |
+| `AuthUser`          | Benutzername für die SMTP-Anmeldung, sofern `Auth` aktiviert ist.                                                                                                                                                      |
+| `AuthPass`          | SMTP-Passwort. Ein Klartextwert wird beim Laden automatisch maschinengebunden mit DPAPI geschützt; in `default_settings.json` gehört kein echtes Passwort.                                                             |
+| `Sender`            | Absenderadresse der E-Mail. Muss für den SMTP-Server gültig und zulässig sein. Wenn das Feld leer ist und `CompanyName` gesetzt ist, erzeugt das Skript automatisch `Updates@<Firmenname>.de` (mit bereinigtem Namen). |
+| `MailTo`            | Empfängeradresse der E-Mail.                                                                                                                                                                                           |
+| `MailCC`            | Optionale CC-Empfänger.                                                                                                                                                                                                |
+| `MailBCC`           | Optionale BCC-Empfänger.                                                                                                                                                                                               |
+| `Check.SendMail`    | Bei `true` versendet `Check-ServersUpdates.ps1` den Check-Bericht per E-Mail.                                                                                                                                          |
+| `Check.Subject`     | Betrefftext für den Check-Bericht; `CompanyName` wird automatisch davor gesetzt.                                                                                                                                       |
+| `Download.SendMail` | Bei `true` versendet `Download-ServersUpdates.ps1` den Download-Bericht.                                                                                                                                               |
+| `Download.Subject`  | Betrefftext für den Download-Bericht; `CompanyName` wird automatisch davor gesetzt.                                                                                                                                    |
+| `Install.SendMail`  | Bei `true` versendet `Install-ServersUpdates.ps1` den Installationsbericht.                                                                                                                                            |
+| `Install.Subject`   | Betrefftext für den Installationsbericht; `CompanyName` wird automatisch davor gesetzt.                                                                                                                                |
 
 Bei der Migration alter Dateien wird `SendMail` anhand des Dateinamens dem passenden Skriptbereich zugeordnet (`Check-ServersUpdates.settings.json` → `Check`, `Download-ServersUpdates.settings.json` → `Download`, `Install-ServersUpdates.settings.json` → `Install`). Alte Betrefftexte werden verworfen, damit ein alter Firmenname im `Subject` nicht zusätzlich zum automatisch vorangestellten `CompanyName` erscheint. Die aktuellen Betrefftexte kommen aus den Standardwerten.
 
 ### `LinuxSettings`
 
-| Feld | Wirkung |
-|---|---|
-| `Hosts` | Liste der Linux-Ziele. Jeder Eintrag braucht `Host` (alternativ `Name`) und `User`, zum Beispiel `{ "Host": "linux01.example.local", "User": "admin" }`. Eine leere Liste bedeutet, dass keine Linux-Ziele verarbeitet werden. |
-| `ConnectTimeoutSeconds` | Maximale Wartezeit für den SSH-Verbindungsaufbau in Sekunden. |
-| `LockWaitMinutes` | Maximale Wartezeit auf eine vorhandene Update-Sperre auf dem Linux-Ziel, bevor der Lauf abbricht. |
+| Feld                    | Wirkung                                                                                                                                                                                                                        |
+|-------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Hosts`                 | Liste der Linux-Ziele. Jeder Eintrag braucht `Host` (alternativ `Name`) und `User`, zum Beispiel `{ "Host": "linux01.example.local", "User": "admin" }`. Eine leere Liste bedeutet, dass keine Linux-Ziele verarbeitet werden. |
+| `ConnectTimeoutSeconds` | Maximale Wartezeit für den SSH-Verbindungsaufbau in Sekunden.                                                                                                                                                                  |
+| `LockWaitMinutes`       | Maximale Wartezeit auf eine vorhandene Update-Sperre auf dem Linux-Ziel, bevor der Lauf abbricht.                                                                                                                              |
 
 ### `HomeAssistantSettings`
 
-| Feld | Wirkung |
-|---|---|
-| `Host` | Hostname oder IP-Adresse der Home-Assistant-OS-Instanz. Leer bedeutet, dass Home Assistant nicht konfiguriert ist. |
-| `User` | SSH-Benutzer für die Verbindung zur Home-Assistant-Instanz. |
-| `Port` | SSH-Port, normalerweise `22`. |
-| `KeyPath` | Optionaler Pfad zum privaten SSH-Schlüssel. Ohne Angabe wird der vorgesehene Schlüssel im Benutzerprofil verwendet. |
-| `SSHPath` | Optionaler Pfad zu `ssh.exe`. Ohne Angabe verwendet das Skript OpenSSH aus dem Systempfad beziehungsweise dem Windows-OpenSSH-Verzeichnis. |
-| `CommandTimeoutSeconds` | Optionale maximale Laufzeit eines einzelnen HA-CLI-Aufrufs in Sekunden; Standardwert `300`. |
-| `RebootWaitSeconds` | Optionale maximale Wartezeit auf die Rückkehr von SSH und Supervisor nach einem sofortigen Neustart; Standardwert `300`. |
+| Feld                    | Wirkung                                                                                                                                    |
+|-------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| `Host`                  | Hostname oder IP-Adresse der Home-Assistant-OS-Instanz. Leer bedeutet, dass Home Assistant nicht konfiguriert ist.                         |
+| `User`                  | SSH-Benutzer für die Verbindung zur Home-Assistant-Instanz.                                                                                |
+| `Port`                  | SSH-Port, normalerweise `22`.                                                                                                              |
+| `KeyPath`               | Optionaler Pfad zum privaten SSH-Schlüssel. Ohne Angabe wird der vorgesehene Schlüssel im Benutzerprofil verwendet.                        |
+| `SSHPath`               | Optionaler Pfad zu `ssh.exe`. Ohne Angabe verwendet das Skript OpenSSH aus dem Systempfad beziehungsweise dem Windows-OpenSSH-Verzeichnis. |
+| `CommandTimeoutSeconds` | Optionale maximale Laufzeit eines einzelnen HA-CLI-Aufrufs in Sekunden; Standardwert `300`.                                                |
+| `RebootWaitSeconds`     | Optionale maximale Wartezeit auf die Rückkehr von SSH und Supervisor nach einem sofortigen Neustart; Standardwert `300`.                   |
 
 Home Assistant verwendet für geplante Neustarts die gemeinsamen VM-/physischen Wartungszeitfelder aus `UpdateSettings`.
 
@@ -377,11 +377,11 @@ Unter `Logs` werden – abhängig von den Einstellungen – Protokolle und HTML-
 
 Zusätzliche Diagnoseprotokolle liegen unabhängig von `WriteLogFile` und werden automatisch begrenzt bereinigt:
 
-| Vorgang | Speicherort | Aufbewahrung |
-|---|---|---|
-| WindowsUpdateAdm-Setup (auf dem jeweils eingerichteten Zielserver) | `%ProgramData%\WindowsUpdateAdm\Logs\Setup_<Computer>_<Zeitstempel>.log` | Höchstens 10 Dateien je Server |
-| Automatische oder manuelle Skriptaktualisierung (auf dem Rechner, der das Skript startet) | `%ProgramData%\ServerUpdateSkripte\Logs\Updater_<Computer>_<Datum>.log` | Höchstens 14 Dateien je Rechner |
-| Client-Zertifikat-Setup (auf dem Verwaltungsserver) | `%ProgramData%\ServerUpdateSkripte\Logs\Setup-ClientCertificate_<Computer>_<Datum>.log` | Höchstens 14 Dateien je Rechner |
+| Vorgang                                                                                   | Speicherort                                                                             | Aufbewahrung                    |
+|-------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|---------------------------------|
+| WindowsUpdateAdm-Setup (auf dem jeweils eingerichteten Zielserver)                        | `%ProgramData%\WindowsUpdateAdm\Logs\Setup_<Computer>_<Zeitstempel>.log`                | Höchstens 10 Dateien je Server  |
+| Automatische oder manuelle Skriptaktualisierung (auf dem Rechner, der das Skript startet) | `%ProgramData%\ServerUpdateSkripte\Logs\Updater_<Computer>_<Datum>.log`                 | Höchstens 14 Dateien je Rechner |
+| Client-Zertifikat-Setup (auf dem Verwaltungsserver)                                       | `%ProgramData%\ServerUpdateSkripte\Logs\Setup-ClientCertificate_<Computer>_<Datum>.log` | Höchstens 14 Dateien je Rechner |
 
 Die Setup-Protokolle werden pro Lauf angelegt; Updater- und Zertifikatsdiagnosen werden je Rechner und Kalendertag gesammelt. Die jeweilige Bereinigung entfernt die ältesten Dateien, wenn die Aufbewahrungsgrenze überschritten wird. Die normalen Check-, Download-, Installations- und Verteilungsprotokolle bleiben im Skriptordner unter `Logs` und folgen weiterhin `WriteLogFile` und `KeepLogFiles`.
 
