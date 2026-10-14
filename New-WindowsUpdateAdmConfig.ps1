@@ -62,7 +62,12 @@ param(
 
     # Wird von der zentralen Verteilung gesetzt, wenn WinGet-Updates aktiviert sind.
     [Parameter(Mandatory=$false)]
-    [switch]$InstallWinGetClientModule
+    [switch]$InstallWinGetClientModule,
+
+    # Für Ziele außerhalb der Verwaltungs-AD wird Zertifikats-Remoting auch
+    # dann benötigt, wenn das Gerät Mitglied einer anderen AD-Domäne ist.
+    [Parameter(Mandatory=$false)]
+    [switch]$EnableClientCertificateRemoting
 )
 # Dieses Setup wird auf Zielservern nur vorübergehend in %TEMP% ausgeführt.
 # Es lädt dort keine weiteren Repository-Skripte aus GitHub nach.
@@ -361,11 +366,14 @@ try {
     }
 
     # =========================================================
-    # === WinRM HTTPS Zertifikat (nur Nicht-AD-Geräte)
+    # === WinRM HTTPS Zertifikat (für Nicht-AD-Ziele und fremde Domänen)
     # =========================================================
-    if (-not $IsInDomain) {
+    if (-not $IsInDomain -or $EnableClientCertificateRemoting) {
         Write-SetupLog "" "INFO"
         Write-SetupLog "=== WinRM HTTPS Zertifikat Setup ===" "INFO"
+        if ($IsInDomain -and $EnableClientCertificateRemoting) {
+            Write-SetupLog "Ziel ist Mitglied einer Domäne außerhalb der Verwaltungs-AD; Zertifikats-Remoting wird eingerichtet." "INFO"
+        }
 
         $hostname = $env:COMPUTERNAME
         $certStore = "Cert:\LocalMachine\My"
@@ -581,7 +589,7 @@ try {
     } else {
         Write-SetupLog "" "INFO"
         Write-SetupLog "=== WinRM HTTPS Zertifikat ===" "INFO"
-        Write-SetupLog "Gerät ist AD-Mitglied - HTTPS-Zertifikat wird nicht benötigt." "INFO"
+        Write-SetupLog "Ziel wird per Kerberos in der Verwaltungs-AD verwaltet - HTTPS-Zertifikat wird nicht benötigt." "INFO"
     }
 
     

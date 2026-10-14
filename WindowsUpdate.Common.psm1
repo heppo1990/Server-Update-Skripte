@@ -1431,6 +1431,7 @@ function Get-WindowsUpdateTargets {
         [ValidateRange(0, 100000)][int]$LinuxTargetCount = 0,
         [ValidateRange(0, 100000)][int]$HomeAssistantTargetCount = 0,
         [switch]$IncludeAdditionalTargetCounts,
+        [switch]$StrictAdditionalTargetClassification,
         [scriptblock]$WriteLog
     )
 
@@ -1488,6 +1489,7 @@ function Get-WindowsUpdateTargets {
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name Name -Value ([string]$computer.Name)
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name IsAdditional -Value $false
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name IsHypervisor -Value $false
+            Add-Member -InputObject $targetObject -MemberType NoteProperty -Name ClassificationError -Value $null
             $targets += $targetObject
         }
     }
@@ -1501,13 +1503,51 @@ function Get-WindowsUpdateTargets {
         foreach ($configuredName in $names) {
             $computerName = ([string]$configuredName).Trim()
             $isInAd = $false
+            $classificationError = $null
             if ($adAvailable) {
-                try { $null = Get-ADComputer -Identity $computerName -ErrorAction Stop; $isInAd = $true }
-                catch { $isInAd = $false }
+                try {
+                    $null = Get-ADComputer -Identity $computerName -ErrorAction Stop
+                    $isInAd = $true
+                }
+                catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
+                    # Nur ein eindeutiges "nicht gefunden" bedeutet, dass das
+                    # Ziel außerhalb der Verwaltungs-AD liegt.
+                    $isInAd = $false
+                }
+                catch {
+                    if ($StrictAdditionalTargetClassification) {
+                        $classificationError = $_.Exception.Message
+                        Write-CommonLog $WriteLog "WARNUNG: AD-Zugehörigkeit von '$computerName' konnte nicht geprüft werden; Ziel wird nicht als extern eingestuft. Details im Log."
+                        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'Zusatzcomputer-AD-Zugehörigkeit' -Target $computerName -ErrorRecord $_ -Context @('Ziel=unbekannt; keine externe Authentifizierung versuchen')
+                    }
+                    else {
+                        $isInAd = $false
+                    }
+                }
+            }
+            elseif ($StrictAdditionalTargetClassification -and $isDomainJoined) {
+                $classificationError = 'ActiveDirectory-Modul oder AD-Abfrage ist nicht verfügbar.'
+                Write-CommonLog $WriteLog "WARNUNG: AD-Zugehörigkeit von '$computerName' konnte nicht geprüft werden; Ziel wird nicht als extern eingestuft."
+                Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'Zusatzcomputer-AD-Zugehörigkeit' -Target $computerName -DiagnosticText $classificationError -Context @('Ziel=unbekannt; keine externe Authentifizierung versuchen')
             }
             if ($knownNames -notcontains $computerName) {
                 $knownNames += $computerName
-                $targets += [PSCustomObject]@{ Name = $computerName; IsAdditional = ((-not $isInAd) -and (-not $isHypervisorGroup)); IsHypervisor = ((-not $isInAd) -and $isHypervisorGroup) }
+                if ($classificationError) {
+                    $targets += [PSCustomObject]@{
+                        Name = $computerName
+                        IsAdditional = $false
+                        IsHypervisor = $false
+                        ClassificationError = $classificationError
+                    }
+                }
+                else {
+                    $targets += [PSCustomObject]@{
+                        Name = $computerName
+                        IsAdditional = ((-not $isInAd) -and (-not $isHypervisorGroup))
+                        IsHypervisor = ((-not $isInAd) -and $isHypervisorGroup)
+                        ClassificationError = $null
+                    }
+                }
             }
         }
     }

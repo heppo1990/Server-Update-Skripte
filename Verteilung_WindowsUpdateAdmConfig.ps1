@@ -134,13 +134,14 @@ foreach ($requiredSetupFile in @($PSSCfgSkriptFile, $CommonModuleFile)) {
 # Die zentrale Zielermittlung liefert exakt dieselbe Zielmenge wie Check,
 # Download und Installation. Für die Verteilung wird nur der Verbindungstyp
 # aus den Markierungen abgeleitet.
-$Serverlist = Get-WindowsUpdateTargets -UpdateSettings $UpdateSettings -TargetComputers $TargetComputers -WriteLog {
+$Serverlist = Get-WindowsUpdateTargets -UpdateSettings $UpdateSettings -TargetComputers $TargetComputers -StrictAdditionalTargetClassification -WriteLog {
     param($message)
     Write-DeployLog $message
 } | ForEach-Object {
     [PSCustomObject]@{
         Name       = $_.Name
         DeployType = if ($_.IsHypervisor) { 'Hypervisor' } elseif ($_.IsAdditional) { 'Additional' } else { 'AD' }
+        ClassificationError = $_.ClassificationError
     }
 }
 if (-not [string]::IsNullOrWhiteSpace($TargetComputer)) {
@@ -476,6 +477,7 @@ function Invoke-WinRMDeployment {
 
         $setupParameters = @{}
         if ($enableWingetUpdates) { $setupParameters.InstallWinGetClientModule = $true }
+        if ($DeployType -ne 'AD') { $setupParameters.EnableClientCertificateRemoting = $true }
         if ($DeployType -eq 'Hypervisor' -and -not $usedCertificate) {
             $setupParameters.CertificateMappingCredential = $bootstrapCredential
         } elseif ($DeployType -eq 'Additional' -and -not $usedCertificate) {
@@ -789,12 +791,22 @@ ForEach ($Server in $Serverlist) {
     Write-DeployLog ''
     Write-DeployLog "[$Servername] Deployment gestartet ($deployTypeLabel)"
 
-    $deployResult = Invoke-ServerDeployment `
-        -Servername                $Servername `
-        -PSSCfgSkriptFile          $PSSCfgSkriptFile `
-        -RootDirectory             $PSScriptRoot `
-        -DeployType                $deployTypeLabel `
-        -CleanupLegacyTempOnly:$CleanupLegacyTempOnly
+    if ($Server.ClassificationError) {
+        $deployResult = [PSCustomObject]@{
+            Status = 'Failed'
+            Message = 'AD-Zugehörigkeit konnte nicht zuverlässig geprüft werden; Ziel wurde aus Sicherheitsgründen nicht eingerichtet.'
+        }
+        Write-DeployLog "[$Servername] Zielklassifizierung fehlgeschlagen; Einrichtung wird übersprungen." -Level Error
+        Write-DeployLog "[$Servername] Klassifizierungsfehler: $($Server.ClassificationError)" -LogOnly
+    }
+    else {
+        $deployResult = Invoke-ServerDeployment `
+            -Servername                $Servername `
+            -PSSCfgSkriptFile          $PSSCfgSkriptFile `
+            -RootDirectory             $PSScriptRoot `
+            -DeployType                $deployTypeLabel `
+            -CleanupLegacyTempOnly:$CleanupLegacyTempOnly
+    }
 
     $ServerResult = [PSCustomObject]@{
         ServerName = $Servername
