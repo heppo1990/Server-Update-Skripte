@@ -1374,6 +1374,7 @@ $LinuxServerCount = 0
 $HAServerCount = 0
 $LinuxUpdatesInstalled = 0
 $LinuxUpdatesFailed = 0
+$LinuxRebootScheduleFailures = 0
 $HAUpdatesInstalled = 0
 $HAUpdatesFailed = 0
 $LinuxScriptExecuted = $false
@@ -1409,6 +1410,7 @@ if ($IsWindowsOnlyRun) {
       if ($LinuxStats.PSObject.Properties.Name -contains 'UpdatesInstalled') {
         $LinuxUpdatesInstalled = $LinuxStats.UpdatesInstalled
         $LinuxUpdatesFailed = if ($LinuxStats.PSObject.Properties.Name -contains 'FailedHosts') { $LinuxStats.FailedHosts } else { 0 }
+        $LinuxRebootScheduleFailures = if ($LinuxStats.PSObject.Properties.Name -contains 'RebootScheduleFailedHosts') { [int]$LinuxStats.RebootScheduleFailedHosts } else { 0 }
         
         if ($LinuxStats.PSObject.Properties.Name -contains 'HostStatus') {
           # ConvertFrom-Json liefert bei exakt einem Host ein Einzelobjekt.
@@ -1680,6 +1682,14 @@ $WindowsAdCount = 0
 $WindowsNonAdCount = 0
 $DeferredUpdatesPlanned = 0
 $ManualActions = @()
+foreach ($linuxHost in @($LinuxUpdateDetails | Where-Object { $_.Status -eq 'Updates installiert; Neustartplanung fehlgeschlagen' })) {
+  $ManualActions += [PSCustomObject]@{
+    Server = [string]$linuxHost.Host
+    Manager = 'Linux-Neustart'
+    Packages = @()
+    Text = 'Updates wurden installiert, aber der erforderliche Neustart konnte nicht geplant werden. Bitte den Server manuell neu starten. Details stehen im Linux-Laufprotokoll.'
+  }
+}
 
 if ($ServerADList -ne $null) {
   Write-ScriptLog ''
@@ -2035,6 +2045,9 @@ if ($LinuxScriptExecuted) {
   if ($LinuxUpdateDetails -and @($LinuxUpdateDetails).Count -gt 0) {
     foreach ($hostInfo in $LinuxUpdateDetails) {
       $RepBody += "<div class='server-title'>Server: $($hostInfo.Host)</div>"
+      if ($hostInfo.Status -eq 'Updates installiert; Neustartplanung fehlgeschlagen') {
+        $RepBody += "<div class='warning-box'><strong>Neustart erforderlich:</strong> Die Neustartplanung ist fehlgeschlagen. Bitte den Server manuell neu starten; Details stehen im Laufprotokoll.</div>"
+      }
       
       if ($hostInfo.UpdateCount -gt 0) {
         $RepBody += "<p><strong>Installierte Updates:</strong> $($hostInfo.UpdateCount)</p>"
@@ -2096,6 +2109,9 @@ foreach ($hostInfo in @($LinuxUpdateDetails)) {
   if ($hostInfo.Status -eq 'Fehler') {
     Write-ScriptLog "WARNUNG: Linux auf $($hostInfo.Host) fehlgeschlagen; Details im Log."
     continue
+  }
+  if ($hostInfo.Status -eq 'Updates installiert; Neustartplanung fehlgeschlagen') {
+    Write-ScriptLog "WARNUNG: Linux-Updates auf $($hostInfo.Host) wurden installiert; Neustartplanung fehlgeschlagen. Manuelles Eingreifen erforderlich."
   }
   if ([int]$hostInfo.UpdateCount -le 0) { continue }
   Write-ScriptLog "Linux auf $($hostInfo.Host): $($hostInfo.UpdateCount) Paketupdates installiert."
@@ -2187,6 +2203,7 @@ if ($PackageUpdateCount -gt 0) {
 $RepBody += "        <li>Für die Nachinstallation eingeplant: $DeferredUpdatesPlanned</li>`n"
 if ($LinuxScriptExecuted) {
   $RepBody += "        <li>Linux-Updates: $LinuxUpdatesInstalled</li>`n"
+  if ($LinuxRebootScheduleFailures -gt 0) { $RepBody += "        <li>Linux-Neustartplanung offen: $LinuxRebootScheduleFailures</li>`n" }
 }
 
 if ($HAScriptExecuted) {
@@ -2233,6 +2250,7 @@ if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesInsta
 $summaryLines += @('', "Fehler: $TotalUpdatesFailed", "  • Windows: $ErrorCount")
 if (@($ManualActions).Count -gt 0) { $summaryLines += "Manuelle Prüfung/Aktion erforderlich: $(@($ManualActions).Count)" }
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesFailed" }
+if ($LinuxRebootScheduleFailures -gt 0) { $summaryLines += "  • Linux-Neustartplanung offen: $LinuxRebootScheduleFailures" }
 if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesFailed" }
 $summaryLines += @('', "Dauer: $ScriptDuration Minuten")
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-INSTALLATION ZUSAMMENFASSUNG' -Lines $summaryLines -WriteLog { param($message) Write-ScriptLog $message }
