@@ -1509,16 +1509,33 @@ function Get-WindowsUpdateTargets {
                     $null = Get-ADComputer -Identity $computerName -ErrorAction Stop
                     $isInAd = $true
                 }
-                catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
-                    # Nur ein eindeutiges "nicht gefunden" bedeutet, dass das
-                    # Ziel außerhalb der Verwaltungs-AD liegt.
-                    $isInAd = $false
-                }
                 catch {
-                    if ($StrictAdditionalTargetClassification) {
-                        $classificationError = $_.Exception.Message
+                    $adLookupError = $_
+                    $errorTypeNames = @()
+                    $currentException = $adLookupError.Exception
+                    while ($null -ne $currentException) {
+                        $errorTypeNames += $currentException.GetType().FullName
+                        $currentException = $currentException.InnerException
+                    }
+
+                    # PowerShell 7 kann AD-Fehler aus der Windows PowerShell-
+                    # Compatibility-Session als RemoteException verpacken.
+                    # Den AD-Ausnahmetyp daher anhand der Fehlerdaten erkennen,
+                    # statt ihn als Catch-Typ lokal vorauszusetzen.
+                    $isIdentityNotFound =
+                        ($adLookupError.FullyQualifiedErrorId -match '(?i)ADIdentityNotFoundException|IdentityNotFound') -or
+                        ($errorTypeNames -contains 'Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException') -or
+                        ($adLookupError.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound)
+
+                    if ($isIdentityNotFound) {
+                        # Nur ein eindeutiges "nicht gefunden" bedeutet, dass
+                        # das Ziel außerhalb der Verwaltungs-AD liegt.
+                        $isInAd = $false
+                    }
+                    elseif ($StrictAdditionalTargetClassification) {
+                        $classificationError = $adLookupError.Exception.Message
                         Write-CommonLog $WriteLog "WARNUNG: AD-Zugehörigkeit von '$computerName' konnte nicht geprüft werden; Ziel wird nicht als extern eingestuft. Details im Log."
-                        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'Zusatzcomputer-AD-Zugehörigkeit' -Target $computerName -ErrorRecord $_ -Context @('Ziel=unbekannt; keine externe Authentifizierung versuchen')
+                        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'Zusatzcomputer-AD-Zugehörigkeit' -Target $computerName -ErrorRecord $adLookupError -Context @('Ziel=unbekannt; keine externe Authentifizierung versuchen')
                     }
                     else {
                         $isInAd = $false
