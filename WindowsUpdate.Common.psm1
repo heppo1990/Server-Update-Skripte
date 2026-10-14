@@ -1914,8 +1914,23 @@ function Format-WindowsUpdatePackageConsoleTable {
     )
     $rows = @(ConvertTo-WindowsUpdatePackageRows -ComputerName $ComputerName -Manager $Manager -Packages $Packages)
     if ($rows.Count -eq 0) { return '' }
-    return (($rows | Select-Object ComputerName, Name, Id, InstalledVersion, AvailableVersion, Source |
-        Format-Table -AutoSize -Wrap | Out-String -Width 240).TrimEnd())
+    $consoleRows = @($rows | ForEach-Object {
+        $name = [string]$_.Name
+        $id = [string]$_.Id
+        if ($name.Length -gt 34) { $name = $name.Substring(0, 31) + '...' }
+        if ($id.Length -gt 36) { $id = $id.Substring(0, 33) + '...' }
+        [pscustomobject]@{
+            Name = $name
+            Id = $id
+            Installed = [string]$_.InstalledVersion
+            Available = [string]$_.AvailableVersion
+        }
+    })
+    # Server und Paketquelle stehen bereits in der umgebenden Statuszeile.
+    # Die kompakte Tabelle passt damit auch in schmale Konsolenfenster.
+    $tableWidth = 120
+    try { $tableWidth = [Math]::Max(100, [Math]::Min(180, [int]$Host.UI.RawUI.WindowSize.Width)) } catch { }
+    return (($consoleRows | Format-Table -AutoSize | Out-String -Width $tableWidth).TrimEnd())
 }
 
 function ConvertTo-WindowsUpdatePackageHtmlTable {
