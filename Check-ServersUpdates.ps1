@@ -254,6 +254,25 @@ function Clear-WindowsUpdateCache {
 
 function Import-PSWindowsUpdate {
   Write-ScriptLog "Versuche PSWindowsUpdate-Modul zu laden..."
+  if ($script:IsLocalSystemRun) {
+    $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
+      Sort-Object Version -Descending |
+      Select-Object -First 1
+    if (-not $installedModule) {
+      Write-ScriptLog 'KRITISCHER FEHLER: PSWindowsUpdate ist maschinenweit nicht installiert; der SYSTEM-Aufgabenlauf kann das Modul nicht aktualisieren.'
+      return $false
+    }
+    try {
+      Import-Module -Name $installedModule.Path -ErrorAction Stop
+      Write-ScriptLog "PSWindowsUpdate $($installedModule.Version) aus dem maschinenweiten Modulpfad geladen; Onlineaktualisierung im SYSTEM-Aufgabenlauf übersprungen."
+      return $true
+    }
+    catch {
+      Write-ScriptLog "KRITISCHER FEHLER: PSWindowsUpdate $($installedModule.Version) konnte im SYSTEM-Aufgabenlauf nicht geladen werden: $($_.Exception.Message)"
+      Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'PSWindowsUpdate-Import-SYSTEM' -ErrorRecord $_
+      return $false
+    }
+  }
   $moduleReady = Update-PSWindowsUpdateModule -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
   if (-not $moduleReady) { return $false }
   
