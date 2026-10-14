@@ -711,14 +711,24 @@ if ($ServerADList -ne $null) {
             $jeaTestParams = @{
               ComputerName        = $Servername
               ConfigurationName   = 'WindowsUpdateAdm'
-              ScriptBlock         = { 1 }
+              ScriptBlock         = {
+                $updateCommand = Get-Command -Name Get-WindowsUpdate -ErrorAction Stop
+                [PSCustomObject]@{
+                  CommandName               = $updateCommand.Name
+                  MicrosoftUpdateAvailable  = $updateCommand.Parameters.ContainsKey('MicrosoftUpdate')
+                }
+              }
               ErrorAction         = 'Stop'
             }
             if ($svcCredential) {
               $authParams = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $svcCredential -ConfigurationName 'WindowsUpdateAdm'
               foreach ($k in $authParams.Keys) { if ($k -ne 'ComputerName') { $jeaTestParams[$k] = $authParams[$k] } }
             }
-            $null = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Verbindungstest auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
+            $jeaEndpointProbe = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Endpunktprüfung auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
+            if (-not $jeaEndpointProbe -or $jeaEndpointProbe.CommandName -ne 'Get-WindowsUpdate' -or -not $jeaEndpointProbe.MicrosoftUpdateAvailable) {
+              throw 'WindowsUpdateAdm ist erreichbar, stellt Get-WindowsUpdate oder den benötigten Parameter -MicrosoftUpdate aber nicht korrekt bereit.'
+            }
+            Write-ScriptLog "WindowsUpdateAdm-Endpunkt auf $Servername geprüft: Get-WindowsUpdate und -MicrosoftUpdate sind verfügbar." $true
           } catch {
             $useJEA = $false
             Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-JEA-Verbindungstest ist fehlgeschlagen; der Check versucht Standard-Remoting als Fallback.'
