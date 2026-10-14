@@ -276,7 +276,7 @@ if ($ServerADList -ne $null) {
         # Teste ob WindowsUpdateAdm verfügbar ist
         $useJEA = $false
         $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $svcCredential -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
-        if ($Servername -ne $env:COMPUTERNAME -and $jeaSupported) {
+        if ($jeaSupported) {
           $useJEA = $true
           try {
             $jeaTestParams = @{
@@ -292,23 +292,18 @@ if ($ServerADList -ne $null) {
             $null = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Verbindungstest auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
           } catch {
             $useJEA = $false
+            if ($Servername -eq $env:COMPUTERNAME) {
+              Write-ScriptLog "FEHLER: WindowsUpdateAdm auf dem Verwaltungsserver $Servername ist nicht erreichbar; der fehlerhafte Loopback-WinRM-Pfad wird nicht verwendet."
+              Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=keiner; Loopback-WinRM ist für den Download auf dem Verwaltungsserver nicht zulässig')
+              throw "WindowsUpdateAdm auf dem Verwaltungsserver $Servername ist nicht erreichbar; Download abgebrochen."
+            }
             Write-ScriptLog "INFO: '$Servername' nutzt Standard-Remoting (WindowsUpdateAdm nicht verfügbar; Details im Log)."
             Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Standard-Remoting')
           }
         }
 
         # Updates herunterladen
-        if ($Servername -eq $env:COMPUTERNAME) {
-          Write-ScriptLog "Update-Download via Loopback-WinRM auf $Servername..."
-          $loopbackParams = @{
-            ComputerName  = $Servername
-            ErrorAction   = 'Stop'
-            SessionOption = New-PSSessionOption -IncludePortInSPN
-          }
-          $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Download auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
-            Invoke-Command @loopbackParams -ArgumentList $SucheOnline -ScriptBlock $sbWU_Full
-          }
-        } elseif ($useJEA) {
+        if ($useJEA) {
           Write-ScriptLog "Remote Download via JEA auf $Servername..."
           try {
             $jeaParams = @{
@@ -330,6 +325,16 @@ if ($ServerADList -ne $null) {
               throw "WindowsUpdateAdm Endpoint hat kein Get-WindowsUpdate verfügbar."
             }
             throw
+          }
+        } elseif ($Servername -eq $env:COMPUTERNAME) {
+          Write-ScriptLog "Update-Download via Loopback-WinRM auf $Servername..."
+          $loopbackParams = @{
+            ComputerName  = $Servername
+            ErrorAction   = 'Stop'
+            SessionOption = New-PSSessionOption -IncludePortInSPN
+          }
+          $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Download auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
+            Invoke-Command @loopbackParams -ArgumentList $SucheOnline -ScriptBlock $sbWU_Full
           }
         } elseif (-not $jeaSupported -and $svcCredential) {
           # Windows Server 2016 außerhalb der AD: Der über Client-Zertifikat
