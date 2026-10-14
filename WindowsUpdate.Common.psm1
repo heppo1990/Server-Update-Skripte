@@ -1992,6 +1992,63 @@ function Invoke-WindowsUpdatePackageManagers {
             return $null
         }
 
+        function Ensure-WinGetSourcePackageForCurrentUser {
+            # Die WinGet-Communityquelle wird als benutzerbezogenes AppX-Paket
+            # bereitgestellt. In nicht interaktiven WinRM-Sitzungen kann WinGet
+            # den Index zwar herunterladen, aber nicht zuverlässig registrieren.
+            # Deshalb fehlt er später trotz erreichbarer Quelle im Benutzerprofil.
+            $bootstrapScript = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$sourcePath = $null
+$sourceChanged = $false
+try {
+    $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
+        Where-Object { $_.Status -eq 'Ok' })
+    if ($registered.Count -eq 0) {
+        $sourceChanged = $true
+        $sourcePath = Join-Path $env:TEMP ('winget-source-{0}.msix' -f [guid]::NewGuid().ToString('N'))
+        Invoke-WebRequest -Uri 'https://cdn.winget.microsoft.com/cache/source2.msix' `
+            -OutFile $sourcePath -UseBasicParsing -ErrorAction Stop
+        Add-AppxPackage -Path $sourcePath -ErrorAction Stop
+        $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
+            Where-Object { $_.Status -eq 'Ok' })
+        if ($registered.Count -eq 0) {
+            throw 'Das WinGet-Quellenpaket wurde nach Add-AppxPackage im aktuellen Benutzerprofil nicht gefunden.'
+        }
+    }
+    [Console]::Out.WriteLine('__WINGETSOURCE__SUCCESS`t{0}`t{1}', [string]$registered[-1].Version, $sourceChanged)
+}
+catch {
+    [Console]::Error.WriteLine($_.Exception.ToString())
+    exit 1
+}
+finally {
+    if ($sourcePath -and (Test-Path -LiteralPath $sourcePath)) {
+        Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+    }
+}
+'@
+            $shellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            if (-not (Test-Path -LiteralPath $shellPath -PathType Leaf)) {
+                throw 'Windows PowerShell 5.1 wurde für die WinGet-Quellenregistrierung nicht gefunden.'
+            }
+            $encodedScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrapScript))
+            $output = (& $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+                -EncodedCommand $encodedScript 2>&1 | Out-String -Width 300).Trim()
+            $exitCode = $LASTEXITCODE
+            $successLine = @($output -split "`r?`n" | Where-Object { $_ -match '^__WINGETSOURCE__SUCCESS\t' } | Select-Object -Last 1)
+            if ($exitCode -ne 0 -or $successLine.Count -eq 0) {
+                throw "Registrierung des WinGet-Quellenpakets fehlgeschlagen (Exitcode $exitCode): $output"
+            }
+            $successFields = $successLine[0] -split "`t", 4
+            return [pscustomobject]@{
+                Changed = [bool]::Parse($successFields[2])
+                Version = $successFields[1]
+                Output = $output
+            }
+        }
+
         function Test-WingetExecutable {
             param([string]$Path, [switch]$FreshPowerShell)
             if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -2594,6 +2651,23 @@ catch {
                     if ($registrationError.Length -gt 250) { $registrationError = $registrationError.Substring(0, 247) + '...' }
                     $wingetBootstrapMessage += ' App-Installer-Registrierung fehlgeschlagen; Details im Log.'
                     $wingetDiagnosticOutput += "App-Installer-Registrierung:`r`n$($_.Exception.ToString())`r`n"
+                }
+            }
+            if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
+                try {
+                    $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser
+                    if ($sourcePackageRegistration.Output -match '__WINGETSOURCE__SUCCESS') {
+                        $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer verfügbar (Version $($sourcePackageRegistration.Version))."
+                    }
+                    if ($sourcePackageRegistration.Changed) {
+                        $wingetBootstrapMessage += ' WinGet-Quellenpaket wurde ergänzt; Abfrage wird in einer neuen Verbindung wiederholt.'
+                        $wingetReconnectRequired = $true
+                    }
+                }
+                catch {
+                    $wingetPreparationSucceeded = $false
+                    $wingetBootstrapMessage += ' WinGet-Quellenpaket konnte für den aktuellen Benutzer nicht registriert werden; Details im Log.'
+                    $wingetDiagnosticOutput += "WinGet-Quellenpaket:`r`n$($_.Exception.ToString())`r`n"
                 }
             }
             if ($ExecutionMode -eq 'Check' -and $serverCaption -match 'Windows Server (2019|2022)') {
