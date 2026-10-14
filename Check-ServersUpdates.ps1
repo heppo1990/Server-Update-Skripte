@@ -128,7 +128,7 @@ function Add-CheckRedistributionNotice {
   Write-ScriptLog $message
   $safeTarget = [System.Net.WebUtility]::HtmlEncode($Target)
   $safeReason = [System.Net.WebUtility]::HtmlEncode($Reason)
-  $script:RepBody += "<div class='warning-box'><strong>WindowsUpdateAdm-Verteilung auf $safeTarget prüfen.</strong><br>$safeReason Nach Zertifikatswechsel oder fehlgeschlagener Zertifikatsanmeldung die Verteilung erneut ausführen und die Verbindung testen.</div>"
+  $script:RepBody += "<div class='warning-box'><strong>WindowsUpdateAdm-Verteilung oder Verbindung auf $safeTarget prüfen.</strong><br>$safeReason Falls der JEA-Endpunkt fehlt, falsch konfiguriert oder nach einem Zertifikatswechsel veraltet ist, Verteilung erneut ausführen und Verbindung testen.</div>"
 }
 
 function Get-CheckClientCertificate {
@@ -721,6 +721,7 @@ if ($ServerADList -ne $null) {
             $null = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Verbindungstest auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
           } catch {
             $useJEA = $false
+            Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-JEA-Verbindungstest ist fehlgeschlagen; der Check versucht Standard-Remoting als Fallback.'
             if ($Servername -ieq $env:COMPUTERNAME) {
               Write-ScriptLog "FEHLER: WindowsUpdateAdm auf dem Verwaltungsserver $Servername ist nicht erreichbar; der abweichende Loopback-Pfad wird nicht verwendet."
               Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=keiner; Verwaltungsserver muss denselben WindowsUpdateAdm-Endpunkt wie der Download verwenden')
@@ -750,6 +751,7 @@ if ($ServerADList -ne $null) {
           } catch {
             $msg = $_.Exception.Message
             if ($msg -match "Get-WindowsUpdate.*not recognized|wurde nicht als Name eines Cmdlet") {
+              Add-CheckRedistributionNotice -Target $Servername -Reason 'Im WindowsUpdateAdm-JEA-Endpunkt fehlt das Cmdlet Get-WindowsUpdate.'
               throw "WindowsUpdateAdm Endpoint hat kein Get-WindowsUpdate verfügbar."
             }
             throw
