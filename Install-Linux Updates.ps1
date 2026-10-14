@@ -464,7 +464,7 @@ $hostEntries = @(
         if (-not [string]::IsNullOrWhiteSpace($hostValue) -or -not [string]::IsNullOrWhiteSpace($userValue)) { $entry }
     }
 )
-$hostStatus = @(); $updateDetails = @(); $totalUpdatesInstalled = 0; $vmRebootsScheduled = 0
+$hostStatus = @(); $updateDetails = @(); $totalUpdatesInstalled = 0; $vmRebootsScheduled = 0; $rebootScheduleFailures = 0
 foreach ($entry in $hostEntries) {
     $properties = $entry.PSObject.Properties
     $remoteHost = if ($properties['Host']) { [string]$properties['Host'].Value } elseif ($properties['Name']) { [string]$properties['Name'].Value } else { '' }
@@ -484,17 +484,27 @@ foreach ($entry in $hostEntries) {
             Write-LinuxLog -Message "SSH-Schlüssel und Verbindung zu $remoteHost funktionieren." -LogFile $logFile -Level Success
             continue
         }
+        $result = $null
+        $rebootError = $null
+        $isVirtual = $false; $rebootScheduled = $false
         $result = Invoke-LinuxUpdate -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile -DryRun:$DryRun
         $totalUpdatesInstalled += $result.UpdateCount
-        $isVirtual = $false; $rebootScheduled = $false
         if (-not $DryRun -and $result.RebootRequired) {
-            $isVirtual = Test-LinuxHostIsVirtual -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath
-            $rebootScheduled = Register-LinuxReboot -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -IsVirtual $isVirtual -LogFile $logFile
+            try {
+                $isVirtual = Test-LinuxHostIsVirtual -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath
+                $rebootScheduled = Register-LinuxReboot -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -IsVirtual $isVirtual -LogFile $logFile
+            } catch {
+                $rebootError = $_
+                $rebootScheduleFailures++
+                Write-LinuxLog -Message "WARNUNG: Updates auf $remoteHost wurden installiert, aber der erforderliche Neustart konnte nicht geplant werden. Manuelles Eingreifen erforderlich." -LogFile $logFile -Level Warning
+                Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $logFile } -Operation 'Linux-Neustart planen' -Target $remoteHost -ErrorRecord $_
+            }
             if ($rebootScheduled -and $isVirtual) { $vmRebootsScheduled++ }
         }
         if ($result.UpdateCount -gt 0) { $updateDetails += [PSCustomObject]@{ Host=$remoteHost; UpdateCount=$result.UpdateCount; Packages=$result.UpdatedPackages } }
-        $statusText = if ($result.RebootRequired) { 'Erfolgreich (Neustart erforderlich)' } else { 'Erfolgreich' }
-        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status=$statusText; UpdateCount=$result.UpdateCount; Packages=($result.UpdatedPackages -join ', '); PackageList=@($result.UpdatedPackages); IsVirtual=$isVirtual; RebootScheduled=$rebootScheduled; LogFile=$logFile }
+        $statusText = if ($rebootError) { 'Updates installiert; Neustartplanung fehlgeschlagen' } elseif ($result.RebootRequired) { 'Erfolgreich (Neustart erforderlich)' } else { 'Erfolgreich' }
+        $rebootErrorText = if ($rebootError) { 'Details im Laufprotokoll' } else { '' }
+        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status=$statusText; UpdateCount=$result.UpdateCount; Packages=($result.UpdatedPackages -join ', '); PackageList=@($result.UpdatedPackages); IsVirtual=$isVirtual; RebootScheduled=$rebootScheduled; RebootError=$rebootErrorText; LogFile=$logFile }
         $completionText = if ($DryRun) {
             "Linux-Update-Prüfung auf $remoteHost abgeschlossen: $($result.UpdateCount) Update(s) verfügbar."
         }
@@ -510,11 +520,13 @@ foreach ($entry in $hostEntries) {
         Invoke-LinuxLogRetention -RemoteHost $remoteHost -LogFile $logFile
     }
 }
-$linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; VMRebootsScheduled=$vmRebootsScheduled; PendingPhysicalReboots=@($script:PendingPhysicalReboots); UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
+$linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; RebootScheduleFailedHosts=$rebootScheduleFailures; VMRebootsScheduled=$vmRebootsScheduled; PendingPhysicalReboots=@($script:PendingPhysicalReboots); UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
 $statsFile = Join-Path $PSScriptRoot $(if ($CheckOnly -or $ConnectionOnly) { 'linux_update_check_stats.json' } else { 'linux_update_stats.json' })
 $linuxStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statsFile -Encoding utf8
 $summaryVerb = if ($DryRun) { 'verfügbar' } else { 'installiert' }
 $summaryLabel = if ($CheckOnly) { 'Linux-Check' } else { 'Linux-Zusammenfassung' }
-if (-not $script:QuietMode -and ($totalUpdatesInstalled -gt 0 -or $linuxStats.FailedHosts -gt 0)) {
-    Write-Host "${summaryLabel}: $($linuxStats.HostsProcessed)/$($linuxStats.TotalHosts) erfolgreich, $totalUpdatesInstalled Update(s) $summaryVerb, $($linuxStats.FailedHosts) Fehler." -ForegroundColor Cyan
+if (-not $script:QuietMode -and ($totalUpdatesInstalled -gt 0 -or $linuxStats.FailedHosts -gt 0 -or $rebootScheduleFailures -gt 0)) {
+    $summaryText = "${summaryLabel}: $($linuxStats.HostsProcessed)/$($linuxStats.TotalHosts) erfolgreich, $totalUpdatesInstalled Update(s) $summaryVerb, $($linuxStats.FailedHosts) Fehler."
+    if ($rebootScheduleFailures -gt 0) { $summaryText += " Neustartplanung auf $rebootScheduleFailures Host(s) fehlgeschlagen; manuelles Eingreifen erforderlich." }
+    Write-Host $summaryText -ForegroundColor Cyan
 }
