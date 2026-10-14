@@ -103,6 +103,10 @@ $HACheckExecuted = $false
 $LinuxCheckAttempted = $false
 $HACheckAttempted = $false
 $UpdResultFull = $null
+$script:IsLocalSystemRun = $false
+try {
+  $script:IsLocalSystemRun = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18'
+} catch { }
 $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
 $LogFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_${TimeStamp}.log"
@@ -386,7 +390,15 @@ $cacheDescription = if ($clearCacheBeforeCheck) {
 }
 $enableWingetUpdates = if ($UpdateSettings.PSObject.Properties['EnableWingetUpdates']) { [bool]$UpdateSettings.EnableWingetUpdates } else { $true }
 $enableChocolateyUpdates = if ($UpdateSettings.PSObject.Properties['EnableChocolateyUpdates']) { [bool]$UpdateSettings.EnableChocolateyUpdates } else { $true }
-$packageManagerDescription = "Winget: $(if ($enableWingetUpdates) { 'aktiviert' } else { 'deaktiviert' }); Chocolatey: $(if ($enableChocolateyUpdates) { 'aktiviert' } else { 'deaktiviert' })."
+if ($script:IsLocalSystemRun) {
+  Write-ScriptLog 'Aufgabenlauf als SYSTEM erkannt; Windows-Updates werden geprüft. Benutzerbezogene Paketmanager und Vorbereitungsarbeiten über den normalen WinRM-Endpunkt werden ausgelassen.'
+  $cacheDescription = 'Cache-Bereinigung im SYSTEM-Aufgabenlauf übersprungen.'
+  $enableWingetUpdates = $false
+  $enableChocolateyUpdates = $false
+  $packageManagerDescription = 'Paketmanager im SYSTEM-Aufgabenlauf nicht geprüft.'
+} else {
+  $packageManagerDescription = "Winget: $(if ($enableWingetUpdates) { 'aktiviert' } else { 'deaktiviert' }); Chocolatey: $(if ($enableChocolateyUpdates) { 'aktiviert' } else { 'deaktiviert' })."
+}
 
 # KRITISCH: PSWindowsUpdate-Modul laden
 $moduleLoaded = Import-PSWindowsUpdate
@@ -395,7 +407,7 @@ if (-not $moduleLoaded) {
   exit 1
 }
 
-if ($enableWingetUpdates) {
+if ($enableWingetUpdates -and -not $script:IsLocalSystemRun) {
   $null = Update-WinGetClientModule -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
 }
 
@@ -620,14 +632,20 @@ if ($ServerADList -ne $null) {
         $svcCredential = $remoting.AuthInfo
 
         if ($Servername -ne $env:COMPUTERNAME) {
-          $null = Update-PSWindowsUpdateModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
-          if ($enableWingetUpdates) {
+          if (-not $script:IsLocalSystemRun) {
+            $null = Update-PSWindowsUpdateModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
+          }
+          if ($enableWingetUpdates -and -not $script:IsLocalSystemRun) {
             $null = Update-WinGetClientModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
           }
         }
 
         # Cache leeren UND DetectNow auslösen VOR dem Update-Check
-        Clear-WindowsUpdateCache -Servername $Servername -AuthInfo $svcCredential
+        if ($script:IsLocalSystemRun) {
+          Write-ScriptLog "Cache-Bereinigung auf $Servername im SYSTEM-Aufgabenlauf übersprungen; dafür wären zusätzliche Rechte außerhalb der reinen JEA-Abfragerolle nötig." $true
+        } else {
+          Clear-WindowsUpdateCache -Servername $Servername -AuthInfo $svcCredential
+        }
 
         $UpdResult = $null
 
@@ -860,7 +878,11 @@ if ($ServerADList -ne $null) {
 
         # Zusätzlich installierte Anwendungen über die zentrale Paketverwaltung prüfen.
         try {
-          $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
+          if ($script:IsLocalSystemRun) {
+            $packageResults = @()
+          } else {
+            $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
+          }
         }
         catch {
           # Paketmanager sind optional. Ein separater Remoting-Fehler darf

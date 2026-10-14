@@ -485,6 +485,26 @@ function Invoke-WinRMDeployment {
         } elseif ($DeployType -ne 'AD' -and $usedCertificate) {
             $setupParameters.PreserveExistingCertificateMapping = $true
         }
+        if ($DeployType -eq 'AD') {
+            # Ein Check-Task unter LocalSystem meldet sich an AD-Zielen mit
+            # dem Computerkonto des Verwaltungsservers an. JEA erhält dafür
+            # eine separate, auf Get-WindowsUpdate beschränkte Rolle.
+            try {
+                $managerComputer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+                if (-not $managerComputer.PartOfDomain) {
+                    throw 'Der Verwaltungsserver ist keiner AD-Domäne beigetreten.'
+                }
+                $managerDomain = Get-ADDomain -Identity ([string]$managerComputer.Domain) -ErrorAction Stop
+                if ([string]::IsNullOrWhiteSpace([string]$managerDomain.NetBIOSName)) {
+                    throw "NetBIOS-Domänenname für '$($managerComputer.Domain)' konnte nicht ermittelt werden."
+                }
+                $setupParameters.ManagementComputerAccount = '{0}\{1}$' -f $managerDomain.NetBIOSName, $env:COMPUTERNAME
+                Write-DeployLog "[$Servername] JEA-Zugriff für SYSTEM-Check wird auf das Verwaltungsserver-Computerkonto $($setupParameters.ManagementComputerAccount) beschränkt." -LogOnly
+            }
+            catch {
+                throw "Computerkonto des Verwaltungsservers für den geplanten SYSTEM-Check konnte nicht ermittelt werden: $($_.Exception.Message)"
+            }
+        }
 
         Write-DeployLog "[$Servername] Führe Setup aus ($DeployType)."
         $remoteSetupOutput = @(Invoke-Command -Session $session -ScriptBlock {

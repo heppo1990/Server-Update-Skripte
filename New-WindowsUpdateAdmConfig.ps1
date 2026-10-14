@@ -64,6 +64,11 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$InstallWinGetClientModule,
 
+    # Computerkonto des Verwaltungsservers. Dieses erhält ausschließlich die
+    # eingeschränkte JEA-Rolle für Update-Abfragen aus einem SYSTEM-Aufgabenlauf.
+    [Parameter(Mandatory=$false)]
+    [string]$ManagementComputerAccount,
+
     # Für Ziele außerhalb der Verwaltungs-AD wird Zertifikats-Remoting auch
     # dann benötigt, wenn das Gerät Mitglied einer anderen AD-Domäne ist.
     [Parameter(Mandatory=$false)]
@@ -669,6 +674,7 @@ try {
     
     # Role Capability Datei erstellen
     $RoleCapabilityFile = Join-Path $RoleCapDir "WindowsUpdateRole.psrc"
+    $CheckRoleCapabilityFile = Join-Path $RoleCapDir "WindowsUpdateCheckRole.psrc"
     
     $VisibleCmdlets = @(
         # PSWindowsUpdate Cmdlets
@@ -718,6 +724,26 @@ try {
                              -VisibleExternalCommands @() `
                              -VisibleAliases @()
     Write-SetupLog "Role Capability erstellt: $RoleCapabilityFile" "SUCCESS"
+
+    # Für geplante Checks unter SYSTEM authentifiziert sich der Verwaltungsserver
+    # per Kerberos mit seinem Computerkonto. Diese Rolle erlaubt genau den vom
+    # Check verwendeten Get-WindowsUpdate-Aufruf und keine Installations-Cmdlets.
+    $checkRoleCmdlets = @(
+        @{
+            Name = 'Get-WindowsUpdate'
+            Parameters = @(@{ Name = 'MicrosoftUpdate' })
+        }
+    )
+    if (Test-Path -LiteralPath $CheckRoleCapabilityFile) {
+        Remove-Item -LiteralPath $CheckRoleCapabilityFile -Force -ErrorAction SilentlyContinue
+    }
+    New-PSRoleCapabilityFile -Path $CheckRoleCapabilityFile `
+                             -ModulesToImport 'PSWindowsUpdate' `
+                             -VisibleCmdlets $checkRoleCmdlets `
+                             -VisibleFunctions @() `
+                             -VisibleExternalCommands @() `
+                             -VisibleAliases @()
+    Write-SetupLog "Eingeschränkte Check-Rolle erstellt: $CheckRoleCapabilityFile" "SUCCESS"
     
     # =========================================================
     # === Session Configuration File erstellen (permanent im JEA-Modul)
@@ -783,6 +809,20 @@ try {
     # Vorhandene RoleDefinitions entfernen, um Duplikate zu vermeiden
     $PsscContent = $PsscContent -replace 'RoleDefinitions = @\{.*?\}', ''
     
+    $checkRoleDefinition = ''
+    if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
+        if ($ManagementComputerAccount -notmatch '^[^\\]+\\[^\\]+\$$') {
+            throw "Ungültiges Verwaltungsserver-Computerkonto: '$ManagementComputerAccount'. Erwartet wird DOMAIN\COMPUTER$."
+        }
+        $escapedManagementComputerAccount = $ManagementComputerAccount.Replace("'", "''")
+        $checkRoleDefinition = @"
+    '$escapedManagementComputerAccount' = @{
+        RoleCapabilities = 'WindowsUpdateCheckRole'
+    }
+"@
+        Write-SetupLog "SYSTEM-Checkzugriff wird ausschließlich für $ManagementComputerAccount mit der eingeschränkten Abfrage-Rolle freigeschaltet." "INFO"
+    }
+
     $RoleDefinitionsBlock = @"
 
 # Role Definitions for WindowsUpdateRole
@@ -790,6 +830,7 @@ RoleDefinitions = @{
     '$AdminsName' = @{
         RoleCapabilities = 'WindowsUpdateRole'
     }
+$checkRoleDefinition}
 }
 "@
     $PsscContent = $PsscContent -replace '(\s*)}\s*$', "$RoleDefinitionsBlock`n`$1}"
