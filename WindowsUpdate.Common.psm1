@@ -2387,7 +2387,7 @@ catch {
                 $result += [PSCustomObject]@{ Manager='Chocolatey'; Available=$true; Success=($exitCode -eq 0); Skipped=$false; SkipReason=''; ExitCode=$exitCode; Packages=$packages; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
             }
             catch {
-                $result += [PSCustomObject]@{ Manager='Chocolatey'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput=$_.Exception.Message }
+                $result += [PSCustomObject]@{ Manager='Chocolatey'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='Chocolatey-Abfrage fehlgeschlagen; Details im Log.'; DiagnosticOutput=$_.Exception.ToString() }
             }
         }
         else {
@@ -2407,7 +2407,13 @@ catch {
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
             $serverCaption = ''
-            try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+            try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption }
+            catch {
+                if ($WriteLog) {
+                    Write-CommonLog $WriteLog 'INFO: Betriebssystemversion für WinGet-Sonderbehandlung nicht ermittelbar; allgemeiner WinGet-Pfad wird verwendet.'
+                    Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'Betriebssystem für WinGet-Pfad bestimmen' -Target $ComputerName -ErrorRecord $_ -Context @('Fallback=allgemeiner WinGet-Pfad')
+                }
+            }
             if ($ExecutionMode -eq 'Check' -and $wingetPath -and $serverCaption -match 'Windows Server') {
                 try {
                     $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
@@ -2420,7 +2426,8 @@ catch {
                 catch {
                     $registrationError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
                     if ($registrationError.Length -gt 250) { $registrationError = $registrationError.Substring(0, 247) + '...' }
-                    $wingetBootstrapMessage += " App-Installer-Registrierung fehlgeschlagen: $registrationError"
+                    $wingetBootstrapMessage += ' App-Installer-Registrierung fehlgeschlagen; Details im Log.'
+                    $wingetDiagnosticOutput += "App-Installer-Registrierung:`r`n$($_.Exception.ToString())`r`n"
                 }
             }
             if ($ExecutionMode -eq 'Check' -and $serverCaption -match 'Windows Server (2019|2022)') {
@@ -2446,7 +2453,8 @@ catch {
                     }
                     catch {
                         $wingetPreparationSucceeded = $false
-                        $wingetBootstrapMessage += " Reparatur fehlgeschlagen: $($_.Exception.Message)"
+                        $wingetBootstrapMessage += ' Reparatur fehlgeschlagen; Details im Log.'
+                        $wingetDiagnosticOutput += "WinGet-Reparatur:`r`n$($_.Exception.ToString())`r`n"
                     }
                 }
             }
@@ -2457,7 +2465,7 @@ catch {
                 $retryReason = if ($wingetReconnectRequired) { 'WinGet nach Reparatur oder App-Installer-Registrierung' } else { '' }
                 $result += [PSCustomObject]@{
                     Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
-                    Packages=@(); AvailableOutput=''; ActionOutput=$wingetBootstrapMessage; BootstrapMessage=$wingetBootstrapMessage
+                    Packages=@(); AvailableOutput=''; ActionOutput=$wingetBootstrapMessage; BootstrapMessage=$wingetBootstrapMessage; DiagnosticOutput=$wingetDiagnosticOutput
                     RetryFreshConnection=$retryFreshConnection; RetryReason=$retryReason
                 }
             }
@@ -2704,7 +2712,7 @@ catch {
                     $retryFreshConnection = $retryFreshConnection -or ($queryTimedOut -and $ExecutionMode -eq 'Install')
                     $result += [PSCustomObject]@{
                         Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
-                        Packages=@(); AvailableOutput=''; ActionOutput=$exceptionMessage; DiagnosticOutput=$(if ($wingetDiagnosticOutput) { "$wingetDiagnosticOutput`r`nAbfragefehler:`r`n$($_.Exception.ToString())" } else { $_.Exception.ToString() })
+                        Packages=@(); AvailableOutput=''; ActionOutput='WinGet-Abfrage fehlgeschlagen; Details im Log.'; DiagnosticOutput=$(if ($wingetDiagnosticOutput) { "$wingetDiagnosticOutput`r`nAbfragefehler:`r`n$($_.Exception.ToString())" } else { $_.Exception.ToString() })
                         RetryFreshConnection=$retryFreshConnection; RetryAfterSourceReset=$retryAfterSourceReset
                     }
                 }
@@ -2871,8 +2879,8 @@ catch {
     }
     foreach ($packageResult in $packageResults) {
         $diagnosticProperty = $packageResult.PSObject.Properties['DiagnosticOutput']
-        if ($packageResult.Manager -eq 'Winget' -and $diagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticProperty.Value) -and $WriteLog) {
-            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "WinGet-$Mode" -Target $ComputerName -DiagnosticText ([string]$diagnosticProperty.Value)
+        if ($diagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticProperty.Value) -and $WriteLog) {
+            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "$($packageResult.Manager)-$Mode" -Target $ComputerName -DiagnosticText ([string]$diagnosticProperty.Value)
         }
         if ($packageResult.Manager -eq 'Winget') {
             $availableOutputProperty = $packageResult.PSObject.Properties['AvailableOutput']
