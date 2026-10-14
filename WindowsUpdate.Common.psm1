@@ -438,41 +438,67 @@ function Update-PSWindowsUpdateModule {
                     $windowsPowerShellModulePaths += Join-Path ${env:ProgramFiles(x86)} 'WindowsPowerShell\Modules'
                 }
                 $env:PSModulePath = ($windowsPowerShellModulePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) -join ';'
-                Import-Module PackageManagement -ErrorAction Stop
-                Set-Item -Path Function:\Write-PSWindowsUpdateModuleLog -Value ([scriptblock]::Create($LoggerText))
-                Set-Item -Path Function:\Update-NuGetProvider -Value ([scriptblock]::Create($NuGetUpdaterText))
-                Set-Item -Path Function:\Update-PS7PackageManagementModule -Value ([scriptblock]::Create($PackageManagementUpdaterText))
-                Set-Item -Path Function:\Update-PSWindowsUpdateModule -Value ([scriptblock]::Create($UpdaterText))
-                $remoteLogger = { param($Message, $Level) [pscustomobject]@{ Type = 'ModuleLog'; Message = $Message; Level = $Level } }
-                # ArgumentList-Werte können bei älteren Remoting-Endpunkten als
-                # String zurückkommen. Switches deshalb nur als echte Switch-
-                # Parameter über eine Splat-Hashtable weitergeben.
-                $forceEnabled = $false
-                if ($ForceUpdate -is [bool]) {
-                    $forceEnabled = $ForceUpdate
-                } elseif ($ForceUpdate -is [string]) {
-                    $parsedForce = $false
-                    if ([bool]::TryParse($ForceUpdate, [ref]$parsedForce)) { $forceEnabled = $parsedForce }
-                } elseif ($null -ne $ForceUpdate) {
-                    $forceEnabled = [bool]$ForceUpdate
-                }
-                $null = Update-NuGetProvider -WriteLog $remoteLogger -Force:$forceEnabled
-                foreach ($entry in @(Update-PS7PackageManagementModule -WriteLog $remoteLogger -Force:$forceEnabled)) {
-                    if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type -eq 'ModuleLog') {
-                        [pscustomobject]@{ Type = 'ModuleLog'; Message = [string]$entry.Message; Level = [string]$entry.Level }
+                $originalExecutionPolicyPreference = $env:PSExecutionPolicyPreference
+                $processPolicyAdjusted = $false
+                try {
+                    try {
+                        Import-Module PackageManagement -ErrorAction Stop
+                    }
+                    catch {
+                        if ($_.Exception.Message -notmatch '(?i)(execution policy|Ausführung von Skripts|Ausführung von Skripten)') { throw }
+                        # Nur für diesen kurzlebigen Remoting-Prozess lockern. Keine
+                        # LocalMachine-/CurrentUser-Richtlinie dauerhaft verändern.
+                        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
+                        $processPolicyAdjusted = $true
+                        Import-Module PackageManagement -ErrorAction Stop
+                    }
+                    Set-Item -Path Function:\Write-PSWindowsUpdateModuleLog -Value ([scriptblock]::Create($LoggerText))
+                    Set-Item -Path Function:\Update-NuGetProvider -Value ([scriptblock]::Create($NuGetUpdaterText))
+                    Set-Item -Path Function:\Update-PS7PackageManagementModule -Value ([scriptblock]::Create($PackageManagementUpdaterText))
+                    Set-Item -Path Function:\Update-PSWindowsUpdateModule -Value ([scriptblock]::Create($UpdaterText))
+                    $remoteLogger = { param($Message, $Level) [pscustomobject]@{ Type = 'ModuleLog'; Message = $Message; Level = $Level } }
+                    # ArgumentList-Werte können bei älteren Remoting-Endpunkten als
+                    # String zurückkommen. Switches deshalb nur als echte Switch-
+                    # Parameter über eine Splat-Hashtable weitergeben.
+                    $forceEnabled = $false
+                    if ($ForceUpdate -is [bool]) {
+                        $forceEnabled = $ForceUpdate
+                    } elseif ($ForceUpdate -is [string]) {
+                        $parsedForce = $false
+                        if ([bool]::TryParse($ForceUpdate, [ref]$parsedForce)) { $forceEnabled = $parsedForce }
+                    } elseif ($null -ne $ForceUpdate) {
+                        $forceEnabled = [bool]$ForceUpdate
+                    }
+                    if ($processPolicyAdjusted) {
+                        [pscustomobject]@{ Type = 'ModuleLog'; Message = 'PackageManagement wurde mit einer nur für diesen Remoting-Prozess geltenden Ausführungsrichtlinie geladen.'; Level = 'INFO' }
+                    }
+                    $null = Update-NuGetProvider -WriteLog $remoteLogger -Force:$forceEnabled
+                    foreach ($entry in @(Update-PS7PackageManagementModule -WriteLog $remoteLogger -Force:$forceEnabled)) {
+                        if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type -eq 'ModuleLog') {
+                            [pscustomobject]@{ Type = 'ModuleLog'; Message = [string]$entry.Message; Level = [string]$entry.Level }
+                        }
+                    }
+                    if ($ForceUpdate -isnot [bool] -and $null -ne $ForceUpdate) {
+                        [pscustomobject]@{ Type = 'ModuleLog'; Message = "Force-Argument remote als $($ForceUpdate.GetType().FullName) empfangen; sicher normalisiert."; Level = 'INFO' }
+                    }
+                    $updateParameters = @{ WriteLog = $remoteLogger }
+                    if ($forceEnabled) { $updateParameters.Force = $true }
+                    $updateOutput = @(Update-PSWindowsUpdateModule @updateParameters)
+                    foreach ($entry in $updateOutput) {
+                        if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type -eq 'ModuleLog') {
+                            [pscustomobject]@{ Type = 'ModuleLog'; Message = [string]$entry.Message; Level = [string]$entry.Level }
+                        } elseif ($entry -is [bool]) {
+                            [pscustomobject]@{ Type = 'ModuleResult'; Success = $entry }
+                        }
                     }
                 }
-                if ($ForceUpdate -isnot [bool] -and $null -ne $ForceUpdate) {
-                    [pscustomobject]@{ Type = 'ModuleLog'; Message = "Force-Argument remote als $($ForceUpdate.GetType().FullName) empfangen; sicher normalisiert."; Level = 'INFO' }
-                }
-                $updateParameters = @{ WriteLog = $remoteLogger }
-                if ($forceEnabled) { $updateParameters.Force = $true }
-                $updateOutput = @(Update-PSWindowsUpdateModule @updateParameters)
-                foreach ($entry in $updateOutput) {
-                    if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type -eq 'ModuleLog') {
-                        [pscustomobject]@{ Type = 'ModuleLog'; Message = [string]$entry.Message; Level = [string]$entry.Level }
-                    } elseif ($entry -is [bool]) {
-                        [pscustomobject]@{ Type = 'ModuleResult'; Success = $entry }
+                finally {
+                    if ($processPolicyAdjusted) {
+                        if ([string]::IsNullOrWhiteSpace($originalExecutionPolicyPreference)) {
+                            Remove-Item Env:PSExecutionPolicyPreference -ErrorAction SilentlyContinue
+                        } else {
+                            $env:PSExecutionPolicyPreference = $originalExecutionPolicyPreference
+                        }
                     }
                 }
             }
@@ -2076,7 +2102,13 @@ catch {
 
         function Test-WingetSourceFailureLine {
             param([string]$Line)
-            return $Line -match '(?i)(Fehler bei der WinGet-Abfrage für Quelle|Fehler beim Durchsuchen der Quelle|Fehler beim Versuch, die Quelle zu aktualisieren|An error occurred while searching the source|Failed when searching (?:the )?source|Failed in attempting to update the source)'
+            return $Line -match '(?i)(Fehler bei der WinGet-Abfrage für Quelle|Fehler beim Durchsuchen der Quelle|Fehler beim Versuch, die Quelle zu aktualisieren|Fehler beim Aktualisieren der Quelle|An error occurred while searching the source|Failed when searching (?:the )?source|Failed in attempting to update the source|error occurred while updating source)'
+        }
+
+        function Test-WingetNonPackageOutputLine {
+            param([AllowNull()][string]$Line)
+            if ([string]::IsNullOrWhiteSpace($Line)) { return $true }
+            return $Line -match '(?i)(Terms of Transaction|terms of use|Nutzungsbedingungen|Vereinbarungen der Quelle|Vereinbarungen vor der Verwendung|geographic region|geografische Region|two-letter region|zwei Buchstaben.*Region|accept.*agreement|Zustimmung.*Vereinbarung|no installed package found|es wurde kein installiertes Paket gefunden|no available upgrade|no upgrades available|keine Paketupdates verfügbar|keine Aktualisierungen verfügbar|failed when searching|Fehler beim Durchsuchen der Quelle|Ergebnisse werden nicht einbezogen|results? (?:are )?not included|Store terms|Store-Bedingungen)'
         }
 
         function Get-WingetCompactOutput {
@@ -2100,6 +2132,7 @@ catch {
             $rowPattern = '^\s*(?<Name>.+)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)(?:\s+(?<Source>\S+))?\s*$'
             $rows = foreach ($line in ($Output -split "`r?`n")) {
                 if (Test-WingetSourceFailureLine -Line $line) { continue }
+                if (Test-WingetNonPackageOutputLine -Line $line) { continue }
                 # Je nach WinGet-Version und Umleitung heißen Tabellenköpfe
                 # Name/Id/Version oder SearchName/SearchId/SearchVersion.
                 # Sie sehen sonst wie eine Paketzeile aus und würden gezählt.
@@ -2135,6 +2168,11 @@ catch {
                     UserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
                     PowerShell = $PSVersionTable.PSVersion.ToString()
                 }
+                try {
+                    $utf8 = [System.Text.UTF8Encoding]::new($false)
+                    [Console]::OutputEncoding = $utf8
+                    $OutputEncoding = $utf8
+                } catch { }
                 try {
                     $sourceListOutput = (& $WingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
                     $sourceListExitCode = $LASTEXITCODE
@@ -2254,12 +2292,20 @@ catch {
                 }
                 # list --upgrade-available verwendet bei erfolgreicher Leerabfrage
                 # je nach WinGet-Version/Quelle einen Nicht-Null-Exitcode.
-                $successfulEmptyResult = $sourceOutput -match '(?i)(no installed package found matching input criteria|es wurde kein installiertes paket gefunden, das den eingabekriterien entspricht|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar|0 upgrades? available|0 paketupdates? verfügbar)'
-                if ($sourceExitCode -ne 0 -and -not $successfulEmptyResult) {
+                $reportedSourceFailure = @($sourceOutput -split "`r?`n" | Where-Object {
+                    Test-WingetSourceFailureLine -Line ([string]$_)
+                }).Count -gt 0
+                $successfulEmptyResult = -not $reportedSourceFailure -and
+                    $sourceOutput -match '(?i)(no installed package found matching input criteria|es wurde kein installiertes paket gefunden, das den eingabekriterien entspricht|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar|0 upgrades? available|0 paketupdates? verfügbar)'
+                if (($sourceExitCode -ne 0 -and -not $successfulEmptyResult) -or $reportedSourceFailure) {
                     $detail = if ($sourceErrorProperty -and -not [string]::IsNullOrWhiteSpace([string]$sourceErrorProperty.Value)) {
                         Get-WingetCompactOutput -Text ([string]$sourceErrorProperty.Value) -MaximumLength 500
                     } else {
-                        Get-WingetCompactOutput -Text $sourceOutput -MaximumLength 500
+                        $failureLine = @($sourceOutput -split "`r?`n" | Where-Object {
+                            Test-WingetSourceFailureLine -Line ([string]$_)
+                        } | Select-Object -First 1)
+                        if ($failureLine.Count -gt 0) { Get-WingetCompactOutput -Text ([string]$failureLine[0]) -MaximumLength 500 }
+                        else { Get-WingetCompactOutput -Text $sourceOutput -MaximumLength 500 }
                     }
                     if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe list --upgrade-available endete mit Exitcode $sourceExitCode." }
                     $sourceFailures += "Fehler bei der WinGet-Abfrage für Quelle '$sourceName' - $detail"
