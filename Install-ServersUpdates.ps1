@@ -252,28 +252,71 @@ function Invoke-WindowsUpdates {
                $Servername -ieq $LocalFqdn2
     
     if ($IsLocal) {
-      Write-ScriptLog "Windows-Update-Installation via Loopback-WinRM auf ${Servername}..."
-      $loopbackParams = @{
-        ComputerName  = $Servername
-        ErrorAction   = 'Stop'
-        SessionOption = New-PSSessionOption -IncludePortInSPN
-      }
-      $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Installation auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
-        Invoke-Command @loopbackParams -ArgumentList @($SucheOnline, $DeferredCategories, $DeferredKBs, $DeferredOnly) -ScriptBlock {
-          param($Online, $Categories, $KBs, $OnlyDeferred)
-          Import-Module PSWindowsUpdate -ErrorAction Stop
-          $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
-          if ($Online) { $wuParams.MicrosoftUpdate = $true }
-          if (-not $OnlyDeferred) {
-            if ($Categories.Count -gt 0) { $wuParams.NotCategory = $Categories }
-            if ($KBs.Count -gt 0) { $wuParams.NotKBArticleID = $KBs }
+      # Auch der Verwaltungsserver verwendet zuerst denselben eingeschränkten
+      # WindowsUpdateAdm-Endpunkt wie entfernte Ziele und der Download-Lauf.
+      $localJeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -WriteLog { param($message) Write-ScriptLog $message }
+      if ($localJeaSupported) {
+        try {
+          $jeaTestParams = @{
+            ComputerName      = $Servername
+            ConfigurationName = 'WindowsUpdateAdm'
+            ScriptBlock       = { 1 }
+            ErrorAction       = 'Stop'
           }
-          if ($OnlyDeferred) {
-            $updates = @()
-            foreach ($kb in $KBs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
-            foreach ($category in $Categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
-            $updates
-          } else { Get-WindowsUpdate @wuParams }
+          $null = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Verbindungstest auf Verwaltungsserver $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
+          Write-ScriptLog "Windows-Update-Installation auf dem Verwaltungsserver via WindowsUpdateAdm/JEA: $Servername..."
+          $localJeaParams = @{
+            ComputerName      = $Servername
+            ConfigurationName = 'WindowsUpdateAdm'
+            ArgumentList      = @($SucheOnline, $DeferredCategories, $DeferredKBs, $DeferredOnly)
+            ErrorAction       = 'Stop'
+            ScriptBlock       = {
+              param($Online, $Categories, $KBs, $OnlyDeferred)
+              $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
+              if ($Online) { $wuParams.MicrosoftUpdate = $true }
+              if (-not $OnlyDeferred) {
+                if ($Categories.Count -gt 0) { $wuParams.NotCategory = $Categories }
+                if ($KBs.Count -gt 0) { $wuParams.NotKBArticleID = $KBs }
+              }
+              if ($OnlyDeferred) {
+                $updates = @()
+                foreach ($kb in $KBs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+                foreach ($category in $Categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
+                $updates
+              } else { Get-WindowsUpdate @wuParams }
+            }
+          }
+          $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Update-Installation auf Verwaltungsserver $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @localJeaParams }
+        }
+        catch {
+          Write-ScriptLog "FEHLER: WindowsUpdateAdm auf dem Verwaltungsserver $Servername ist fehlgeschlagen; der abweichende Loopback-Pfad wird nicht verwendet. Details im Log."
+          Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'JEA-Update-Installation-Verwaltungsserver' -Target $Servername -ErrorRecord $_ -Context @('Fallback=keiner; Verwaltungsserver muss denselben WindowsUpdateAdm-Endpunkt wie der Download verwenden')
+          throw
+        }
+      } else {
+        Write-ScriptLog "WindowsUpdateAdm ist auf dem Verwaltungsserver $Servername nicht verfügbar; verwende den bestehenden Loopback-WinRM-Pfad."
+        $loopbackParams = @{
+          ComputerName  = $Servername
+          ErrorAction   = 'Stop'
+          SessionOption = New-PSSessionOption -IncludePortInSPN
+        }
+        $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Installation auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
+          Invoke-Command @loopbackParams -ArgumentList @($SucheOnline, $DeferredCategories, $DeferredKBs, $DeferredOnly) -ScriptBlock {
+            param($Online, $Categories, $KBs, $OnlyDeferred)
+            Import-Module PSWindowsUpdate -ErrorAction Stop
+            $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
+            if ($Online) { $wuParams.MicrosoftUpdate = $true }
+            if (-not $OnlyDeferred) {
+              if ($Categories.Count -gt 0) { $wuParams.NotCategory = $Categories }
+              if ($KBs.Count -gt 0) { $wuParams.NotKBArticleID = $KBs }
+            }
+            if ($OnlyDeferred) {
+              $updates = @()
+              foreach ($kb in $KBs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
+              foreach ($category in $Categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
+              $updates
+            } else { Get-WindowsUpdate @wuParams }
+          }
         }
       }
     } else {
