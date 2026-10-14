@@ -119,7 +119,8 @@ function Write-HostLog {
         [Parameter(Mandatory=$true)][string]$RemoteHost,
         [Parameter(Mandatory=$true)][AllowEmptyString()][string]$LogFile,
         [ValidateSet("Info","Success","Warning","Error")]
-        [string]$Level = "Info"
+        [string]$Level = "Info",
+        [switch]$LogOnly
     )
 
     $colorMap = @{
@@ -137,7 +138,7 @@ function Write-HostLog {
     } catch { }
 
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    if (-not $script:QuietMode -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $fgColor }
+    if (-not $LogOnly -and -not $script:QuietMode -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $fgColor }
     if ($script:WriteExecutionLog) {
         Add-Content -LiteralPath $LogFile -Value $Message -Encoding utf8
     }
@@ -430,6 +431,7 @@ function Invoke-HA {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } `
             -Operation 'HomeAssistant-SSH-Befehl' -Target $RemoteHost -DiagnosticText $outText `
             -Context @("Command=$Command", "ExitCode=$exit")
+        throw "HA-Befehl '$Command' auf $RemoteHost ist mit Exit-Code $exit fehlgeschlagen."
     }
 
     return $stdout
