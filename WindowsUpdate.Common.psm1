@@ -3169,6 +3169,51 @@ catch {
             }
         }
     }
+    # Zusätzliche Schutzprüfung auf dem Aufrufer: Auch wenn Chocolatey-Zeilen
+    # aus einem abweichenden/älteren Abfragepfad zurückkommen, dürfen Pakete
+    # mit identischer installierter und verfügbarer Version nicht gezählt
+    # oder ausgegeben werden.
+    foreach ($chocoResult in @($packageResults | Where-Object { $_.Manager -eq 'Chocolatey' })) {
+        $suppressedCount = 0
+        $filteredPackages = @(
+            foreach ($package in @($chocoResult.Packages)) {
+                $installedVersion = ''
+                $availableVersion = ''
+                if ($package -is [string]) {
+                    $fields = @(([string]$package) -split '\|', 4)
+                    if ($fields.Count -ge 3) {
+                        $installedVersion = ([string]$fields[1]).Trim()
+                        $availableVersion = ([string]$fields[2]).Trim()
+                    }
+                }
+                elseif ($package) {
+                    $installedProperty = $package.PSObject.Properties['InstalledVersion']
+                    $availableProperty = $package.PSObject.Properties['AvailableVersion']
+                    if ($installedProperty) { $installedVersion = ([string]$installedProperty.Value).Trim() }
+                    if ($availableProperty) { $availableVersion = ([string]$availableProperty.Value).Trim() }
+                }
+                if (-not [string]::IsNullOrWhiteSpace($installedVersion) -and
+                    -not [string]::IsNullOrWhiteSpace($availableVersion) -and
+                    [string]::Equals($installedVersion, $availableVersion, [StringComparison]::OrdinalIgnoreCase)) {
+                    $suppressedCount++
+                    continue
+                }
+                $package
+            }
+        )
+        $chocoResult.Packages = $filteredPackages
+        if ($suppressedCount -gt 0) {
+            $duplicateVersionDiagnostic = "Chocolatey: $suppressedCount Paketzeile(n) mit identischer installierter und verfügbarer Version als Nicht-Updates verworfen."
+            $existingDiagnostic = $chocoResult.PSObject.Properties['DiagnosticOutput']
+            if ($existingDiagnostic -and -not [string]::IsNullOrWhiteSpace([string]$existingDiagnostic.Value)) {
+                $chocoResult.DiagnosticOutput = ([string]$existingDiagnostic.Value + [Environment]::NewLine + $duplicateVersionDiagnostic)
+            }
+            else {
+                Add-Member -InputObject $chocoResult -NotePropertyName DiagnosticOutput -NotePropertyValue $duplicateVersionDiagnostic
+            }
+        }
+    }
+
     foreach ($packageResult in $packageResults) {
         $diagnosticProperty = $packageResult.PSObject.Properties['DiagnosticOutput']
         if ($diagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticProperty.Value) -and $WriteLog) {
