@@ -670,19 +670,11 @@ function Get-NextRebootTimeInWindow {
     [switch]$PreferImmediate
   )
   if ($PreferImmediate) {
-    $now = Get-Date
-    $immediateAt = $now.AddMinutes(1 + $DelayMinutes)
-    if ([string]::IsNullOrWhiteSpace($LatestTime) -or [string]::IsNullOrWhiteSpace($StartTime)) { return $immediateAt }
-    $startParsed = [datetime]::MinValue
-    $latestParsed = [datetime]::MinValue
-    if (-not [datetime]::TryParse($StartTime, [ref]$startParsed) -or -not [datetime]::TryParse($LatestTime, [ref]$latestParsed)) {
-      throw 'Ungültige VM-Wartungsfenster-Uhrzeit für einen sofortigen Neustart.'
-    }
-    $windowStart = $now.Date.Add($startParsed.TimeOfDay)
-    if ($now -lt $windowStart) { $windowStart = $windowStart.AddDays(-1) }
-    $windowEnd = $windowStart.Date.Add($latestParsed.TimeOfDay)
-    if ($windowEnd -le $windowStart) { $windowEnd = $windowEnd.AddDays(1) }
-    if ($now -ge $windowStart -and $immediateAt -le $windowEnd) { return $immediateAt }
+    # VMRebootImmediately übersteuert Startzeit und Wartungsfenster. Die
+    # Sicherheitsminute und der konfigurierte Abstand zwischen VMs bleiben.
+    $immediateAt = (Get-Date).AddMinutes(1 + $DelayMinutes)
+    if ($NotBefore -gt $immediateAt) { return $NotBefore }
+    return $immediateAt
   }
   $start = Get-NextScheduledTime $StartTime
   if ([string]::IsNullOrWhiteSpace($LatestTime)) {

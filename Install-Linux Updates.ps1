@@ -110,17 +110,9 @@ function Get-LinuxSshArguments {
 function Get-NextLinuxScheduledTime {
     param([Parameter(Mandatory)][string]$Time, [string]$LatestTime = '', [int]$DelayMinutes = 0, [switch]$PreferImmediate)
     if ($PreferImmediate) {
-        $now = Get-Date
-        $immediateAt = $now.AddMinutes(1 + $DelayMinutes)
-        if ([string]::IsNullOrWhiteSpace($LatestTime) -or [string]::IsNullOrWhiteSpace($Time)) { return $immediateAt }
-        $startParsed = [datetime]::MinValue
-        $latestParsed = [datetime]::MinValue
-        if (-not [datetime]::TryParse($Time, [ref]$startParsed) -or -not [datetime]::TryParse($LatestTime, [ref]$latestParsed)) { throw 'Ungültige VM-Wartungsfenster-Uhrzeit.' }
-        $windowStart = $now.Date.Add($startParsed.TimeOfDay)
-        if ($now -lt $windowStart) { $windowStart = $windowStart.AddDays(-1) }
-        $windowEnd = $windowStart.Date.Add($latestParsed.TimeOfDay)
-        if ($windowEnd -le $windowStart) { $windowEnd = $windowEnd.AddDays(1) }
-        if ($now -ge $windowStart -and $immediateAt -le $windowEnd) { return $immediateAt }
+        # VMRebootImmediately übersteuert Startzeit und Wartungsfenster. Die
+        # Sicherheitsminute und der konfigurierte Abstand zwischen VMs bleiben.
+        return (Get-Date).AddMinutes(1 + $DelayMinutes)
     }
     $parsed = [datetime]::MinValue
     if (-not [datetime]::TryParse($Time, [ref]$parsed)) { throw "Ungültige Neustartzeit: $Time" }
