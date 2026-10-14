@@ -184,7 +184,7 @@ function Register-LinuxReboot {
     if ($null -eq $scheduled) { Write-LinuxLog -Message "Kein automatischer Neustart für $RemoteHost konfiguriert." -LogFile $LogFile; return $false }
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($scheduled - (Get-Date)).TotalMinutes))
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
-    $arguments += "${RemoteUser}@${RemoteHost}", "sudo /sbin/shutdown -r +$delayMinutes"
+    $arguments += "${RemoteUser}@${RemoteHost}", "sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot $delayMinutes"
     & $script:SSHPath @arguments 2>&1 | ForEach-Object { if ($_){ Write-LinuxLog -Message ([string]$_) -LogFile $LogFile } }
     if ($LASTEXITCODE -ne 0) { throw "Linux-Neustart auf $RemoteHost konnte nicht geplant werden." }
     Write-LinuxLog -Message "Neustart auf $RemoteHost geplant: $($scheduled.ToString('dd.MM.yyyy HH:mm'))" -LogFile $LogFile -Level Warning
@@ -232,7 +232,7 @@ function Install-LinuxPublicKey {
 function Test-LinuxUpdateSudo {
     param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath)
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
-    $arguments += "${RemoteUser}@${RemoteHost}", 'sudo -n /usr/bin/true >/dev/null 2>&1'
+    $arguments += "${RemoteUser}@${RemoteHost}", 'sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --check >/dev/null 2>&1'
     & $script:SSHPath @arguments 2>$null | Out-Null
     return ($LASTEXITCODE -eq 0)
 }
@@ -263,8 +263,32 @@ $RemoteUser ALL=(ALL) NOPASSWD: /usr/sbin/reboot
 $RemoteUser ALL=(ALL) NOPASSWD: /sbin/reboot
 $RemoteUser ALL=(ALL) NOPASSWD: /usr/sbin/shutdown
 $RemoteUser ALL=(ALL) NOPASSWD: /sbin/shutdown
+$RemoteUser ALL=(ALL) NOPASSWD: /usr/local/sbin/windowsupdateadm-schedule-reboot
 "@
     $encodedSudoers = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sudoersContent))
+    $rebootHelperContent = @'
+#!/bin/sh
+set -eu
+if [ "$#" -eq 1 ] && [ "$1" = "--check" ]; then
+    exit 0
+fi
+if [ "$#" -ne 1 ]; then
+    echo 'Expected exactly one delay in minutes.' >&2
+    exit 2
+fi
+case "$1" in
+    ''|*[!0-9]*) echo 'Delay must be a positive integer.' >&2; exit 2 ;;
+esac
+if [ "$1" -lt 1 ] || [ "$1" -gt 10080 ]; then
+    echo 'Delay must be between 1 and 10080 minutes.' >&2
+    exit 2
+fi
+if [ -x /usr/sbin/shutdown ]; then
+    exec /usr/sbin/shutdown -r "+$1"
+fi
+exec /sbin/shutdown -r "+$1"
+'@
+    $encodedRebootHelper = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($rebootHelperContent))
     $remoteScript = "/tmp/configure_update_sudo_${safeUser}.sh"
     $bootstrapScript = @'
 #!/bin/sh
@@ -274,9 +298,9 @@ trap 'rm -f "$0"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-sudo -S -p '' /bin/sh -c 'printf %s "$1" | base64 -d > "$2" && chmod 440 "$2" && chown root:root "$2" && visudo -c -f "$2" >/dev/null' -- '__SUDOERS_B64__' '__SUDOERS_PATH__'
+sudo -S -p '' /bin/sh -c 'printf %s "$1" | base64 -d > "$2" && printf %s "$3" | base64 -d > "$4" && chmod 755 "$4" && chown root:root "$4" && chmod 440 "$2" && chown root:root "$2" && visudo -c -f "$2" >/dev/null' -- '__SUDOERS_B64__' '__SUDOERS_PATH__' '__REBOOT_HELPER_B64__' '/usr/local/sbin/windowsupdateadm-schedule-reboot'
 echo SUDOERS_CONFIGURED
-'@.Replace('__SUDOERS_B64__',$encodedSudoers).Replace('__SUDOERS_PATH__',$remoteSudoers)
+'@.Replace('__SUDOERS_B64__',$encodedSudoers).Replace('__SUDOERS_PATH__',$remoteSudoers).Replace('__REBOOT_HELPER_B64__',$encodedRebootHelper)
     $localScript = Join-Path ([IO.Path]::GetTempPath()) ("configure_update_sudo_{0}_{1}.sh" -f $safeUser,[guid]::NewGuid().ToString('N'))
     $localPassword = Join-Path ([IO.Path]::GetTempPath()) ("sudo_password_{0}_{1}.txt" -f $safeUser,[guid]::NewGuid().ToString('N'))
     $bstr = [IntPtr]::Zero
