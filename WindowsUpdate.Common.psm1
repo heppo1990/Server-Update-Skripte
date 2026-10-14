@@ -429,6 +429,16 @@ function Update-PSWindowsUpdateModule {
             $logDefinition = (Get-Command -Name Write-PSWindowsUpdateModuleLog -CommandType Function).Definition
             $remoteWorker = {
                 param($UpdaterText, $NuGetUpdaterText, $PackageManagementUpdaterText, $LoggerText, $ForceUpdate)
+                $windowsPowerShellModulePaths = @(
+                    (Join-Path $HOME 'Documents\WindowsPowerShell\Modules'),
+                    (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'),
+                    (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\Modules')
+                )
+                if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+                    $windowsPowerShellModulePaths += Join-Path ${env:ProgramFiles(x86)} 'WindowsPowerShell\Modules'
+                }
+                $env:PSModulePath = ($windowsPowerShellModulePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) -join ';'
+                Import-Module PackageManagement -ErrorAction Stop
                 Set-Item -Path Function:\Write-PSWindowsUpdateModuleLog -Value ([scriptblock]::Create($LoggerText))
                 Set-Item -Path Function:\Update-NuGetProvider -Value ([scriptblock]::Create($NuGetUpdaterText))
                 Set-Item -Path Function:\Update-PS7PackageManagementModule -Value ([scriptblock]::Create($PackageManagementUpdaterText))
@@ -613,6 +623,17 @@ function Update-WinGetClientModule {
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 try {
+    # Isoliere Windows PowerShell von an den Kindprozess vererbten PS7-Modulpfaden.
+    $windowsPowerShellModulePaths = @(
+        (Join-Path $HOME 'Documents\WindowsPowerShell\Modules'),
+        (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'),
+        (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\Modules')
+    )
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+        $windowsPowerShellModulePaths += Join-Path ${env:ProgramFiles(x86)} 'WindowsPowerShell\Modules'
+    }
+    $env:PSModulePath = ($windowsPowerShellModulePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) -join ';'
+    Import-Module PackageManagement -ErrorAction Stop
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $minimumNuGetVersion = [version]'2.8.5.201'
     $nuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
@@ -640,7 +661,9 @@ try {
 }
 catch {
     $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-    "__WINGETCLIENT__ERROR`t$detail"
+    $detail += " PSModulePath=$env:PSModulePath"
+    $detailPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($detail))
+    "__WINGETCLIENT__ERROR`t$detailPayload"
     exit 1
 }
 '@
@@ -672,7 +695,12 @@ catch {
                 else { $logs.Add([pscustomobject]@{ Type = 'Log'; Message = "Microsoft.WinGet.Client bereit (Version $($Matches.Version); $($Matches.State))."; Level = 'SUCCESS' }) }
             }
             else {
-                $detail = if ($resultLine.Count -gt 0 -and $resultLine[0] -match '^__WINGETCLIENT__ERROR\t(?<Detail>.*)$') { $Matches.Detail } else { ($childOutput -join ' ' -replace '\s+', ' ').Trim() }
+                if ($resultLine.Count -gt 0 -and $resultLine[0] -match '^__WINGETCLIENT__ERROR\t(?<Detail>[A-Za-z0-9+/=]+)$') {
+                    try { $detail = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches.Detail)) }
+                    catch { $detail = 'Fehlerdetails des Modul-Unterprozesses waren nicht lesbar.' }
+                } else {
+                    $detail = ($childOutput -join ' ' -replace '\s+', ' ').Trim()
+                }
                 if ($detail.Length -gt 350) { $detail = $detail.Substring(0, 347) + '...' }
                 throw "Microsoft.WinGet.Client konnte nicht installiert/aktualisiert werden (Exitcode $childExitCode)$(if ($detail) { ": $detail" })."
             }
@@ -2100,8 +2128,26 @@ catch {
             }
             $cliJob = Start-Job -ArgumentList $Path -ScriptBlock {
                 param([string]$WingetPath)
-                $sourceListOutput = (& $WingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-                $sourceListExitCode = $LASTEXITCODE
+                $ErrorActionPreference = 'Stop'
+                $runtimeContext = [pscustomobject]@{
+                    Executable = $WingetPath
+                    User = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                    UserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                    PowerShell = $PSVersionTable.PSVersion.ToString()
+                }
+                try {
+                    $sourceListOutput = (& $WingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+                    $sourceListExitCode = $LASTEXITCODE
+                    $sourceListError = ''
+                }
+                catch {
+                    [pscustomobject]@{
+                        Success = $false; SourceListOutput = ''; SourceListExitCode = -1
+                        SourceListError = $_.Exception.ToString(); Context = $runtimeContext
+                        Sources = @(); SkippedSources = @(); Results = @()
+                    }
+                    return
+                }
                 $explicitSourceNames = @()
                 $skippedSources = @()
                 if ($sourceListExitCode -eq 0) {
@@ -2126,6 +2172,7 @@ catch {
                 if ($sourceListExitCode -ne 0) {
                     [pscustomobject]@{
                         Success = $false; SourceListOutput = $sourceListOutput; SourceListExitCode = $sourceListExitCode
+                        SourceListError = ''; Context = $runtimeContext
                         Sources = @(); SkippedSources = @($skippedSources); Results = @()
                     }
                     return
@@ -2143,13 +2190,21 @@ catch {
                         '--accept-source-agreements', '--disable-interactivity'
                     )
                     if ($queryDefinition.Explicit) { $arguments += @('--source', $sourceName) }
-                    $output = (& $WingetPath @arguments 2>&1 | Out-String -Width 1200).Trim()
-                    $sourceResults += [pscustomobject]@{
-                        Source = $sourceName; Output = $output; ExitCode = $LASTEXITCODE
+                    try {
+                        $output = (& $WingetPath @arguments 2>&1 | Out-String -Width 1200).Trim()
+                        $sourceResults += [pscustomobject]@{
+                            Source = $sourceName; Output = $output; ExitCode = $LASTEXITCODE; Error = ''
+                        }
+                    }
+                    catch {
+                        $sourceResults += [pscustomobject]@{
+                            Source = $sourceName; Output = ''; ExitCode = -1; Error = $_.Exception.ToString()
+                        }
                     }
                 }
                 [pscustomobject]@{
                     Success = $true; SourceListOutput = $sourceListOutput; SourceListExitCode = $sourceListExitCode
+                    SourceListError = $sourceListError; Context = $runtimeContext
                     Sources = @($queryDefinitions | ForEach-Object { $_.Source }); SkippedSources = @($skippedSources)
                     Results = @($sourceResults)
                 }
@@ -2167,7 +2222,14 @@ catch {
                 Remove-Job -Job $cliJob -Force -ErrorAction SilentlyContinue
             }
 
-            $diagnostics = @("Quellenliste (Exitcode $($cliResult.SourceListExitCode)):`r`n$($cliResult.SourceListOutput)")
+            $context = $cliResult.Context
+            $diagnostics = @(
+                "WinGet-CLI-Kontext: Benutzer=$($context.User); SID=$($context.UserSid); PowerShell=$($context.PowerShell); Pfad=$($context.Executable)"
+                "Quellenliste (Exitcode $($cliResult.SourceListExitCode)):`r`n$($cliResult.SourceListOutput)"
+            )
+            if (-not [string]::IsNullOrWhiteSpace([string]$cliResult.SourceListError)) {
+                $diagnostics += "Quellenlistenaufruf-Ausnahme:`r`n$($cliResult.SourceListError)"
+            }
             if (@($cliResult.SkippedSources).Count -gt 0) {
                 $diagnostics += "Übersprungene integrierte Quellen ohne App-Updates: $(@($cliResult.SkippedSources) -join ', ')."
             }
@@ -2184,12 +2246,21 @@ catch {
                 $sourceName = [string]$sourceResult.Source
                 $sourceOutput = [string]$sourceResult.Output
                 $sourceExitCode = [int]$sourceResult.ExitCode
-                $diagnostics += "Quelle '$sourceName' (Exitcode $sourceExitCode):`r`n$sourceOutput"
+                $sourceErrorProperty = $sourceResult.PSObject.Properties['Error']
+                if ($sourceErrorProperty -and -not [string]::IsNullOrWhiteSpace([string]$sourceErrorProperty.Value)) {
+                    $diagnostics += "Quelle '$sourceName' (Startfehler):`r`n$([string]$sourceErrorProperty.Value)"
+                } else {
+                    $diagnostics += "Quelle '$sourceName' (Exitcode $sourceExitCode):`r`n$sourceOutput"
+                }
                 # list --upgrade-available verwendet bei erfolgreicher Leerabfrage
                 # je nach WinGet-Version/Quelle einen Nicht-Null-Exitcode.
                 $successfulEmptyResult = $sourceOutput -match '(?i)(no installed package found matching input criteria|es wurde kein installiertes paket gefunden, das den eingabekriterien entspricht|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar|0 upgrades? available|0 paketupdates? verfügbar)'
                 if ($sourceExitCode -ne 0 -and -not $successfulEmptyResult) {
-                    $detail = Get-WingetCompactOutput -Text $sourceOutput -MaximumLength 500
+                    $detail = if ($sourceErrorProperty -and -not [string]::IsNullOrWhiteSpace([string]$sourceErrorProperty.Value)) {
+                        Get-WingetCompactOutput -Text ([string]$sourceErrorProperty.Value) -MaximumLength 500
+                    } else {
+                        Get-WingetCompactOutput -Text $sourceOutput -MaximumLength 500
+                    }
                     if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe list --upgrade-available endete mit Exitcode $sourceExitCode." }
                     $sourceFailures += "Fehler bei der WinGet-Abfrage für Quelle '$sourceName' - $detail"
                     continue
@@ -2463,15 +2534,7 @@ catch {
             $wingetDiagnosticOutput = ''
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
-            $serverCaption = ''
-            try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption }
-            catch {
-                if ($WriteLog) {
-                    Write-CommonLog $WriteLog 'INFO: Betriebssystemversion für WinGet-Sonderbehandlung nicht ermittelbar; allgemeiner WinGet-Pfad wird verwendet.'
-                    Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'Betriebssystem für WinGet-Pfad bestimmen' -Target $ComputerName -ErrorRecord $_ -Context @('Fallback=allgemeiner WinGet-Pfad')
-                }
-            }
-            if ($ExecutionMode -eq 'Check' -and $wingetPath -and $serverCaption -match 'Windows Server') {
+            if ($ExecutionMode -eq 'Check' -and $wingetPath) {
                 try {
                     $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
                     if ($appInstallerRegistration.RegistrationChanged) {
@@ -2583,7 +2646,8 @@ catch {
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0) {
                     if ($SourceResetPerformed) {
-                        $wingetBootstrapMessage += ' WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar.'
+                        # Die äußere Wiederholungslogik protokolliert den Erfolg
+                        # samt neuer Sitzung genau einmal.
                     }
                     elseif ($wingetCliFallback) {
                         $wingetBootstrapMessage += ' WinGet-CLI-Abfrage war erfolgreich; keine Paketupdates verfügbar.'
@@ -2898,10 +2962,17 @@ catch {
                     if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet lieferte erneut kein auswertbares Ergebnis.' }
                     throw "Wiederholungsprüfung blieb fehlerhaft: $retryDetail"
                 }
-                $retryMessage = if ($retryRequiresSourceReset) {
-                    'WinGet nach Quellenreset in neuer Sitzung erneut geprüft.'
+                if (-not [bool]$retryResult.Success) {
+                    $retryDetail = ([string]$retryResult.ActionOutput -replace '\s+', ' ').Trim()
+                    if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet meldete einen Abfragefehler.' }
+                    throw "Wiederholungsprüfung fehlgeschlagen: $retryDetail"
+                }
+                $retryMessage = if ($retryRequiresSourceReset -and @($retryResult.Packages).Count -eq 0) {
+                    'WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar.'
+                } elseif ($retryRequiresSourceReset) {
+                    'WinGet-Wiederholungsprüfung nach Quellenreset in neuer Sitzung erfolgreich.'
                 } else {
-                    'WinGet nach Fehler in neuer Sitzung erneut geprüft.'
+                    'WinGet-Wiederholungsprüfung in neuer Sitzung erfolgreich.'
                 }
                 foreach ($wingetResult in $retryResults) {
                     $bootstrapProperty = $wingetResult.PSObject.Properties['BootstrapMessage']
@@ -2953,7 +3024,7 @@ catch {
         $bootstrapMessageProperty = $packageResult.PSObject.Properties['BootstrapMessage']
         if ($packageResult.Manager -eq 'Winget' -and $bootstrapMessageProperty -and -not [string]::IsNullOrWhiteSpace([string]$bootstrapMessageProperty.Value)) {
             $bootstrapMessage = [string]$bootstrapMessageProperty.Value
-            $logOnly = $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des 24-Stunden-Limits übersprungen\.|WinGet-Abfrage nach erfolgreich abgeschlossenem Quellenreset war erfolgreich; keine Paketupdates verfügbar\.'
+            $logOnly = $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des 24-Stunden-Limits übersprungen\.|WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar\.'
             if ($WriteLog) { & $WriteLog $bootstrapMessage ([bool]$logOnly) }
         }
     }
