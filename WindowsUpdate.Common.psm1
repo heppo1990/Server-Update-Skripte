@@ -2017,7 +2017,7 @@ try {
             throw 'Das WinGet-Quellenpaket wurde nach Add-AppxPackage im aktuellen Benutzerprofil nicht gefunden.'
         }
     }
-    [Console]::Out.WriteLine('__WINGETSOURCE__SUCCESS`t{0}`t{1}', [string]$registered[-1].Version, $sourceChanged)
+    [Console]::Out.WriteLine('__WINGETSOURCE__SUCCESS|{0}|{1}', [string]$registered[-1].Version, $sourceChanged)
 }
 catch {
     [Console]::Error.WriteLine($_.Exception.ToString())
@@ -2037,11 +2037,11 @@ finally {
             $output = (& $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
                 -EncodedCommand $encodedScript 2>&1 | Out-String -Width 300).Trim()
             $exitCode = $LASTEXITCODE
-            $successLine = @($output -split "`r?`n" | Where-Object { $_ -match '^__WINGETSOURCE__SUCCESS\t' } | Select-Object -Last 1)
+            $successLine = @($output -split "`r?`n" | Where-Object { $_ -match '^__WINGETSOURCE__SUCCESS\|' } | Select-Object -Last 1)
             if ($exitCode -ne 0 -or $successLine.Count -eq 0) {
                 throw "Registrierung des WinGet-Quellenpakets fehlgeschlagen (Exitcode $exitCode): $output"
             }
-            $successFields = $successLine[0] -split "`t", 4
+            $successFields = $successLine[0] -split '\|', 3
             return [pscustomobject]@{
                 Changed = [bool]::Parse($successFields[2])
                 Version = $successFields[1]
