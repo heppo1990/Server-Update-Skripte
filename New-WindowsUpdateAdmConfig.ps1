@@ -613,6 +613,11 @@ try {
             throw "Windows PowerShell 5.1 wurde nicht gefunden: $localPowerShell"
         }
         $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA' -f $PSCommandPath
+        if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
+            # Die SYSTEM-Finalisierung muss dieselbe eingeschränkte JEA-Rolle
+            # für den Verwaltungsserver registrieren wie der ursprüngliche Lauf.
+            $arguments += ' -ManagementComputerAccount "{0}"' -f $ManagementComputerAccount
+        }
         $taskName = 'WindowsUpdateAdm-Finalize'
         $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
             (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
@@ -831,9 +836,15 @@ RoleDefinitions = @{
         RoleCapabilities = 'WindowsUpdateRole'
     }
 $checkRoleDefinition}
-}
 "@
-    $PsscContent = $PsscContent -replace '(\s*)}\s*$', "$RoleDefinitionsBlock`n`$1}"
+    $PsscContent = [regex]::Replace(
+        $PsscContent,
+        '(\s*)}\s*$',
+        [System.Text.RegularExpressions.MatchEvaluator]{
+            param($match)
+            $RoleDefinitionsBlock + "`n" + $match.Groups[1].Value + '}'
+        }
+    )
     Set-Content -Path $PermanentPSSC -Value $PsscContent -Force
     Write-SetupLog "RoleDefinitions erfolgreich eingefuegt" "SUCCESS"
     
