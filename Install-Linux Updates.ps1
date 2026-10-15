@@ -483,7 +483,7 @@ foreach ($entry in $hostEntries) {
             }
             if (-not (Test-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
                 $setupIssue = "Linux-Updateeinrichtung fehlt oder ist veraltet (erwartete Version $script:LinuxSudoSetupVersion); Verteilung erforderlich."
-                throw $setupIssue
+                Write-LinuxLog -Message "$setupIssue Die lesende Update-Suche wird trotzdem versucht." -LogFile $logFile -Level Warning
             }
         } elseif (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
             Install-LinuxPublicKey -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile
@@ -516,7 +516,7 @@ foreach ($entry in $hostEntries) {
         if ($result.UpdateCount -gt 0) { $updateDetails += [PSCustomObject]@{ Host=$remoteHost; UpdateCount=$result.UpdateCount; Packages=$result.UpdatedPackages } }
         $statusText = if ($rebootError) { 'Updates installiert; Neustartplanung fehlgeschlagen' } elseif ($result.RebootRequired) { 'Erfolgreich (Neustart erforderlich)' } else { 'Erfolgreich' }
         $rebootErrorText = if ($rebootError) { 'Details im Laufprotokoll' } else { '' }
-        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status=$statusText; SetupReady=$true; SetupIssue=''; UpdateCount=$result.UpdateCount; Packages=($result.UpdatedPackages -join ', '); PackageList=@($result.UpdatedPackages); IsVirtual=$isVirtual; RebootScheduled=$rebootScheduled; RebootError=$rebootErrorText; LogFile=$logFile }
+        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status=$statusText; SetupReady=[string]::IsNullOrWhiteSpace($setupIssue); SetupIssue=$setupIssue; UpdateCount=$result.UpdateCount; Packages=($result.UpdatedPackages -join ', '); PackageList=@($result.UpdatedPackages); IsVirtual=$isVirtual; RebootScheduled=$rebootScheduled; RebootError=$rebootErrorText; LogFile=$logFile }
         $completionText = if ($DryRun) {
             "Linux-Update-Prüfung auf $remoteHost abgeschlossen: $($result.UpdateCount) Update(s) verfügbar."
         }

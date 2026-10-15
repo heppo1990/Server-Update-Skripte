@@ -1121,22 +1121,22 @@ if (-not $script:IsLocalSystemRun -and $LinuxConfigured -and (Test-Path -Literal
       $RepBody += "<div class='section-title'>🐧 Linux-Updates</div>"
       foreach ($linuxHost in @($linuxCheckStats.HostStatus)) {
         $RepBody += "<div class='server-title'>Server: $([System.Net.WebUtility]::HtmlEncode([string]$linuxHost.Host))</div>"
+        if (-not [string]::IsNullOrWhiteSpace([string]$linuxHost.SetupIssue)) {
+          Add-CheckExternalSetupNotice -Area 'Linux' -Target ([string]$linuxHost.Host) -Reason ([string]$linuxHost.SetupIssue)
+        }
         if ($linuxHost.Status -eq 'Fehler') {
           $linuxError = [string]$linuxHost.Error
           if (-not [string]::IsNullOrWhiteSpace($linuxError)) { Write-ScriptLog "Linux-Check auf $($linuxHost.Host) fehlgeschlagen: $linuxError (Log: $($linuxHost.LogFile))" }
-          if (-not [string]::IsNullOrWhiteSpace([string]$linuxHost.SetupIssue)) {
-            Add-CheckExternalSetupNotice -Area 'Linux' -Target ([string]$linuxHost.Host) -Reason ([string]$linuxHost.SetupIssue)
-          }
           $RepBody += "<div class='error-box'>Linux-Check fehlgeschlagen.</div>"
         } elseif ([int]$linuxHost.UpdateCount -gt 0) {
-          Write-ScriptLog "Linux-Einrichtung auf $($linuxHost.Host) aktuell; keine erneute Verteilung erforderlich." $true
+          if ([string]::IsNullOrWhiteSpace([string]$linuxHost.SetupIssue)) { Write-ScriptLog "Linux-Einrichtung auf $($linuxHost.Host) aktuell; keine erneute Verteilung erforderlich." $true }
           $packageList = @(([string]$linuxHost.Packages -split ',\s*') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
           $packages = [System.Net.WebUtility]::HtmlEncode(($packageList -join "`n")) -replace "`n", '<br>'
           Write-ScriptLog "Linux auf $($linuxHost.Host): $($linuxHost.UpdateCount) Paketupdates verfügbar."
           foreach ($package in $packageList) { Write-ScriptLog "  $($linuxHost.Host): $package" }
           $RepBody += "<div class='info-box'><strong>$($linuxHost.UpdateCount) Paketupdate(s) verfügbar:</strong><br>$packages</div>"
         } else {
-          Write-ScriptLog "Linux-Einrichtung auf $($linuxHost.Host) aktuell; keine erneute Verteilung erforderlich." $true
+          if ([string]::IsNullOrWhiteSpace([string]$linuxHost.SetupIssue)) { Write-ScriptLog "Linux-Einrichtung auf $($linuxHost.Host) aktuell; keine erneute Verteilung erforderlich." $true }
           Write-ScriptLog "Linux auf $($linuxHost.Host): keine Paketupdates verfügbar."
           $RepBody += "<div class='no-updates'>Keine Linux-Updates verfügbar.</div>"
         }
