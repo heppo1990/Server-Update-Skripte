@@ -138,7 +138,12 @@ if [ -d /var/log/apt ] && ls /var/log/apt/history.log* >/dev/null 2>&1; then
       date=""; endDate=0; hasError=0; install=""; upgrade=""; remove=""; purge=""
       for (i=1; i<=NF; i++) {
         line=$i
-        if (line ~ /^Start-Date:/) { date=line; sub(/^Start-Date:[[:space:]]*/, "", date); date=substr(date, 1, 16) }
+        if (line ~ /^Start-Date:/) {
+          date=line
+          sub(/^Start-Date:[[:space:]]*/, "", date)
+          gsub(/[[:space:]]+/, " ", date)
+          date=substr(date, 1, 16)
+        }
         else if (line ~ /^End-Date:/) { endDate=1 }
         else if (line ~ /^Error:/) { hasError=1 }
         else if (line ~ /^(Install|Upgrade|Remove|Purge):/) {
