@@ -263,6 +263,11 @@ try {
                     $historyDate = [datetime]$item.Date
                     $historyDateKind = $historyDate.Kind.ToString()
                     if ($historyDate.Kind -eq [DateTimeKind]::Utc) { $historyDate = $historyDate.ToLocalTime() }
+                    elseif ($historyDate.Kind -eq [DateTimeKind]::Unspecified) {
+                        # PSWindowsUpdate/JEA liefert WUA-Zeitwerte teils ohne Kind,
+                        # obwohl sie UTC darstellen. Mit der Zielzeitzone lokalisieren.
+                        $historyDate = [datetime]::SpecifyKind($historyDate, [DateTimeKind]::Utc).ToLocalTime()
+                    }
                     [pscustomobject]@{
                         # UTC-Werte im Zielkontext in lokale Zeit umwandeln.
                         # Zeittext ohne Zeitzone verhindert eine weitere WinRM-Umdeutung.
