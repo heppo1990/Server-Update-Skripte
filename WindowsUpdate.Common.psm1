@@ -1485,6 +1485,7 @@ function Get-WindowsUpdateTargets {
         [ValidateRange(0, 100000)][int]$LinuxTargetCount = 0,
         [ValidateRange(0, 100000)][int]$HomeAssistantTargetCount = 0,
         [switch]$IncludeAdditionalTargetCounts,
+        [switch]$ADTargetsOnly,
         [switch]$StrictAdditionalTargetClassification,
         [scriptblock]$WriteLog
     )
@@ -1621,6 +1622,15 @@ function Get-WindowsUpdateTargets {
                 }
             }
         }
+    }
+
+    if ($ADTargetsOnly) {
+        $beforeFilterCount = $targets.Count
+        $targets = @($targets | Where-Object {
+            -not $_.IsAdditional -and -not $_.IsHypervisor -and -not $_.ClassificationError
+        })
+        $excludedTargetCount = $beforeFilterCount - $targets.Count
+        Write-CommonLog $WriteLog "AD-Aufgabenlauf: $($targets.Count) AD-Ziel(e) aufgenommen; $excludedTargetCount Nicht-AD-/unbestätigte Windows-Ziel(e) ausgeschlossen."
     }
 
     if ($IncludeAdditionalTargetCounts) {

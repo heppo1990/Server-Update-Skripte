@@ -461,9 +461,10 @@ $ServerADList = Get-WindowsUpdateTargets `
   -UpdateSettings $UpdateSettings `
   -TargetComputers $TargetComputers `
   -PowerShellMajor $psVersion `
-  -LinuxTargetCount $LinuxConfiguredHostCount `
-  -HomeAssistantTargetCount $(if ($HAConfigured) { 1 } else { 0 }) `
+  -LinuxTargetCount $(if ($script:IsLocalSystemRun) { 0 } else { $LinuxConfiguredHostCount }) `
+  -HomeAssistantTargetCount $(if ($script:IsLocalSystemRun -or -not $HAConfigured) { 0 } else { 1 }) `
   -IncludeAdditionalTargetCounts `
+  -ADTargetsOnly:$script:IsLocalSystemRun `
   -WriteLog { param($message) Write-ScriptLog $message }
 
 # HTML-Report initialisieren
@@ -704,6 +705,7 @@ if ($ServerADList -ne $null) {
 
         # Prüfe ob WindowsUpdateAdm verfügbar ist (nur remote)
         $useJEA = $false
+        $jeaQueryCompleted = $false
         $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $svcCredential -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
         if ($jeaSupported) {
           $useJEA = $true
@@ -711,11 +713,13 @@ if ($ServerADList -ne $null) {
             $jeaTestParams = @{
               ComputerName        = $Servername
               ConfigurationName   = 'WindowsUpdateAdm'
+              ArgumentList        = [bool]$SucheOnline
               ScriptBlock         = {
-                $updateCommand = Get-Command -Name Get-WindowsUpdate -ErrorAction Stop
-                [PSCustomObject]@{
-                  CommandName               = $updateCommand.Name
-                  MicrosoftUpdateAvailable  = $updateCommand.Parameters.ContainsKey('MicrosoftUpdate')
+                param($SearchOnline)
+                if ($SearchOnline) {
+                  Get-WindowsUpdate -MicrosoftUpdate
+                } else {
+                  Get-WindowsUpdate
                 }
               }
               ErrorAction         = 'Stop'
@@ -725,10 +729,12 @@ if ($ServerADList -ne $null) {
               foreach ($k in $authParams.Keys) { if ($k -ne 'ComputerName') { $jeaTestParams[$k] = $authParams[$k] } }
             }
             $jeaEndpointProbe = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Endpunktprüfung auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
-            if (-not $jeaEndpointProbe -or $jeaEndpointProbe.CommandName -ne 'Get-WindowsUpdate' -or -not $jeaEndpointProbe.MicrosoftUpdateAvailable) {
-              throw 'WindowsUpdateAdm ist erreichbar, stellt Get-WindowsUpdate oder den benötigten Parameter -MicrosoftUpdate aber nicht korrekt bereit.'
-            }
-            Write-ScriptLog "WindowsUpdateAdm-Endpunkt auf $Servername geprüft: Get-WindowsUpdate und -MicrosoftUpdate sind verfügbar." $true
+            # Der SYSTEM-JEA-Endpunkt gibt absichtlich nur Get-WindowsUpdate
+            # frei. Get-Command ist dort gesperrt; die echte Update-Abfrage ist
+            # zugleich der aussagekräftige Funktionstest und wird wiederverwendet.
+            $UpdResult = $jeaEndpointProbe
+            $jeaQueryCompleted = $true
+            Write-ScriptLog "WindowsUpdateAdm-Endpunkt und Update-Abfrage auf $Servername erfolgreich." $true
           } catch {
             $useJEA = $false
             Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-JEA-Verbindungstest ist fehlgeschlagen; der Check versucht Standard-Remoting als Fallback.'
@@ -745,26 +751,28 @@ if ($ServerADList -ne $null) {
         # Updates abrufen
         if ($useJEA) {
           Write-ScriptLog "Remote Update-Check via JEA auf $Servername..."
-          try {
-            $jeaParams = @{
-              ComputerName      = $Servername
-              ConfigurationName = 'WindowsUpdateAdm'
-              ArgumentList      = $SucheOnline
-              ScriptBlock       = $sbWU_JEA
-              ErrorAction       = 'Stop'
+          if (-not $jeaQueryCompleted) {
+            try {
+              $jeaParams = @{
+                ComputerName      = $Servername
+                ConfigurationName = 'WindowsUpdateAdm'
+                ArgumentList      = $SucheOnline
+                ScriptBlock       = $sbWU_JEA
+                ErrorAction       = 'Stop'
+              }
+              if ($svcCredential) {
+                $authExtra = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $svcCredential
+                foreach ($k in $authExtra.Keys) { if ($k -ne 'ComputerName') { $jeaParams[$k] = $authExtra[$k] } }
+              }
+              $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Update-Check auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaParams }
+            } catch {
+              $msg = $_.Exception.Message
+              if ($msg -match "Get-WindowsUpdate.*not recognized|wurde nicht als Name eines Cmdlet") {
+                Add-CheckRedistributionNotice -Target $Servername -Reason 'Im WindowsUpdateAdm-JEA-Endpunkt fehlt das Cmdlet Get-WindowsUpdate.'
+                throw "WindowsUpdateAdm Endpoint hat kein Get-WindowsUpdate verfügbar."
+              }
+              throw
             }
-            if ($svcCredential) {
-              $authExtra = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $svcCredential
-              foreach ($k in $authExtra.Keys) { if ($k -ne 'ComputerName') { $jeaParams[$k] = $authExtra[$k] } }
-            }
-            $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Update-Check auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaParams }
-          } catch {
-            $msg = $_.Exception.Message
-            if ($msg -match "Get-WindowsUpdate.*not recognized|wurde nicht als Name eines Cmdlet") {
-              Add-CheckRedistributionNotice -Target $Servername -Reason 'Im WindowsUpdateAdm-JEA-Endpunkt fehlt das Cmdlet Get-WindowsUpdate.'
-              throw "WindowsUpdateAdm Endpoint hat kein Get-WindowsUpdate verfügbar."
-            }
-            throw
           }
         } elseif ($Servername -ieq $env:COMPUTERNAME) {
           Write-ScriptLog "Update-Check via Loopback-WinRM auf $Servername..."
@@ -1042,7 +1050,7 @@ foreach ($staleStatsPath in @($linuxCheckStatsPath, $haCheckStatsPath)) {
 }
 
 $linuxCheckScript = Join-Path $PSScriptRoot 'Install-Linux Updates.ps1'
-if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
+if (-not $script:IsLocalSystemRun -and $LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
   $LinuxCheckAttempted = $true
   try {
     Write-ScriptLog ''
@@ -1090,7 +1098,7 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
 }
 
 $haCheckScript = Join-Path $PSScriptRoot 'Install-HomeAssistant Updates.ps1'
-if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
+if (-not $script:IsLocalSystemRun -and $HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   $HACheckAttempted = $true
   try {
     Write-ScriptLog ''
