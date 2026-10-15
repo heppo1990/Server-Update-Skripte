@@ -149,18 +149,28 @@ $renewalWindowDays = 42
 $matchingCertificates = @(Get-ChildItem $certStorePath |
     Where-Object { $_.Subject -eq "CN=$CertName" } |
     Sort-Object NotAfter -Descending)
-$existingCert = $matchingCertificates |
-    Where-Object { $_.NotAfter -gt (Get-Date).AddDays($renewalWindowDays) } |
-    Sort-Object NotAfter -Descending |
-    Select-Object -First 1
+$configuredCertificate = if (-not [string]::IsNullOrWhiteSpace($currentThumbprint)) {
+    $matchingCertificates | Where-Object { $_.Thumbprint -eq $currentThumbprint } | Select-Object -First 1
+} else { $null }
+$certificateToRenew = if ($configuredCertificate) { $configuredCertificate } else { $matchingCertificates | Select-Object -First 1 }
+$renewalCutoff = (Get-Date).AddDays($renewalWindowDays)
+if ($configuredCertificate) {
+    # Der konfigurierte Thumbprint ist die aktive Identität. Läuft genau dieses
+    # Zertifikat bald ab, wird bewusst ein neues erzeugt statt ein anderes
+    # Zertifikat gleichen Subjects stillschweigend weiterzuverwenden.
+    $existingCert = if ($configuredCertificate.NotAfter -gt $renewalCutoff) { $configuredCertificate } else { $null }
+} else {
+    $existingCert = $matchingCertificates |
+        Where-Object { $_.NotAfter -gt $renewalCutoff } |
+        Select-Object -First 1
+}
 
-if (-not $existingCert -and $matchingCertificates.Count -gt 0) {
-    $lastCertificate = $matchingCertificates[0]
-    $daysRemaining = [math]::Ceiling(($lastCertificate.NotAfter - (Get-Date)).TotalDays)
+if (-not $existingCert -and $certificateToRenew) {
+    $daysRemaining = [math]::Ceiling(($certificateToRenew.NotAfter - (Get-Date)).TotalDays)
     if ($daysRemaining -le 0) {
-        Write-Host "Vorhandenes Client-Zertifikat ist abgelaufen ($($lastCertificate.NotAfter.ToString('yyyy-MM-dd'))); es wird automatisch erneuert." -ForegroundColor Yellow
+        Write-Host "Das konfigurierte Client-Zertifikat ist abgelaufen ($($certificateToRenew.NotAfter.ToString('yyyy-MM-dd'))); es wird automatisch erneuert." -ForegroundColor Yellow
     } else {
-        Write-Host "Vorhandenes Client-Zertifikat läuft in $daysRemaining Tagen ab; es wird innerhalb des 6-Wochen-Zeitraums automatisch erneuert." -ForegroundColor Yellow
+        Write-Host "Das konfigurierte Client-Zertifikat läuft in $daysRemaining Tagen ab; es wird innerhalb des 6-Wochen-Zeitraums automatisch erneuert." -ForegroundColor Yellow
     }
 }
 
