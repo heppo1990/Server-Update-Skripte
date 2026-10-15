@@ -752,35 +752,38 @@ if ($ServerADList -ne $null) {
               foreach ($k in $authParams.Keys) { if ($k -ne 'ComputerName') { $jeaTestParams[$k] = $authParams[$k] } }
             }
             $jeaEndpointProbe = Invoke-WindowsUpdateWithRetry -OperationName "JEA-Endpunktprüfung auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @jeaTestParams }
-            # Der SYSTEM-JEA-Endpunkt gibt absichtlich nur Get-WindowsUpdate
-            # frei. Get-Command ist dort gesperrt; die echte Update-Abfrage ist
-            # zugleich der aussagekräftige Funktionstest und wird wiederverwendet.
-            # Die Statusfunktion liest nur eine feste, nicht geheime Kennung und
-            # ist auch für den eingeschränkten SYSTEM-JEA-Endpunkt freigegeben.
-            $deploymentStatusParams = @{
-              ComputerName      = $Servername
-              ConfigurationName = 'WindowsUpdateAdm'
-              ScriptBlock       = { Get-WindowsUpdateAdmDeploymentStatus }
-              ErrorAction       = 'Stop'
-            }
-            if ($svcCredential) {
-              $deploymentAuth = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $svcCredential -ConfigurationName 'WindowsUpdateAdm'
-              foreach ($k in $deploymentAuth.Keys) { if ($k -ne 'ComputerName') { $deploymentStatusParams[$k] = $deploymentAuth[$k] } }
-            }
-            try {
-              $deploymentStatus = Invoke-Command @deploymentStatusParams
-              $actualDeploymentVersion = [string]$deploymentStatus.Version
-              $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
-              if ([string]::IsNullOrWhiteSpace($actualDeploymentVersion)) {
-                Add-CheckRedistributionNotice -Target $Servername -Reason 'Die WindowsUpdateAdm-Bereitstellungskennung fehlt.'
-              } elseif ($actualDeploymentVersion -ne $expectedDeploymentVersion) {
-                Add-CheckRedistributionNotice -Target $Servername -Reason "WindowsUpdateAdm-Version $actualDeploymentVersion ist veraltet; erwartet wird $expectedDeploymentVersion."
-              } else {
-                Write-ScriptLog "WindowsUpdateAdm-Version $actualDeploymentVersion auf $Servername ist aktuell." $true
+            if ($script:IsLocalSystemRun) {
+              # Die SYSTEM-Rolle im JEA-Endpunkt darf nur Windows-Updates
+              # abfragen. Der Verteilungsstatus ist in diesem Aufgabenkontext
+              # nicht verfügbar und darf daher keinen falschen Handlungsbedarf
+              # in Konsole oder Mail erzeugen.
+              Write-ScriptLog "WindowsUpdateAdm-Statusprüfung auf $Servername im SYSTEM-Aufgabenlauf ausgelassen; geprüft wird die Windows-Update-Abfrage über JEA." $true
+            } else {
+              $deploymentStatusParams = @{
+                ComputerName      = $Servername
+                ConfigurationName = 'WindowsUpdateAdm'
+                ScriptBlock       = { Get-WindowsUpdateAdmDeploymentStatus }
+                ErrorAction       = 'Stop'
               }
-            } catch {
-              Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-Bereitstellungsstatus ist nicht lesbar; eine Neuverteilung wird empfohlen.'
-              Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message $true } -Operation 'WindowsUpdateAdm-Bereitstellungsstatus' -Target $Servername -ErrorRecord $_
+              if ($svcCredential) {
+                $deploymentAuth = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $svcCredential -ConfigurationName 'WindowsUpdateAdm'
+                foreach ($k in $deploymentAuth.Keys) { if ($k -ne 'ComputerName') { $deploymentStatusParams[$k] = $deploymentAuth[$k] } }
+              }
+              try {
+                $deploymentStatus = Invoke-Command @deploymentStatusParams
+                $actualDeploymentVersion = [string]$deploymentStatus.Version
+                $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
+                if ([string]::IsNullOrWhiteSpace($actualDeploymentVersion)) {
+                  Add-CheckRedistributionNotice -Target $Servername -Reason 'Die WindowsUpdateAdm-Bereitstellungskennung fehlt.'
+                } elseif ($actualDeploymentVersion -ne $expectedDeploymentVersion) {
+                  Add-CheckRedistributionNotice -Target $Servername -Reason "WindowsUpdateAdm-Version $actualDeploymentVersion ist veraltet; erwartet wird $expectedDeploymentVersion."
+                } else {
+                  Write-ScriptLog "WindowsUpdateAdm-Version $actualDeploymentVersion auf $Servername ist aktuell." $true
+                }
+              } catch {
+                Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-Bereitstellungsstatus ist nicht lesbar; eine Neuverteilung wird empfohlen.'
+                Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message $true } -Operation 'WindowsUpdateAdm-Bereitstellungsstatus' -Target $Servername -ErrorRecord $_
+              }
             }
             $UpdResult = $jeaEndpointProbe
             $jeaQueryCompleted = $true
