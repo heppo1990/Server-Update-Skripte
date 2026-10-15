@@ -805,14 +805,15 @@ function Register-StartupRemoteTask {
     $AuthInfo = $null,
     [datetime]$At = [datetime]::MinValue,
     [AllowEmptyString()][string]$MailPassword = '',
-    [AllowEmptyString()][string]$MaintenanceEndTime = ''
+    [AllowEmptyString()][string]$MaintenanceEndTime = '',
+    [datetime]$ExpiresAt = [datetime]::MinValue
   )
   # Der Worker wird von powershell.exe (Windows PowerShell 5.1) ausgeführt;
   # seine Syntax muss daher auch mit dem Windows-PowerShell-Parser gültig sein.
   # Der vollständige Worker wird geschützt als temporäre Datei abgelegt. Ein
   # CMD-Starthelfer protokolliert Prozessstart und Fehler vor PowerShell.
   $sb = {
-    param($Name, $WorkerScript, $Password, $RunAt, $WindowEndTime)
+    param($Name, $WorkerScript, $Password, $RunAt, $WindowEndTime, $TaskExpiresAt)
     if (-not [string]::IsNullOrEmpty($Password)) {
       if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
         try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
@@ -830,6 +831,9 @@ function Register-StartupRemoteTask {
     $RunnerPath = Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-TaskRunner.cmd'
     New-Item -ItemType Directory -Path (Split-Path -Parent $WorkerPath) -Force | Out-Null
     Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-LastFailureNotice.txt') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-FinalNotificationSent.txt') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-Results.json') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-RebootPending.txt') -Force -ErrorAction SilentlyContinue
     New-Item -ItemType File -Path $WorkerPath -Force | Out-Null
     # SMTP-Daten im Worker dürfen nur SYSTEM und lokale Administratoren lesen.
     $acl = New-Object System.Security.AccessControl.FileSecurity
@@ -898,6 +902,7 @@ exit /b %WORKER_EXIT%
         $retryTrigger = New-ScheduledTaskTrigger -Daily -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration $repeatDuration
         @($retryTrigger, (New-ScheduledTaskTrigger -AtStartup))
       }
+      if ($TaskExpiresAt -gt [datetime]::MinValue) { $triggers += New-ScheduledTaskTrigger -Once -At $TaskExpiresAt }
       $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
       Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
     } else {
@@ -912,16 +917,24 @@ exit /b %WORKER_EXIT%
       $windowOutput = & $schtasks /Create /TN $Name /SC DAILY /SD $startDate /ST $startTime /RI 15 /DU $repeatDurationText /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
       if ($LASTEXITCODE -ne 0) { throw "Wiederholungsaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($windowOutput) -join ' ').Trim())" }
       $startupName = $Name + '-AtStartup'
+      $expiryName = $Name + '-Expiry'
+      if ($TaskExpiresAt -gt [datetime]::MinValue) {
+        $expiryDate = $TaskExpiresAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
+        $expiryTime = $TaskExpiresAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+        $expiryOutput = & $schtasks /Create /TN $expiryName /SC ONCE /SD $expiryDate /ST $expiryTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
+        if ($LASTEXITCODE -ne 0) { & $schtasks /Delete /TN $Name /F *> $null; throw "Ablaufaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($expiryOutput) -join ' ').Trim())" }
+      }
       $startupOutput = & $schtasks /Create /TN $startupName /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
       if ($LASTEXITCODE -ne 0) {
-        if ($RunAt -gt [datetime]::MinValue) { & $schtasks /Delete /TN $Name /F *> $null }
+        & $schtasks /Delete /TN $Name /F *> $null
+        & $schtasks /Delete /TN $expiryName /F *> $null
         throw "Systemstart-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($startupOutput) -join ' ').Trim())"
       }
     }
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $MailPassword $At $MaintenanceEndTime; return }
+  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $MailPassword $At $MaintenanceEndTime $ExpiresAt; return }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At, $MaintenanceEndTime)
+  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At, $MaintenanceEndTime, $ExpiresAt)
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
@@ -1023,6 +1036,7 @@ function Register-DeferredUpdateTask {
   }
   $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($deferredMailSettings | ConvertTo-Json -Depth 5 -Compress)))
   $registeredAt = [DateTime]::UtcNow.ToFileTimeUtc()
+  $expiresAt = [DateTime]::FromFileTimeUtc($registeredAt).AddDays(5).ToLocalTime()
   $scheduledAtFileTime = if ($ScheduledAt -gt [datetime]::MinValue) { $ScheduledAt.ToUniversalTime().ToFileTimeUtc() } else { 0 }
   $maintenanceEndBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($MaintenanceEndTime))
   $script = @"
@@ -1033,7 +1047,7 @@ function Register-DeferredUpdateTask {
 `$removeDeferredTask = {
   param([string]`$Name)
   `$schtasks = Join-Path `$env:WINDIR 'System32\schtasks.exe'
-  foreach (`$candidateName in @(`$Name, (`$Name + '-AtStartup'))) {
+  foreach (`$candidateName in @(`$Name, (`$Name + '-AtStartup'), (`$Name + '-Expiry'))) {
     & `$schtasks /Delete /TN `$candidateName /F *> `$null
   }
 }
@@ -1059,6 +1073,38 @@ try {
     }
     return `$mail
   }
+  function Send-DeferredFinalMail {
+    param([string]`$Subject, [string]`$Body, [bool]`$IsHtml = `$false)
+    `$notificationPath = Join-Path `$logDirectory 'DeferredUpdates-FinalNotificationSent.txt'
+    if (Test-Path -LiteralPath `$notificationPath) {
+      Write-DeferredLog 'Abschluss-E-Mail übersprungen; für diese Nachinstallation wurde bereits ein Mailversand versucht.'
+      return
+    }
+    # Vor dem SMTP-Aufruf markieren: auch bei einem Abbruch während/nach Send
+    # wird für denselben Lauf kein zweites Mal eine Mail versendet.
+    [System.IO.File]::WriteAllText(`$notificationPath, [DateTime]::UtcNow.ToString('o'))
+    try {
+      `$mail = Get-DeferredMailSettings
+      if (-not (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo)) {
+        Write-DeferredLog 'Abschluss-E-Mail übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
+        return
+      }
+      `$mailSubject = if (-not [string]::IsNullOrWhiteSpace([string]`$mail.Install.Subject)) { `$Subject + ' ' + [string]`$mail.Install.Subject } else { `$Subject }
+      `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port)
+      `$smtp.EnableSsl = [bool]`$mail.UseSSL
+      if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
+      `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, `$mailSubject, `$Body)
+      `$message.BodyEncoding = [Text.Encoding]::UTF8
+      `$message.IsBodyHtml = `$IsHtml
+      `$smtp.Send(`$message)
+      Write-DeferredLog 'Abschluss-E-Mail erfolgreich versendet.'
+    } catch {
+      Write-DeferredLog "Einmaliger Abschluss-Mailversand fehlgeschlagen: `$(`$_.Exception.Message)"
+    } finally {
+      if (`$message) { `$message.Dispose() }
+      if (`$smtp) { `$smtp.Dispose() }
+    }
+  }
   `$waitForReboot = `$false
   `$mainRunRebootRequired = $(if ($RebootRequired) { '$true' } else { '$false' })
   `$scheduledAt = if ($scheduledAtFileTime -gt 0) { [DateTime]::FromFileTimeUtc($scheduledAtFileTime) } else { [DateTime]::MinValue }
@@ -1070,25 +1116,12 @@ try {
     `$taskExpired = `$true
     `$workerPhase = 'Maximale Laufzeit erreicht'
     Write-DeferredLog 'Die Nachinstallationsaufgabe hat die maximale Laufzeit von fünf Tagen erreicht und wird beendet.'
-    try {
-      `$mail = Get-DeferredMailSettings
-      if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
-        `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port)
-        `$smtp.EnableSsl = [bool]`$mail.UseSSL
-        if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
-        `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, ('FEHLER Nachinstallation: ' + `$mail.Install.Subject), "Die zurückgestellten Updates auf `$env:COMPUTERNAME wurden innerhalb von fünf Tagen nicht vollständig installiert. Bitte das Protokoll DeferredUpdates.log prüfen und manuell nacharbeiten.")
-        `$smtp.Send(`$message); `$message.Dispose(); `$smtp.Dispose()
-        Write-DeferredLog 'Ablaufmeldung erfolgreich versendet.'
-      } else {
-        Write-DeferredLog 'Ablaufmeldung übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
-      }
-    } catch {
-      Write-DeferredLog "Ablaufmeldung konnte nicht versendet werden: `$(`$_.Exception.Message)"
-    }
+    Send-DeferredFinalMail -Subject 'FEHLER Nachinstallation:' -Body "Die zurückgestellten Updates auf `$env:COMPUTERNAME wurden innerhalb von fünf Tagen nicht vollständig installiert. Bitte das Protokoll DeferredUpdates.log prüfen und manuell nacharbeiten."
     return
   }
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
   `$rebootDetected = `$lastBoot -gt `$registeredAt
+  `$windowOpen = `$true
   `$windowEnd = [DateTime]::MaxValue
   if (`$scheduledAt -gt [DateTime]::MinValue) {
     `$windowOpen = `$true
@@ -1122,6 +1155,24 @@ try {
     Write-DeferredLog 'Neustart erkannt. Prüfe automatisch die Bereitschaft von Windows Update.'
   } else {
     Write-DeferredLog 'Kein Neustart erforderlich. Nachinstallation startet direkt.'
+  }
+  `$pendingRebootPath = Join-Path `$logDirectory 'DeferredUpdates-RebootPending.txt'
+  if (-not `$waitForReboot -and (Test-Path -LiteralPath `$pendingRebootPath)) {
+    `$rebootRequestedAt = [DateTime]::FromFileTimeUtc([long](Get-Content -LiteralPath `$pendingRebootPath -Raw))
+    if (`$lastBoot -gt `$rebootRequestedAt) {
+      Remove-Item -LiteralPath `$pendingRebootPath -Force -ErrorAction Stop
+      `$rebootDetected = `$true
+      Write-DeferredLog 'Der für die Nachinstallation angeforderte Neustart wurde erkannt; setze mit der Restprüfung fort.'
+    } else {
+      `$waitForReboot = `$true
+      if (`$windowOpen) {
+        Write-DeferredLog 'Ein Neustart aus dem vorherigen Nachinstallationsversuch steht noch aus. Er wird jetzt innerhalb des Wartungsfensters ausgelöst.'
+        shutdown.exe /r /t 0 /f | Out-Null
+        if (`$LASTEXITCODE -ne 0) { throw "Geplanter Neustart konnte nicht ausgelöst werden (Exitcode `$LASTEXITCODE)." }
+      } else {
+        Write-DeferredLog 'Ein Neustart aus dem vorherigen Nachinstallationsversuch steht noch aus. Die Aufgabe wartet bis zum Wartungsfenster.'
+      }
+    }
   }
   if (-not `$waitForReboot -and `$rebootDetected) {
     # Statt einer festen Wartezeit auf eine erfolgreiche, rein lesende
@@ -1189,6 +1240,13 @@ try {
     # Ein Update kann mehreren ausgewählten Kategorien zugeordnet sein.
     # Doppelte Rückgabeobjekte dürfen weder mehrfach in der Mail erscheinen
     # noch die angezeigte Installationsanzahl erhöhen.
+    `$resultsStatePath = Join-Path `$logDirectory 'DeferredUpdates-Results.json'
+    `$previousResults = @()
+    if (Test-Path -LiteralPath `$resultsStatePath) {
+      try { `$previousResults = @(Get-Content -LiteralPath `$resultsStatePath -Raw | ConvertFrom-Json -ErrorAction Stop) }
+      catch { throw "Gespeicherte Installationsresultate konnten nicht gelesen werden: `$(`$_.Exception.Message)" }
+    }
+    `$results = @(`$previousResults) + @(`$results)
     `$seenUpdateKeys = @{}
     `$results = @(`$results | Where-Object {
       `$updateKB = [string]`$_.KB
@@ -1199,6 +1257,7 @@ try {
       if (`$seenUpdateKeys.ContainsKey(`$updateKey)) { `$false }
       else { `$seenUpdateKeys[`$updateKey] = `$true; `$true }
     })
+    ConvertTo-Json -InputObject @(`$results) -Depth 6 | Set-Content -LiteralPath `$resultsStatePath -Encoding UTF8
     `$selection = `$selectionParts -join '; '
     function Get-DeferredUpdateField {
       param([object]`$Update, [string[]]`$Names)
@@ -1251,41 +1310,33 @@ tr:nth-child(even) { background-color: #f9f9f9; }
 </body></html>
 '@
     `$body = `$body.Replace('{{computer}}', [System.Net.WebUtility]::HtmlEncode(`$env:COMPUTERNAME)).Replace('{{date}}', (Get-Date -Format 'dd.MM.yyyy HH:mm:ss')).Replace('{{selection}}', `$safeSelection).Replace('{{rows}}', (`$rows -join '')).Replace('{{count}}', [string]`$(@(`$results).Count))
-    `$mail = Get-DeferredMailSettings
-    if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
-      `$workerPhase = 'Abschluss-E-Mail senden'
-      `$mailSent = `$false
-      for (`$attempt = 1; `$attempt -le 3 -and -not `$mailSent; `$attempt++) {
-        try {
-          # Nur Empfänger und SMTP-Host protokollieren, niemals das MailSettings-Objekt.
-          Write-DeferredLog "Sende Abschluss-E-Mail (Versuch `$attempt/3) an `$(`$mail.MailTo) über `$(`$mail.Host):`$(`$mail.Port)."
-          `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port)
-          `$smtp.EnableSsl = [bool]`$mail.UseSSL
-          if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
-      `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, ('Nachinstallation: ' + `$mail.Install.Subject), `$body)
-      `$message.BodyEncoding = [Text.Encoding]::UTF8
-      `$message.IsBodyHtml = `$true
-          `$smtp.Send(`$message); `$message.Dispose(); `$smtp.Dispose()
-          `$mailSent = `$true
-          Write-DeferredLog 'Abschluss-E-Mail erfolgreich versendet.'
-        } catch {
-          Write-DeferredLog "Abschluss-E-Mail fehlgeschlagen (Versuch `$attempt/3): `$(`$_.Exception.Message)"
-          if (`$attempt -lt 3) { Start-Sleep -Seconds 30 }
-        }
-      }
-      if (-not `$mailSent) { throw 'Abschluss-E-Mail konnte nach drei Versuchen nicht versendet werden.' }
-    } else {
-      Write-DeferredLog 'Abschluss-E-Mail übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
-    }
     `$workerPhase = 'Neustartbedarf prüfen'
     `$rebootStatus = Get-WURebootStatus -Silent -ErrorAction Stop
     `$rebootRequired = if (`$rebootStatus -is [bool]) { `$rebootStatus } elseif (`$null -ne `$rebootStatus -and `$null -ne `$rebootStatus.PSObject.Properties['RebootRequired']) { [bool]`$rebootStatus.RebootRequired } else { `$false }
     Write-DeferredLog "Get-WURebootStatus meldet RebootRequired = `$rebootRequired."
     if (`$rebootRequired) {
-      Write-DeferredLog 'Nachinstallationsmail abgeschlossen. Erforderlicher Neustart wird jetzt sofort ausgelöst.'
-      & `$removeDeferredTask `$taskName
-      Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
-      shutdown.exe /r /t 0 /f | Out-Null
+      `$waitForReboot = `$true
+      [System.IO.File]::WriteAllText(`$pendingRebootPath, [DateTime]::UtcNow.ToFileTimeUtc().ToString())
+      if (`$scheduledAt -gt [DateTime]::MinValue -and -not [string]::IsNullOrWhiteSpace(`$maintenanceEndTime) -and (Get-Date) -ge `$windowEnd) {
+        Write-DeferredLog 'Neustart erforderlich, aber das Wartungsfenster ist geschlossen. Neustart wird bis zum nächsten Wartungsfenster zurückgestellt.'
+      } else {
+        Write-DeferredLog 'Neustart erforderlich. Die Aufgabe bleibt bestehen und wird nach dem Neustart im Wartungsfenster fortgesetzt.'
+        shutdown.exe /r /t 0 /f | Out-Null
+        if (`$LASTEXITCODE -ne 0) { throw "Geplanter Neustart konnte nicht ausgelöst werden (Exitcode `$LASTEXITCODE)." }
+      }
+    } else {
+      `$workerPhase = 'Verbleibende zurückgestellte Updates prüfen'
+      `$remainingUpdates = @()
+      foreach (`$kb in `$deferredKBs) { `$remainingUpdates += @(Get-WindowsUpdate -KBArticleID `$kb -ErrorAction Stop) }
+      foreach (`$category in `$categories) { `$remainingUpdates += @(Get-WindowsUpdate -Category `$category -ErrorAction Stop) }
+      if (`$remainingUpdates.Count -gt 0) {
+        `$waitForReboot = `$true
+        `$remainingTitles = @(`$remainingUpdates | ForEach-Object { if (`$_.Title) { [string]`$_.Title } else { [string]`$_.KB } } | Where-Object { -not [string]::IsNullOrWhiteSpace(`$_) } | Select-Object -Unique)
+        Write-DeferredLog "Zurückgestellte Updates sind noch verfügbar (`$(`$remainingUpdates.Count)); nächster Installationsversuch im Wartungsfenster. Verbleibend: `$(`$remainingTitles -join '; ')"
+      } else {
+        `$workerPhase = 'Abschluss-E-Mail senden'
+        Send-DeferredFinalMail -Subject 'Nachinstallation:' -Body `$body -IsHtml `$true
+      }
     }
     `$workerPhase = 'Abgeschlossen'
   }
@@ -1297,33 +1348,8 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     Write-DeferredLog "FEHLER in Phase '`$workerPhase': `$failureMessage"
     Write-DeferredLog "Fehlerdetails: `$failureDetails"
   } catch { }
-  try {
-    `$failureNoticePath = Join-Path `$logDirectory 'DeferredUpdates-LastFailureNotice.txt'
-    `$sendFailureNotice = `$true
-    if (Test-Path -LiteralPath `$failureNoticePath) {
-      `$lastNotice = [DateTime]::MinValue
-      if ([DateTime]::TryParse((Get-Content -LiteralPath `$failureNoticePath -Raw), [ref]`$lastNotice) -and [DateTime]::UtcNow - `$lastNotice.ToUniversalTime() -lt [TimeSpan]::FromHours(24)) {
-        `$sendFailureNotice = `$false
-      }
-    }
-    if (-not `$sendFailureNotice) {
-      Write-DeferredLog 'Fehler-E-Mail übersprungen; die letzte Fehlerbenachrichtigung liegt weniger als 24 Stunden zurück.'
-    } else {
-      `$mail = Get-DeferredMailSettings
-      if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
-        `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port); `$smtp.EnableSsl = [bool]`$mail.UseSSL
-        if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
-        `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, ('FEHLER Nachinstallation: ' + `$mail.Install.Subject), "Nachinstallation auf `$env:COMPUTERNAME fehlgeschlagen: `$failureMessage")
-        `$smtp.Send(`$message); `$message.Dispose(); `$smtp.Dispose()
-        [System.IO.File]::WriteAllText(`$failureNoticePath, [DateTime]::UtcNow.ToString('o'))
-        Write-DeferredLog 'Fehler-E-Mail erfolgreich versendet.'
-      } else {
-        Write-DeferredLog 'Fehler-E-Mail übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
-      }
-    }
-  } catch {
-    try { Write-DeferredLog "Fehler-E-Mail konnte nicht versendet werden: `$(`$_.Exception.Message)" } catch { }
-  }
+  # Während der Wiederholungsphase wird nicht gemailt. Das Ergebnis wird erst
+  # bei Erfolg oder nach Ablauf der Fünf-Tage-Frist einmalig versendet.
 } finally {
   # Fehler und Wartephasen behalten Aufgabe, Worker und Starthelfer für den nächsten Versuch.
   if (-not `$waitForReboot -and -not `$workerFailed) {
@@ -1335,6 +1361,8 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     & `$removeDeferredTask `$taskName
     Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates-LastFailureNotice.txt') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates-Results.json') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates-RebootPending.txt') -Force -ErrorAction SilentlyContinue
   } elseif (`$workerFailed) {
     try { Write-DeferredLog "Aufgabe bleibt nach Fehler in Phase '`$workerPhase' für einen erneuten Versuch bestehen." } catch { }
   }
@@ -1346,7 +1374,7 @@ if (`$workerFailed) { exit 1 }
 if (`$waitForReboot) { exit 2 }
 
 "@
-  Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo -At $ScheduledAt -MailPassword $deferredMailPassword -MaintenanceEndTime $MaintenanceEndTime
+  Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo -At $ScheduledAt -MailPassword $deferredMailPassword -MaintenanceEndTime $MaintenanceEndTime -ExpiresAt $expiresAt
   $selectionText = @(
     if ($DeferredKBs.Count -gt 0) { "KBs: $($DeferredKBs -join ', ')" }
     if ($DeferredCategories.Count -gt 0) { "Kategorien: $($DeferredCategories -join ', ')" }
