@@ -93,7 +93,14 @@ function Format-WindowsUpdateConsoleError {
     if ($operation -and $target) { return "$prefix`: $operation auf $target fehlgeschlagen; Details im Log." }
     if ($target) { return "$prefix`: Fehler auf $target; Details im Log." }
     if ($operation) { return "$prefix`: $operation fehlgeschlagen; Details im Log." }
-    return "$prefix`: Fehler aufgetreten; Details im Log."
+
+    # Ohne ermittelbaren Vorgang oder Ziel den Originaltext erhalten. Der
+    # generische Ersatztext hat die Ursache aus der Konsole entfernt und war
+    # in den jeweiligen Unterprotokollen nicht immer wiederzufinden.
+    $safeMessage = ($Message -replace '[\r\n\t]+', ' ').Trim()
+    $safeMessage = $safeMessage -replace '(?i)(password|passwd|kennwort|passwort|token|secret)(\s*[:=]\s*)\S+', '$1$2[geschwärzt]'
+    if ($safeMessage.Length -gt 220) { $safeMessage = $safeMessage.Substring(0, 217) + '...' }
+    return $safeMessage
 }
 
 function Write-WindowsUpdateConsoleLine {
