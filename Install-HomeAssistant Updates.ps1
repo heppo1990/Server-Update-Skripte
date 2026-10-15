@@ -91,8 +91,6 @@ if ($script:WriteExecutionLog -and -not (Test-Path $LogDir)) {
 
 $LogFile = if ($script:WriteExecutionLog) { Join-Path $LogDir ("{0}_{1}.log" -f $HAHost, (Get-Date -Format 'yyyyMMdd-HHmm')) } else { '' }
 
-Write-HostLog -Message "Starte Update-Installation auf Home-Assistant-Server $HAHost..." -RemoteHost $HAHost -LogFile $LogFile -Level Info
-
 # Statistik-Tracking
 $Script:UpdateStats = @{
     CoreUpdated = $false
@@ -151,6 +149,8 @@ function Write-HostLog {
         $Script:UpdateStats.ErrorCount++
     }
 }
+
+Write-HostLog -Message "Starte Update-Installation auf Home-Assistant-Server $HAHost..." -RemoteHost $HAHost -LogFile $LogFile -Level Info
 
 function Get-NextHARebootTime {
     param([Parameter(Mandatory)][string]$Time, [string]$LatestTime = '', [int]$DelayMinutes = 0, [switch]$PreferImmediate)
