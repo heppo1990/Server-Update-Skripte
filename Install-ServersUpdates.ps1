@@ -889,6 +889,24 @@ exit /b %WORKER_EXIT%
       $repeatDuration = $parsedWindowEnd.TimeOfDay - $RunAt.TimeOfDay
       if ($repeatDuration -le [TimeSpan]::Zero) { $repeatDuration = $repeatDuration.Add([TimeSpan]::FromDays(1)) }
     }
+    $expiryTriggerAt = $TaskExpiresAt
+    if ($TaskExpiresAt -gt [datetime]::MinValue -and
+        $RunAt -gt [datetime]::MinValue -and
+        -not [string]::IsNullOrWhiteSpace($WindowEndTime)) {
+      $parsedWindowEnd = [datetime]::MinValue
+      if (-not [datetime]::TryParse($WindowEndTime, [ref]$parsedWindowEnd)) { throw "Ungültiges Wartungsfenster-Ende: $WindowEndTime" }
+      $windowStartTime = $RunAt.TimeOfDay
+      $windowEndTimeOfDay = $parsedWindowEnd.TimeOfDay
+      $windowStart = $TaskExpiresAt.Date.Add($windowStartTime)
+      if ($TaskExpiresAt -lt $windowStart) { $windowStart = $windowStart.AddDays(-1) }
+      $windowEnd = $windowStart.Date.Add($windowEndTimeOfDay)
+      if ($windowEnd -le $windowStart) { $windowEnd = $windowEnd.AddDays(1) }
+      $expiryIsInsideWindow = $TaskExpiresAt -ge $windowStart -and $TaskExpiresAt -lt $windowEnd
+      if (-not $expiryIsInsideWindow) {
+        $expiryTriggerAt = $TaskExpiresAt.Date.Add($windowStartTime)
+        if ($TaskExpiresAt -ge $expiryTriggerAt) { $expiryTriggerAt = $expiryTriggerAt.AddDays(1) }
+      }
+    }
     $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
       (Get-Command -Name New-ScheduledTaskTrigger -ErrorAction SilentlyContinue) -and
       (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
@@ -925,7 +943,7 @@ exit /b %WORKER_EXIT%
         }
         New-ScheduledTaskTrigger -AtStartup
       )
-      if ($TaskExpiresAt -gt [datetime]::MinValue) { $triggers += New-ScheduledTaskTrigger -Once -At $TaskExpiresAt }
+      if ($expiryTriggerAt -gt [datetime]::MinValue) { $triggers += New-ScheduledTaskTrigger -Once -At $expiryTriggerAt }
       $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
       Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
     } else {
@@ -941,9 +959,9 @@ exit /b %WORKER_EXIT%
       if ($LASTEXITCODE -ne 0) { throw "Wiederholungsaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($windowOutput) -join ' ').Trim())" }
       $startupName = $Name + '-AtStartup'
       $expiryName = $Name + '-Expiry'
-      if ($TaskExpiresAt -gt [datetime]::MinValue) {
-        $expiryDate = $TaskExpiresAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
-        $expiryTime = $TaskExpiresAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+      if ($expiryTriggerAt -gt [datetime]::MinValue) {
+        $expiryDate = $expiryTriggerAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
+        $expiryTime = $expiryTriggerAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
         $expiryOutput = & $schtasks /Create /TN $expiryName /SC ONCE /SD $expiryDate /ST $expiryTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
         if ($LASTEXITCODE -ne 0) { & $schtasks /Delete /TN $Name /F *> $null; throw "Ablaufaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($expiryOutput) -join ' ').Trim())" }
       }
