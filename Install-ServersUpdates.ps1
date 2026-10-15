@@ -1018,6 +1018,7 @@ function Register-DeferredUpdateTask {
   $script = @"
 `$taskName = '$taskName'
 `$workerFailed = `$false
+`$workerPhase = 'Initialisierung'
 `$removeDeferredTask = {
   param([string]`$Name)
   `$schtasks = Join-Path `$env:WINDIR 'System32\schtasks.exe'
@@ -1052,6 +1053,7 @@ try {
   `$scheduledAt = if ($scheduledAtFileTime -gt 0) { [DateTime]::FromFileTimeUtc($scheduledAtFileTime) } else { [DateTime]::MinValue }
   `$maintenanceEndTime = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$maintenanceEndBase64'))
   Write-DeferredLog 'Nachinstallationsaufgabe gestartet.'
+  `$workerPhase = 'Neustart- und Wartungsfensterprüfung'
   `$registeredAt = [DateTime]::FromFileTimeUtc($registeredAt)
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
   `$rebootDetected = `$lastBoot -gt `$registeredAt
@@ -1092,6 +1094,7 @@ try {
   if (-not `$waitForReboot -and `$rebootDetected) {
     # Statt einer festen Wartezeit auf eine erfolgreiche, rein lesende
     # Windows-Update-Suche warten. Eine Obergrenze verhindert endloses Warten.
+    `$workerPhase = 'Windows-Update-Bereitschaft prüfen'
     Import-Module PSWindowsUpdate -ErrorAction Stop
     `$readyDeadline = (Get-Date).AddMinutes(5)
     `$readyAttempt = 0
@@ -1116,6 +1119,7 @@ try {
     }
   }
   if (-not `$waitForReboot) {
+    `$workerPhase = 'Zurückgestellte Updates installieren'
     Import-Module PSWindowsUpdate -ErrorAction Stop
     # ConvertFrom-Json kann Arrays je nach PowerShell-Version verschachtelt
     # zurückgeben. Kategorien rekursiv in einzelne Zeichenfolgen auflösen.
@@ -1217,6 +1221,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     `$body = `$body.Replace('{{computer}}', [System.Net.WebUtility]::HtmlEncode(`$env:COMPUTERNAME)).Replace('{{date}}', (Get-Date -Format 'dd.MM.yyyy HH:mm:ss')).Replace('{{selection}}', `$safeSelection).Replace('{{rows}}', (`$rows -join '')).Replace('{{count}}', [string]`$(@(`$results).Count))
     `$mail = Get-DeferredMailSettings
     if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
+      `$workerPhase = 'Abschluss-E-Mail senden'
       `$mailSent = `$false
       for (`$attempt = 1; `$attempt -le 3 -and -not `$mailSent; `$attempt++) {
         try {
@@ -1240,6 +1245,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     } else {
       Write-DeferredLog 'Abschluss-E-Mail übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
     }
+    `$workerPhase = 'Neustartbedarf prüfen'
     `$rebootStatus = Get-WURebootStatus -Silent -ErrorAction Stop
     `$rebootRequired = if (`$rebootStatus -is [bool]) { `$rebootStatus } elseif (`$null -ne `$rebootStatus -and `$null -ne `$rebootStatus.PSObject.Properties['RebootRequired']) { [bool]`$rebootStatus.RebootRequired } else { `$false }
     Write-DeferredLog "Get-WURebootStatus meldet RebootRequired = `$rebootRequired."
@@ -1249,11 +1255,16 @@ tr:nth-child(even) { background-color: #f9f9f9; }
       Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
       shutdown.exe /r /t 0 /f | Out-Null
     }
+    `$workerPhase = 'Abgeschlossen'
   }
 } catch {
   `$workerFailed = `$true
   `$failureMessage = `$_.Exception.Message
-  try { Write-DeferredLog "FEHLER: `$failureMessage" } catch { }
+  `$failureDetails = `$_.Exception.ToString()
+  try {
+    Write-DeferredLog "FEHLER in Phase '`$workerPhase': `$failureMessage"
+    Write-DeferredLog "Fehlerdetails: `$failureDetails"
+  } catch { }
   try {
     `$mail = Get-DeferredMailSettings
     if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
@@ -1267,11 +1278,14 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     try { Write-DeferredLog "Fehler-E-Mail konnte nicht versendet werden: `$(`$_.Exception.Message)" } catch { }
   }
 } finally {
-  # Während der Wartephase bleibt die Aufgabe erhalten; nach Ausführung oder Fehler wird sie entfernt.
-  if (-not `$waitForReboot) {
+  # Bei Fehlern bleibt die Aufgabe samt Worker-Skript erhalten, damit der nächste
+  # geplante Lauf erneut versuchen kann. Nur Wartephasen und Fehler entfernen nichts.
+  if (-not `$waitForReboot -and -not `$workerFailed) {
     Write-DeferredLog 'Aufgabe wird entfernt.'
     & `$removeDeferredTask `$taskName
     Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
+  } elseif (`$workerFailed) {
+    try { Write-DeferredLog "Aufgabe bleibt nach Fehler in Phase '`$workerPhase' für einen erneuten Versuch bestehen." } catch { }
   }
 }
 
