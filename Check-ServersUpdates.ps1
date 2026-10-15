@@ -706,13 +706,27 @@ if ($ServerADList -ne $null) {
         $remoting = Initialize-WindowsUpdateRemoting -UpdateSettings $UpdateSettings -TargetComputer $Servername -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
         $svcCredential = $remoting.AuthInfo
         $targetEnableWinget = $enableWingetUpdates
-        $targetOperatingSystem = [string]$Server.OperatingSystem
-        if ($targetEnableWinget -and $targetOperatingSystem -match '(?i)Windows Server 2016') {
-          $targetEnableWinget = $false
-          Write-ScriptLog "WinGet auf $Servername übersprungen: $targetOperatingSystem wird nicht unterstützt; Chocolatey und Windows Update werden weiter geprüft."
+        $skipWingetReason = ''
+        if ($targetEnableWinget) {
+          try {
+            $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $svcCredential -TimeoutSeconds 30
+            if ([string]$targetOsInfo.Caption -match '(?i)Windows Server 2016') {
+              $targetEnableWinget = $false
+              $skipWingetReason = "WinGet wird auf $($targetOsInfo.Caption) (Build $($targetOsInfo.BuildNumber)) nicht geprüft; Chocolatey und Windows Update laufen weiter."
+            }
+          }
+          catch {
+            $targetEnableWinget = $false
+            $skipWingetReason = 'Die tatsächliche Windows-Version konnte nicht ermittelt werden; WinGet wird vorsorglich übersprungen.'
+            Write-ScriptLog "WARNUNG: $skipWingetReason"
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message $true } -Operation 'Zielbetriebssystem ermitteln' -Target $Servername -ErrorRecord $_ -Context @('Fallback=WinGet auf diesem Ziel übersprungen')
+          }
+        }
+        if ($skipWingetReason) {
+          Write-ScriptLog "WinGet auf $Servername übersprungen: $skipWingetReason"
           $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
-          $osHtml = [System.Net.WebUtility]::HtmlEncode($targetOperatingSystem)
-          $RepBody += "<div class='info-box'><strong>WinGet ausgelassen auf ${serverHtml}:</strong> $osHtml wird nicht unterstützt. Chocolatey und Windows Update werden geprüft.</div>"
+          $reasonHtml = [System.Net.WebUtility]::HtmlEncode($skipWingetReason)
+          $RepBody += "<div class='info-box'><strong>WinGet ausgelassen auf ${serverHtml}:</strong> $reasonHtml</div>"
         }
 
         if ($remoting.IsNonAdTarget) {
@@ -1030,7 +1044,7 @@ if ($ServerADList -ne $null) {
             $packageResults = @()
           } else {
             $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $targetEnableWinget -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
-            if (-not $targetEnableWinget -and $targetOperatingSystem -match '(?i)Windows Server 2016') {
+            if (-not $targetEnableWinget -and $skipWingetReason) {
               $packageResults = @($packageResults | Where-Object { $_.Manager -ne 'Winget' })
             }
           }

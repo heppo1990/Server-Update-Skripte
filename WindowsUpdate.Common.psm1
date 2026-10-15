@@ -1518,9 +1518,7 @@ function Get-WindowsUpdateTargets {
     )
 
     $adComputers = @()
-    $localOperatingSystem = ''
-    try { $localOperatingSystem = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
-    $localComputer = [PSCustomObject]@{ Name = $env:COMPUTERNAME; OperatingSystem = $localOperatingSystem }
+    $localComputer = [PSCustomObject]@{ Name = $env:COMPUTERNAME }
     $isDomainJoined = $false
 
     try {
@@ -1571,7 +1569,6 @@ function Get-WindowsUpdateTargets {
             $knownNames += [string]$computer.Name
             $targetObject = New-Object PSObject
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name Name -Value ([string]$computer.Name)
-            Add-Member -InputObject $targetObject -MemberType NoteProperty -Name OperatingSystem -Value ([string]$computer.OperatingSystem)
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name IsAdditional -Value $false
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name IsHypervisor -Value $false
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name ClassificationError -Value $null
@@ -1589,11 +1586,9 @@ function Get-WindowsUpdateTargets {
             $computerName = ([string]$configuredName).Trim()
             $isInAd = $false
             $classificationError = $null
-            $operatingSystem = ''
             if ($adAvailable) {
                 try {
-                    $adComputer = Get-ADComputer -Identity $computerName -Properties OperatingSystem -ErrorAction Stop
-                    $operatingSystem = [string]$adComputer.OperatingSystem
+                    $null = Get-ADComputer -Identity $computerName -ErrorAction Stop
                     $isInAd = $true
                 }
                 catch {
@@ -1639,7 +1634,6 @@ function Get-WindowsUpdateTargets {
                 if ($classificationError) {
                     $targets += [PSCustomObject]@{
                         Name = $computerName
-                        OperatingSystem = $operatingSystem
                         IsAdditional = $false
                         IsHypervisor = $false
                         ClassificationError = $classificationError
@@ -1648,7 +1642,6 @@ function Get-WindowsUpdateTargets {
                 else {
                     $targets += [PSCustomObject]@{
                         Name = $computerName
-                        OperatingSystem = $operatingSystem
                         IsAdditional = ((-not $isInAd) -and (-not $isHypervisorGroup))
                         IsHypervisor = ((-not $isInAd) -and $isHypervisorGroup)
                         ClassificationError = $null
@@ -1722,6 +1715,30 @@ function Invoke-WindowsUpdateRemoteCommandWithTimeout {
             try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch { }
         }
     }
+}
+
+function Get-WindowsUpdateTargetOperatingSystem {
+    param(
+        [Parameter(Mandatory)][string]$ComputerName,
+        $AuthInfo,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 30
+    )
+
+    $localNames = @($env:COMPUTERNAME, [System.Net.Dns]::GetHostName()) | Where-Object { $_ }
+    if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
+    $probe = {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        [pscustomobject]@{ Caption = [string]$os.Caption; Version = [string]$os.Version; BuildNumber = [int]$os.BuildNumber }
+    }
+
+    if ($localNames -contains $ComputerName) {
+        return & $probe
+    }
+
+    $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
+        -ScriptBlock $probe -TimeoutSeconds $TimeoutSeconds -OperationName "Windows-Version auf $ComputerName ermitteln")
+    if ($result.Count -eq 0) { throw "Windows-Version auf '$ComputerName' lieferte keine Daten." }
+    return $result[-1]
 }
 
 function Reset-WindowsUpdateRemoteWinGetSources {
@@ -3498,4 +3515,4 @@ function Add-WindowsUpdateTrustedHost {
 function Get-WindowsUpdateAdmDeploymentVersion {
     '1'
 }
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic, Get-WindowsUpdateAdmDeploymentVersion
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, Get-WindowsUpdateTargetOperatingSystem, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic, Get-WindowsUpdateAdmDeploymentVersion
