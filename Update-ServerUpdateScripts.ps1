@@ -760,6 +760,41 @@ function Invoke-ServerUpdateScripts {
     if ($restartRequired) {
         Write-Host ''
         Write-Host ("Skript-Update aus GitHub übernommen ({0} benötigte Datei(en)); starte mit aktualisiertem Stand neu." -f $changedFiles.Count) -ForegroundColor Cyan
+
+        # Ein SYSTEM-Aufgabenlauf soll nach dem Austausch nicht vom erneuten
+        # Aufruf der Skriptdatei im selben PowerShell-Prozess abhängen. Eine
+        # frische Instanz lädt garantiert die ersetzte Datei; -Wait hält den
+        # Aufgabenlauf bis zum Abschluss des eigentlichen Checks offen.
+        $isSystemRun = $false
+        try {
+            $isSystemRun = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18'
+        } catch { }
+        if ($isSystemRun -and $scriptName -ieq 'Check-ServersUpdates.ps1') {
+            try {
+                $powerShellExecutable = (Get-Process -Id $PID -ErrorAction Stop).Path
+                if ([string]::IsNullOrWhiteSpace($powerShellExecutable) -or -not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
+                    throw 'Der Pfad der aktuell laufenden PowerShell konnte nicht ermittelt werden.'
+                }
+
+                $restartArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $ScriptPath
+                if ((@($BoundParameters.Keys) -contains 'TestMail') -and [bool]$BoundParameters['TestMail']) {
+                    $restartArguments += ' -TestMail'
+                }
+                $restartProcess = Start-Process -FilePath $powerShellExecutable `
+                    -ArgumentList $restartArguments `
+                    -WindowStyle Hidden `
+                    -Wait `
+                    -PassThru `
+                    -ErrorAction Stop
+                Write-Host "Der aktualisierte Aufgabencheck ist beendet (Exitcode: $($restartProcess.ExitCode))."
+                exit ([int]$restartProcess.ExitCode)
+            }
+            catch {
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'SYSTEM-Check nach Skriptupdate neu starten' -ErrorRecord $_ -Context $ScriptPath
+                throw "Skriptdateien wurden aktualisiert, aber der SYSTEM-Check konnte nicht neu gestartet werden: $($_.Exception.Message)"
+            }
+        }
+
         $global:LASTEXITCODE = 0
         & $ScriptPath @BoundParameters @RemainingArguments
         $scriptExitCode = 0
