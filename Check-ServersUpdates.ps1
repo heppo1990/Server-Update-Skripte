@@ -1276,12 +1276,16 @@ $actionNoticeHtml = ''
 if ($checkActionNotices.Count -gt 0) {
   Write-Host ''
   Write-Host '!!! VERTEILUNG / EINRICHTUNG ERFORDERLICH – BITTE PRÜFEN !!!' -ForegroundColor Red -BackgroundColor Black
-  $actionNoticeText = 'Mindestens ein Ziel benötigt eine Verteilung oder manuelle Einrichtung. Details stehen im Laufprotokoll.'
+  $distributionScriptPath = Join-Path -Path $PSScriptRoot -ChildPath 'Verteilung_WindowsUpdateAdmConfig.ps1'
+  $quotedDistributionScriptPath = $distributionScriptPath.Replace("'", "''")
+  $distributionCommand = "& '$quotedDistributionScriptPath'"
+  $actionNoticeText = "Mindestens ein Ziel benötigt eine Verteilung oder manuelle Einrichtung. Bitte dieses Skript ausführen:`n$distributionCommand`nDetails stehen im Laufprotokoll."
   Write-Host $actionNoticeText -ForegroundColor Red -BackgroundColor Black
   Write-Host '!!! BITTE LAUFPROTOKOLL PRÜFEN !!!' -ForegroundColor Red -BackgroundColor Black
   Write-ScriptLog "ZUSAMMENGEFASSTER HANDLUNGSBEDARF: $actionNoticeText" $true
 
-  $actionNoticeHtml = "<div class='critical-notice'>⚠️ HANDLUNGSBEDARF: Mindestens ein Ziel benötigt eine Verteilung oder manuelle Einrichtung.<br>Details stehen im Laufprotokoll.</div>"
+  $distributionCommandHtml = [System.Net.WebUtility]::HtmlEncode($distributionCommand)
+  $actionNoticeHtml = "<div class='critical-notice'>⚠️ HANDLUNGSBEDARF: Mindestens ein Ziel benötigt eine Verteilung oder manuelle Einrichtung.<br>Bitte dieses Skript ausführen:<br><code>$distributionCommandHtml</code><br>Details stehen im Laufprotokoll.</div>"
   $reportTitle = "<h1>Update-Check Report - $ComputerFQDN</h1>"
   $RepBody = $RepBody.Replace($reportTitle, "$reportTitle`n$actionNoticeHtml")
 }
