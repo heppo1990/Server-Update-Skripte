@@ -294,30 +294,7 @@ function Invoke-WindowsUpdates {
           throw
         }
       } else {
-        Write-ScriptLog "WindowsUpdateAdm ist auf dem Verwaltungsserver $Servername nicht verfügbar; verwende den bestehenden Loopback-WinRM-Pfad."
-        $loopbackParams = @{
-          ComputerName  = $Servername
-          ErrorAction   = 'Stop'
-          SessionOption = New-PSSessionOption -IncludePortInSPN
-        }
-        $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Installation auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
-          Invoke-Command @loopbackParams -ArgumentList @($SucheOnline, $DeferredCategories, $DeferredKBs, $DeferredOnly) -ScriptBlock {
-            param($Online, $Categories, $KBs, $OnlyDeferred)
-            Import-Module PSWindowsUpdate -ErrorAction Stop
-            $wuParams = @{ AcceptAll = $true; Install = $true; IgnoreReboot = $true }
-            if ($Online) { $wuParams.MicrosoftUpdate = $true }
-            if (-not $OnlyDeferred) {
-              if ($Categories.Count -gt 0) { $wuParams.NotCategory = $Categories }
-              if ($KBs.Count -gt 0) { $wuParams.NotKBArticleID = $KBs }
-            }
-            if ($OnlyDeferred) {
-              $updates = @()
-              foreach ($kb in $KBs) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
-              foreach ($category in $Categories) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
-              $updates
-            } else { Get-WindowsUpdate @wuParams }
-          }
-        }
+        throw "WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver $Servername nicht verfügbar. Lokale Updateinstallationen werden nicht direkt oder über einen uneingeschränkten Loopback-Fallback ausgeführt; bitte WindowsUpdateAdm-Verteilung prüfen."
       }
     } else {
       $useJEA = $false
@@ -549,10 +526,13 @@ function Get-DeferredWindowsUpdates {
     }
 
     if ($isLocal) {
-      if (-not (Get-Module -Name PSWindowsUpdate)) { Import-Module PSWindowsUpdate -ErrorAction Stop }
-      $updates = @(& $query $SucheOnline $DeferredCategories $DeferredKBs)
-    }
-    else {
+      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -WriteLog { param($message) Write-ScriptLog $message }
+      if (-not $jeaSupported) { throw "WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver $Servername nicht verfügbar; zurückgestellte Updates können nicht sicher lokal geprüft werden." }
+      $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -ConfigurationName 'WindowsUpdateAdm'
+      $params.ScriptBlock = $query
+      $params.ArgumentList = @($SucheOnline, $DeferredCategories, $DeferredKBs)
+      $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "JEA-Prüfung zurückgestellter Updates auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params })
+    } else {
       $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-ScriptLog $message }
       if (-not $jeaSupported -and $AuthInfo) {
         Write-ScriptLog "Prüfe zurückgestellte Updates als SYSTEM-Aufgabe auf $Servername..."
@@ -628,22 +608,16 @@ function Remove-DeferredUpdateTask {
     Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
     return $removed
   }
-  if ($Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ComputerFQDN) {
-    $removed = [bool](& $removeTask $taskName)
-  }
-  else {
-    $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-ScriptLog $message }
-    if (-not $jeaSupported -and $AuthInfo) {
-      # Auf Nicht-AD Server 2016 löscht SYSTEM die alte Aufgabe zuverlässig,
-      # auch wenn der gemappte Zertifikat-Administrator dafür kein Recht hat.
-      $result = @(Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $AuthInfo -Mode RemoveDeferredTask -WriteLog { param($message) Write-ScriptLog $message })
-      $removed = [bool]($result | Select-Object -First 1 -ExpandProperty Removed)
-    }
-    else {
-      $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-      $params.ScriptBlock = $removeTask; $params.ArgumentList = $taskName
-      $removed = [bool](Invoke-WindowsUpdateWithRetry -OperationName "Entfernen der Nachinstallationsaufgabe auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params })
-    }
+  $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-ScriptLog $message }
+  if (-not $jeaSupported -and $AuthInfo) {
+    # Auf Nicht-AD Server 2016 löscht SYSTEM die alte Aufgabe zuverlässig,
+    # auch wenn der gemappte Zertifikat-Administrator dafür kein Recht hat.
+    $result = @(Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $AuthInfo -Mode RemoveDeferredTask -WriteLog { param($message) Write-ScriptLog $message })
+    $removed = [bool]($result | Select-Object -First 1 -ExpandProperty Removed)
+  } else {
+    $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
+    $params.ScriptBlock = $removeTask; $params.ArgumentList = $taskName
+    $removed = [bool](Invoke-WindowsUpdateWithRetry -OperationName "Entfernen der Nachinstallationsaufgabe auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params })
   }
   if ($removed) { Write-ScriptLog "Keine zurückgestellten Updates auf ${Servername}: vorhandene Nachinstallationsaufgabe wurde gelöscht." }
   else { Write-ScriptLog "Keine zurückgestellten Updates auf ${Servername}: keine Nachinstallationsaufgabe vorhanden." }
@@ -708,11 +682,15 @@ function Test-ServerIsVirtual {
     $bios = Get-CimInstance Win32_BIOS
     ($cs.Manufacturer + ' ' + $cs.Model + ' ' + $bios.Manufacturer) -match 'VMware|VirtualBox|Virtual Machine|KVM|QEMU|Xen|Bochs'
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { return (& $sb) }
+  $isLocal = $Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ComputerFQDN -or $Servername -ieq "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
+  $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-ScriptLog $message }
+  if ($isLocal -and -not $jeaSupported) {
+    throw "WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver $Servername nicht verfügbar; der Virtualisierungsstatus wird nicht direkt lokal abgefragt."
+  }
   # Nicht-AD Windows Server 2016 kann den JEA-Endpunkt mit Client-Zertifikat
   # nicht im nötigen SYSTEM-Kontext nutzen. Die reine CIM-Abfrage funktioniert
   # über die geprüfte Standard-Zertifikatsverbindung des lokalen Admins.
-  $configurationName = if (Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-ScriptLog $message }) { 'WindowsUpdateAdm' } else { $null }
+  $configurationName = if ($jeaSupported) { 'WindowsUpdateAdm' } else { $null }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo -ConfigurationName $configurationName
   $params.ScriptBlock = $sb
   return [bool](Invoke-Command @params)
@@ -729,8 +707,11 @@ function Test-WindowsUpdateRebootRequired {
     }
     return $false
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { return [bool](& $sb) }
+  $isLocal = $Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ComputerFQDN -or $Servername -ieq "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
   $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-ScriptLog $message }
+  if ($isLocal -and -not $jeaSupported) {
+    throw "WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver $Servername nicht verfügbar; der Neustartstatus wird nicht direkt lokal abgefragt."
+  }
   # Nicht-AD Server 2016 verweigert dem gemappten Zertifikat-Administrator
   # teilweise selbst Get-WURebootStatus. Die Abfrage läuft daher gleich wie
   # die Installation als selbstlöschende SYSTEM-Aufgabe.
@@ -789,7 +770,6 @@ function Register-OneTimeRemoteTask {
       if ($LASTEXITCODE -ne 0) { throw "SYSTEM-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())" }
     }
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $At $encoded $MailPassword; return }
   # Keine Erweiterung der JEA-Rechte: Aufgaben werden über die normale WinRM-Verbindung
   # des ohnehin administrativen Aufrufers angelegt.
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
@@ -973,7 +953,6 @@ exit /b %WORKER_EXIT%
       }
     }
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $MailPassword $At $MaintenanceEndTime $ExpiresAt; return }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
   $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At, $MaintenanceEndTime, $ExpiresAt)
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params | Out-Null }
