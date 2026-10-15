@@ -340,7 +340,7 @@ Der Windows-Zeitraum und die maximale Zahl der Linux-Einträge können angepasst
 .\Updateverlauf auslesen.ps1 -Days 30 -MaxEventsPerTarget 50
 ```
 
-Der Lauf schreibt `Logs\Updateverlauf auslesen_*.log`; die Aufbewahrung folgt `UpdateSettings.KeepLogFiles`. Der HTML-Bericht wird per Mail versendet und nicht als zusätzliche Datei abgelegt. Statuswerte unterscheiden einen erfolgreichen leeren Verlauf (`Leer`) von nicht verfügbarer Quelle und Abfragefehlern. Home Assistant liefert in der aktuell verwendeten CLI/API-Konfiguration keine verlässliche dauerhafte Updatehistorie; der Bericht kennzeichnet diesen Teil deshalb ausdrücklich als `Nicht verfügbar`.
+Der Lauf schreibt `Logs\Updateverlauf auslesen_*.log`; die Aufbewahrung folgt `UpdateSettings.KeepLogFiles`. Der HTML-Bericht wird per Mail versendet und nicht als zusätzliche Datei abgelegt. Die Mail gruppiert die Ereignisse je Ziel, zeigt Statusfarben und eine kurze Gesamtübersicht; Updateergebnisse werden deutsch beschriftet. Statuswerte unterscheiden einen erfolgreichen leeren Verlauf (`Leer`) von nicht verfügbarer Quelle und Abfragefehlern. Home Assistant liefert in der aktuell verwendeten CLI/API-Konfiguration keine verlässliche dauerhafte Updatehistorie; der Bericht kennzeichnet diesen Teil deshalb ausdrücklich als `Nicht verfügbar`.
 
 Für eine schnelle lokale Prüfung eines einzelnen Computers eignet sich weiterhin:
 

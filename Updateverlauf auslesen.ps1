@@ -349,22 +349,72 @@ try {
     if ($mailSettings -and $mailSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$mailSettings.Host)) {
         $company = if ($mailSettings.PSObject.Properties['CompanyName']) { [string]$mailSettings.CompanyName } else { 'Server' }
         $subject = "$company - Updateverlauf der letzten $Days Tage"
-        $rows = foreach ($record in $results) {
-            if ($record.Events.Count -eq 0) {
-                '<tr><td>{0}</td><td>{1}</td><td colspan="2">{2}</td><td colspan="2">{3}</td></tr>' -f (ConvertTo-HtmlSafe $record.Target), (ConvertTo-HtmlSafe $record.Type), (ConvertTo-HtmlSafe $record.State), (ConvertTo-HtmlSafe $record.Message)
+        $eventCount = [int](($results | ForEach-Object { $_.Events.Count } | Measure-Object -Sum).Sum)
+        $targetSections = foreach ($record in $results) {
+            $badgeStyle = switch ($record.State) {
+                'Erfolg' { 'background:#e6f4ea;color:#176b35;' }
+                'Leer' { 'background:#edf1f5;color:#4b5563;' }
+                'Nicht verfügbar' { 'background:#fff3cd;color:#765600;' }
+                default { 'background:#fde8e7;color:#a12622;' }
+            }
+            $safeTarget = ConvertTo-HtmlSafe $record.Target
+            $safeType = ConvertTo-HtmlSafe $record.Type
+            $safeState = ConvertTo-HtmlSafe $record.State
+            $sectionContent = if ($record.Events.Count -eq 0) {
+                '<tr><td style="padding:12px 16px;color:#596579;font-size:14px;">{0}</td></tr>' -f (ConvertTo-HtmlSafe $record.Message)
             } else {
                 foreach ($event in $record.Events) {
                     $dateText = if ($event.Date) { ([datetime]$event.Date).ToString('dd.MM.yyyy HH:mm') } else { '—' }
-                    '<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td><td>{5}</td></tr>' -f (ConvertTo-HtmlSafe $record.Target), (ConvertTo-HtmlSafe $record.Type), (ConvertTo-HtmlSafe $dateText), (ConvertTo-HtmlSafe $event.Result), (ConvertTo-HtmlSafe $event.Title), (ConvertTo-HtmlSafe $event.Details)
+                    $resultLabel = switch ([string]$event.Result) {
+                        'Succeeded' { 'Erfolgreich' }
+                        'Succeeded With Errors' { 'Erfolgreich mit Fehlern' }
+                        'Failed' { 'Fehlgeschlagen' }
+                        'Aborted' { 'Abgebrochen' }
+                        'InProgress' { 'In Bearbeitung' }
+                        default { [string]$event.Result }
+                    }
+                    $resultStyle = switch ($resultLabel) {
+                        'Erfolgreich' { 'color:#176b35;' }
+                        'Erfolgreich mit Fehlern' { 'color:#765600;' }
+                        'Fehlgeschlagen' { 'color:#a12622;' }
+                        'Abgebrochen' { 'color:#a12622;' }
+                        'In Bearbeitung' { 'color:#765600;' }
+                        default { 'color:#394454;' }
+                    }
+                    '<tr><td width="132" style="width:132px;padding:9px 12px;border-top:1px solid #e6eaf0;color:#596579;font-size:13px;white-space:nowrap;vertical-align:top;">{0}</td><td width="145" style="width:145px;padding:9px 12px;border-top:1px solid #e6eaf0;font-size:13px;font-weight:bold;vertical-align:top;{1}">{2}</td><td style="padding:9px 12px;border-top:1px solid #e6eaf0;color:#202938;font-size:14px;line-height:1.45;overflow-wrap:anywhere;">{3}</td></tr>' -f (ConvertTo-HtmlSafe $dateText), $resultStyle, (ConvertTo-HtmlSafe $resultLabel), (ConvertTo-HtmlSafe $event.Title)
                 }
             }
+            $eventLabel = if ($record.Events.Count -gt 0) { "$($record.Events.Count) Einträge" } else { $safeState }
+            @"
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 14px 0;border:1px solid #dce3ec;border-collapse:separate;border-spacing:0;background:#ffffff;">
+<tr><td colspan="3" style="padding:12px 16px;background:#f3f6fa;border-bottom:1px solid #dce3ec;">
+<span style="font-size:16px;font-weight:bold;color:#19283d;">$safeTarget</span>
+<span style="margin-left:8px;color:#69778a;font-size:12px;">$safeType</span>
+<span style="float:right;padding:4px 9px;border-radius:12px;font-size:12px;font-weight:bold;$badgeStyle">$eventLabel</span>
+</td></tr>
+$(if ($record.Events.Count -gt 0) { '<tr><th align="left" width="132" style="padding:7px 12px;background:#fafbfd;color:#667085;font-size:11px;text-transform:uppercase;">Datum</th><th align="left" width="145" style="padding:7px 12px;background:#fafbfd;color:#667085;font-size:11px;text-transform:uppercase;">Ergebnis</th><th align="left" style="padding:7px 12px;background:#fafbfd;color:#667085;font-size:11px;text-transform:uppercase;">Update</th></tr>' })
+$($sectionContent -join "`n")
+</table>
+"@
         }
+        $safeCreated = ConvertTo-HtmlSafe (Get-Date -Format 'dd.MM.yyyy HH:mm')
         $html = @"
-<!doctype html><html><head><meta charset="utf-8"><style>
-body{font-family:Arial,sans-serif;color:#222}h1{color:#1565c0}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{border:1px solid #ccc;padding:7px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#eaf2f8}tr:nth-child(even){background:#f7f7f7}.summary{margin:12px 0;padding:10px;background:#f1f5f9}
-</style></head><body><h1>Updateverlauf</h1><p>Windows und Linux: letzte $Days Tage · maximal $MaxEventsPerTarget Paketvorgänge je Linux-Ziel · Erstellt: $(Get-Date -Format 'dd.MM.yyyy HH:mm')</p>
-<table><thead><tr><th style="width:11%">Ziel</th><th style="width:12%">System</th><th style="width:14%">Zeit/Status</th><th style="width:14%">Ergebnis</th><th style="width:35%">Update / Meldung</th><th style="width:14%">Details</th></tr></thead><tbody>$($rows -join "`n")</tbody></table>
-<p>„Leer“ bedeutet, dass die Abfrage erfolgreich war und im Zeitraum keine Verlaufseinträge lieferte. „Nicht verfügbar“ bedeutet, dass keine verlässliche Quelle vorliegt.</p></body></html>
+<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:20px;background:#f4f6f9;font-family:Arial,Helvetica,sans-serif;color:#202938;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:1000px;margin:0 auto;border-collapse:collapse;">
+<tr><td style="padding:22px 24px;background:#17365d;color:#ffffff;">
+<div style="font-size:22px;font-weight:bold;">Updateverlauf</div>
+<div style="padding-top:6px;font-size:13px;color:#dce7f5;">Letzte $Days Tage · erstellt am $safeCreated</div>
+</td></tr>
+<tr><td style="padding:14px 0 10px 0;">
+<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;"><tr>
+<td style="padding:10px 16px;background:#ffffff;border:1px solid #dce3ec;"><div style="font-size:20px;font-weight:bold;color:#17365d;">$($results.Count)</div><div style="font-size:11px;color:#667085;">Ziele</div></td>
+<td width="10"></td>
+<td style="padding:10px 16px;background:#ffffff;border:1px solid #dce3ec;"><div style="font-size:20px;font-weight:bold;color:#17365d;">$eventCount</div><div style="font-size:11px;color:#667085;">Verlaufseinträge</div></td>
+</tr></table>
+</td></tr>
+<tr><td style="padding:4px 0 0 0;">$($targetSections -join "`n")</td></tr>
+<tr><td style="padding:8px 2px 0 2px;color:#69778a;font-size:12px;line-height:1.5;">„Leer“ bedeutet: Die Abfrage war erfolgreich, es gab aber keine Verlaufseinträge im Zeitraum. „Nicht verfügbar“ bedeutet: Für dieses Ziel gibt es keine verlässliche Verlaufquelle. Linux: höchstens $MaxEventsPerTarget Paketvorgänge je Ziel.</td></tr>
+</table></body></html>
 "@
         $sent = Send-WindowsUpdateHtmlMail -MailSettings $mailSettings -Subject $subject -HtmlBody $html -WriteLog { param($message) Write-HistoryLog $message -LogOnly }
         if (-not $sent) { Write-Host 'E-Mailversand fehlgeschlagen; Details stehen im Protokoll.' -ForegroundColor Red }
