@@ -680,13 +680,29 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
     $JeaManifest = Join-Path $JeaBaseDir "$JeaModuleName.psd1"
     if (!(Test-Path $JeaManifest) -or $ForceUpdate) {
         New-ModuleManifest -Path $JeaManifest `
+                           -RootModule "$JeaModuleName.psm1" `
                            -Guid ([Guid]::NewGuid()) `
                            -Author "IT-Administration" `
                            -ModuleVersion "1.0" `
+                           -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus') `
                            -Description "Stabiler JEA Endpunkt fuer Windows Update Verwaltung"
         Write-SetupLog "JEA-Trägermodul Manifest erstellt: $JeaManifest" "SUCCESS"
     } else {
-        Write-SetupLog "JEA-Trägermodul bereits vorhanden" "SUCCESS"
+        try {
+            # Vorhandene Manifeste stammen teils aus älteren Verteilungen und
+            # enthielten weder RootModule noch den Export der Statusfunktion.
+            # Ohne beide Angaben wird die erzeugte .psm1 bei ModulesToImport
+            # nicht mit der Statusfunktion in die JEA-Sitzung geladen.
+            Update-ModuleManifest -Path $JeaManifest `
+                                  -RootModule "$JeaModuleName.psm1" `
+                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus') `
+                                  -ErrorAction Stop
+            Write-SetupLog "JEA-Trägermodul-Manifest aktualisiert (RootModule und Statusfunktion): $JeaManifest" "SUCCESS"
+        }
+        catch {
+            Write-SetupDiagnostic -Operation 'JEA-Trägermodul-Manifest' -ErrorRecord $_ -Context @("Path=$JeaManifest")
+            throw 'JEA-Trägermodul-Manifest konnte nicht auf die Statusfunktion aktualisiert werden; Details stehen im Setup-Protokoll.'
+        }
     }
     
     # Role Capability Datei erstellen

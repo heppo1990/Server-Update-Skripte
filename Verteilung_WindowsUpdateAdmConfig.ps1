@@ -572,7 +572,14 @@ function Invoke-WinRMDeployment {
         $testParams = @{
             ComputerName      = $Servername
             ConfigurationName = 'WindowsUpdateAdm'
-            ScriptBlock       = { Get-Command Get-WindowsUpdate -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Name }
+            ScriptBlock       = {
+                $updateCommand = Get-Command Get-WindowsUpdate -ErrorAction Stop | Select-Object -First 1
+                $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
+                [PSCustomObject]@{
+                    UpdateCommand     = [string]$updateCommand.Name
+                    DeploymentVersion = [string]$deploymentStatus.Version
+                }
+            }
             ErrorAction       = 'Stop'
         }
         if ($DeployType -ne 'AD') {
@@ -588,19 +595,24 @@ function Invoke-WinRMDeployment {
         }
 
         Write-DeployLog "[$Servername] Teste WindowsUpdateAdm-Endpunkt."
-        $endpointCommand = Invoke-WindowsUpdateWithRetry -OperationName "WindowsUpdateAdm-Endpunkt auf $Servername" -RetryCount 5 -RetryDelaySeconds 30 -WriteLog {
+        $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
+        $validateEndpoint = {
+            $status = Invoke-Command @testParams
+            if ($status.UpdateCommand -ne 'Get-WindowsUpdate') {
+                throw "WindowsUpdateAdm-Endpunkt auf $Servername stellt Get-WindowsUpdate nicht bereit."
+            }
+            if ($status.DeploymentVersion -ne $expectedDeploymentVersion) {
+                throw "WindowsUpdateAdm-Statusfunktion auf $Servername fehlt oder ist veraltet (gefunden: '$($status.DeploymentVersion)', erwartet: '$expectedDeploymentVersion')."
+            }
+            return $status
+        }.GetNewClosure()
+        $endpointStatus = Invoke-WindowsUpdateWithRetry -OperationName "WindowsUpdateAdm-Endpunkt auf $Servername" -RetryCount 5 -RetryDelaySeconds 30 -WriteLog {
             param($message)
             if ($message -like 'Wiederhole *') {
                 Write-DeployLog "WindowsUpdateAdm-Endpunkt auf $Servername noch nicht bereit; erneuter Versuch folgt." -LogOnly
             }
-        } -ScriptBlock {
-            $command = Invoke-Command @testParams
-            if ($command -ne 'Get-WindowsUpdate') {
-                throw "WindowsUpdateAdm-Endpunkt lieferte unerwartetes Ergebnis: $command"
-            }
-            return $command
-        }
-        Write-DeployLog "[$Servername] WindowsUpdateAdm-Endpunkt erfolgreich getestet." -Level Success
+        } -ScriptBlock $validateEndpoint
+        Write-DeployLog "[$Servername] WindowsUpdateAdm-Endpunkt und Statusfunktion (Version $($endpointStatus.DeploymentVersion)) erfolgreich getestet." -Level Success
 
         return [PSCustomObject]@{
             Status = 'Success'
