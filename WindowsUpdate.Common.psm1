@@ -54,9 +54,15 @@ $script:WindowsUpdateConsoleSummaryDividerCount = 0
 $script:WindowsUpdateConsolePackageRowsActive = $false
 $script:WindowsUpdateConsolePackageTableActive = $false
 
+function Test-WindowsUpdateZeroFailureSummary {
+    param([AllowEmptyString()][string]$Message)
+    return $Message -match '(?i)^\s*(?:Linux-(?:Stats|Zusammenfassung)|HA-Stats):.*\b0\s+(?:fehlgeschlagen|Fehler)\b'
+}
+
 function Get-WindowsUpdateConsoleColor {
     param([AllowEmptyString()][string]$Message)
 
+    if (Test-WindowsUpdateZeroFailureSummary -Message $Message) { return 'Green' }
     if ($Message -match '(?i)^\s*(WARNUNG|WARNING|\[WARN\])|manuelle Prüfung|manuelle Aktion erforderlich') { return 'Yellow' }
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*0(?:\D|$)') { return 'Green' }
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*[1-9]\d*') { return 'Red' }
@@ -72,6 +78,7 @@ function Format-WindowsUpdateConsoleError {
     if ([string]::IsNullOrWhiteSpace($Message)) { return $Message }
     # Ein Fehlerzähler von null ist ein erfolgreicher Status, keine Meldung.
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*0(?:\D|$)') { return $Message }
+    if (Test-WindowsUpdateZeroFailureSummary -Message $Message) { return $Message }
     if ($Message -notmatch '(?i)^\s*(WARNUNG|WARNING|FEHLER\b|ERROR\b|\[WARN\]|\[ERROR\])|^\s*Fehler bei\b|fehlgeschlagen|konnte nicht|UnableToDownload|Access is denied|Zugriff verweigert|Exception|Fehler beim') { return $Message }
 
     $target = $null
