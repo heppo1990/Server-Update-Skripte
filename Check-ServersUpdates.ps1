@@ -707,8 +707,16 @@ if ($ServerADList -ne $null) {
 
         if ($remoting.IsNonAdTarget) {
           $clientCertificate = Get-CheckClientCertificate
-          if ($clientCertificate -and $clientCertificate.NotAfter -le (Get-Date)) {
-            Add-CheckRedistributionNotice -Target $Servername -Reason "Das WinRM-Client-Zertifikat ist am $($clientCertificate.NotAfter.ToString('dd.MM.yyyy')) abgelaufen."
+          if ($clientCertificate) {
+            $certificateDaysRemaining = [math]::Ceiling(($clientCertificate.NotAfter - (Get-Date)).TotalDays)
+            if ($certificateDaysRemaining -le 42) {
+              $certificateExpiryReason = if ($certificateDaysRemaining -le 0) {
+                "Das WinRM-Client-Zertifikat ist am $($clientCertificate.NotAfter.ToString('dd.MM.yyyy')) abgelaufen."
+              } else {
+                "Das WinRM-Client-Zertifikat läuft am $($clientCertificate.NotAfter.ToString('dd.MM.yyyy')) in $certificateDaysRemaining Tagen ab; Erneuerung und Verteilung sind innerhalb der nächsten sechs Wochen erforderlich."
+              }
+              Add-CheckRedistributionNotice -Target $Servername -Reason $certificateExpiryReason
+            }
           }
         }
 

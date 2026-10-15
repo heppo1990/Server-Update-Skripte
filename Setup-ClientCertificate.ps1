@@ -143,11 +143,26 @@ $settingsFiles += Get-ChildItem -Path $PSScriptRoot -File -Filter '*.settings.js
     Select-Object -ExpandProperty FullName
 $settingsFiles = @($settingsFiles | Select-Object -Unique)
 
-# Prüfen ob bereits ein gültiges Zertifikat mit diesem Namen existiert
-$existingCert = Get-ChildItem $certStorePath |
-    Where-Object { $_.Subject -eq "CN=$CertName" -and $_.NotAfter -gt (Get-Date).AddDays(30) } |
+# Ein Client-Zertifikat wird vor Ablauf erneuert, damit die Verteilung genügend
+# Zeit hat, den neuen öffentlichen Schlüssel auf allen Nicht-AD-Zielen auszurollen.
+$renewalWindowDays = 42
+$matchingCertificates = @(Get-ChildItem $certStorePath |
+    Where-Object { $_.Subject -eq "CN=$CertName" } |
+    Sort-Object NotAfter -Descending)
+$existingCert = $matchingCertificates |
+    Where-Object { $_.NotAfter -gt (Get-Date).AddDays($renewalWindowDays) } |
     Sort-Object NotAfter -Descending |
     Select-Object -First 1
+
+if (-not $existingCert -and $matchingCertificates.Count -gt 0) {
+    $lastCertificate = $matchingCertificates[0]
+    $daysRemaining = [math]::Ceiling(($lastCertificate.NotAfter - (Get-Date)).TotalDays)
+    if ($daysRemaining -le 0) {
+        Write-Host "Vorhandenes Client-Zertifikat ist abgelaufen ($($lastCertificate.NotAfter.ToString('yyyy-MM-dd'))); es wird automatisch erneuert." -ForegroundColor Yellow
+    } else {
+        Write-Host "Vorhandenes Client-Zertifikat läuft in $daysRemaining Tagen ab; es wird innerhalb des 6-Wochen-Zeitraums automatisch erneuert." -ForegroundColor Yellow
+    }
+}
 
 # WinRM verlangt für Benutzerzertifikate einen UPN im Subject Alternative
 # Name. Ältere Versionen dieses Skripts haben nur einen CN erstellt und sind
