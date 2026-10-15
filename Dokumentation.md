@@ -326,7 +326,23 @@ Normaler Lauf für alle konfigurierten Ziele:
 
 ### `Updateverlauf auslesen.ps1`
 
-Liest den Windows-Updateverlauf aus. Für eine schnelle lokale Prüfung eignet sich auch:
+Erstellt einen zentralen Updateverlaufsbericht und versendet ihn über die konfigurierten `MailSettings`. Ohne Parameter werden die in `UpdateSettings`, `LinuxSettings` und `HomeAssistantSettings` konfigurierten Ziele verwendet. Windows-Verläufe werden über WinRM und den vorhandenen `WindowsUpdateAdm`-JEA-Endpunkt (`Get-WUHistory`) gelesen; Zusatz- und Hypervisorziele verwenden die vorhandene Zertifikatsauthentifizierung. Linux liest nur die vorhandenen apt-, dnf- oder yum-Verlaufsprotokolle per SSH. Es werden keine Updates installiert.
+
+Aufruf mit dem Standardzeitraum von 90 Tagen und höchstens 100 Linux-Protokollzeilen je Host:
+
+```powershell
+.\Updateverlauf auslesen.ps1
+```
+
+Der Windows-Zeitraum und die maximale Zahl der Linux-Einträge können angepasst werden:
+
+```powershell
+.\Updateverlauf auslesen.ps1 -Days 30 -MaxEventsPerTarget 50
+```
+
+Der Lauf schreibt `Logs\Updateverlauf auslesen_*.log`; die Aufbewahrung folgt `UpdateSettings.KeepLogFiles`. Der HTML-Bericht wird per Mail versendet und nicht als zusätzliche Datei abgelegt. Statuswerte unterscheiden einen erfolgreichen leeren Verlauf (`Leer`) von nicht verfügbarer Quelle und Abfragefehlern. Home Assistant liefert in der aktuell verwendeten CLI/API-Konfiguration keine verlässliche dauerhafte Updatehistorie; der Bericht kennzeichnet diesen Teil deshalb ausdrücklich als `Nicht verfügbar`.
+
+Für eine schnelle lokale Prüfung eines einzelnen Computers eignet sich weiterhin:
 
 ```powershell
 Get-WUHistory

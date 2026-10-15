@@ -10,6 +10,7 @@ Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen 
 4. `Check-ServersUpdates.ps1` prüft verfügbare Updates.
 5. Optional lädt `Download-ServersUpdates.ps1` die Updates vor.
 6. `Install-ServersUpdates.ps1` installiert Updates im geplanten Wartungsfenster.
+7. `Updateverlauf auslesen.ps1` erstellt den zentralen Verlaufsbericht und versendet ihn per Mail.
 
 Beim PSWindowsUpdate-Check werden NuGet und PSWindowsUpdate auf dem Verwaltungsrechner und den Windows-Zielen geprüft und bei Bedarf aktualisiert.
 PowerShell 7 prüft zusätzlich PackageManagement auf Updates; auf Remotezielen erfolgt das nur, wenn PowerShell 7 installiert ist.
@@ -20,6 +21,7 @@ PowerShell 7 prüft zusätzlich PackageManagement auf Updates; auf Remotezielen 
 - Kundeneinstellungen, Zertifikate und Laufzeitdaten werden nicht aus GitHub überschrieben. Fehlende Standardwerte werden in bestehende Settings ergänzt und vorher gesichert.
 - Linux- und Home-Assistant-Skripte werden nur geladen, wenn sie in den Settings konfiguriert sind.
 - Mailversand lässt sich mit `Check-ServersUpdates.ps1 -TestMail` separat prüfen.
+- Der zentrale Updateverlaufsbericht nutzt die konfigurierten Windows-, Linux- und Home-Assistant-Ziele; Details und Grenzen der jeweiligen Historienquellen stehen in der Dokumentation.
 - Die Verteilung zeigt farbige Einrichtungsschritte, prüft bei Linux und Home Assistant nur SSH-Schlüssel und Verbindung und zählt alle Zielsysteme getrennt und gemeinsam. Zielarten mit Anzahl null werden in der Kopfzeile ausgeblendet. SSH-Rückfragen bleiben bei Check, Download, Install und Verteilung sichtbar; Details stehen gemäß `WriteLogFile` und `KeepLogFiles` im Log.
 - Check, Download und Install trennen Ergebnisblöcke je Ziel mit Leerzeilen. Zusammenfassungen nennen nur Systemarten, für die Ziele vorhanden sind.
 - Der Check prüft WindowsUpdateAdm-Versionen, Linux-SSH-/sudo-Einrichtungen und den Home-Assistant-SSH-Zugang. Fehlende oder veraltete Voraussetzungen werden in Konsole und Check-Mail als Handlungsbedarf gemeldet.
