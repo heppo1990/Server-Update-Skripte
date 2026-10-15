@@ -60,10 +60,13 @@ function ConvertFrom-HistoryDate {
     param([Parameter(Mandatory)]$Value)
     if ($Value -is [datetime]) {
         if ($Value.Kind -eq [DateTimeKind]::Utc) { return $Value.ToLocalTime() }
-        if ($Value.Kind -eq [DateTimeKind]::Unspecified) {
-            return ([datetime]::SpecifyKind($Value, [DateTimeKind]::Utc)).ToLocalTime()
-        }
         return $Value
+    }
+
+    # PSWindowsUpdate liefert bereits lokale Uhrzeiten. Diese werden als
+    # zeitzonenloser Text übertragen und dürfen nicht nochmals verschoben werden.
+    if ([string]$Value -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$') {
+        return [datetime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)
     }
 
     $dateOffset = [datetimeoffset]::MinValue
@@ -258,9 +261,9 @@ try {
                 $history = @(Get-WUHistory -ErrorAction Stop | Select-Object -First $Limit)
                 foreach ($item in $history) {
                     [pscustomobject]@{
-                        # Als UTC-Text übertragen, damit WinRM den Zeitwert
-                        # nicht beim Serialisieren verschiebt.
-                        Date = ([datetime]$item.Date).ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                        # PSWindowsUpdate liefert die lokale Anzeigezeit.
+                        # Als Text übertragen, damit WinRM sie nicht umdeutet.
+                        Date = ([datetime]$item.Date).ToString('yyyy-MM-ddTHH:mm:ss.fffffff', [Globalization.CultureInfo]::InvariantCulture)
                         Result = [string]$item.Result
                         Title = [string]$item.Title
                         Details = if ($item.PSObject.Properties['KB']) { [string]$item.KB } else { '' }
@@ -282,7 +285,7 @@ try {
                     }
                     $kb = if ([string]$entry.Title -match '(?i)KB\d+') { $matches[0].ToUpperInvariant() } else { '' }
                     [pscustomobject]@{
-                        # UTC als Text übertragen; die Umrechnung erfolgt lokal.
+                        # Die COM-API liefert UTC; diese Zeit wird lokal umgerechnet.
                         Date = ([datetime]::SpecifyKind([datetime]$entry.Date, [DateTimeKind]::Utc)).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
                         Result = $resultName
                         Title = [string]$entry.Title
