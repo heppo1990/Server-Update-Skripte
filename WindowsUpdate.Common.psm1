@@ -86,6 +86,10 @@ function Format-WindowsUpdateConsoleError {
     }
 
     $prefix = if ($Message -match '(?i)WARNUNG|WARNING') { 'WARNUNG' } else { 'FEHLER' }
+    # Warnungen aus einem Unterprozess besitzen teils keinen standardisierten
+    # Vorgangs-/Servertext. In diesem Fall den konkreten Hinweis bewahren,
+    # statt ihn zu einer roten, inhaltslosen Fehlermeldung zu verkürzen.
+    if ($prefix -eq 'WARNUNG' -and -not $operation -and -not $target) { return $Message }
     if ($operation -and $target) { return "$prefix`: $operation auf $target fehlgeschlagen; Details im Log." }
     if ($target) { return "$prefix`: Fehler auf $target; Details im Log." }
     if ($operation) { return "$prefix`: $operation fehlgeschlagen; Details im Log." }

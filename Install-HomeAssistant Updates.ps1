@@ -138,7 +138,8 @@ function Write-HostLog {
     } catch { }
 
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    if (-not $LogOnly -and -not $script:QuietMode -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $fgColor }
+    $consoleMessage = if ($Level -eq 'Warning' -and $Message -notmatch '^\s*(WARNUNG|WARNING)\b') { "WARNUNG: $Message" } else { $Message }
+    if (-not $LogOnly -and -not $script:QuietMode -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $consoleMessage -ForegroundColor $fgColor }
     if ($script:WriteExecutionLog) {
         Add-Content -LiteralPath $LogFile -Value $Message -Encoding utf8
     }
