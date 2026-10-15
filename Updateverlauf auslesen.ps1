@@ -56,6 +56,23 @@ function Add-HistoryEvent {
     }
 }
 
+function ConvertFrom-HistoryDate {
+    param([Parameter(Mandatory)]$Value)
+    if ($Value -is [datetime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Utc) { return $Value.ToLocalTime() }
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) {
+            return ([datetime]::SpecifyKind($Value, [DateTimeKind]::Utc)).ToLocalTime()
+        }
+        return $Value
+    }
+
+    $dateOffset = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$dateOffset)) {
+        return $dateOffset.LocalDateTime
+    }
+    return [datetime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal)
+}
+
 function Invoke-HistoryRemoteCommand {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
@@ -118,34 +135,62 @@ if [ -d /var/log/apt ] && ls /var/log/apt/history.log* >/dev/null 2>&1; then
   done | awk -v cutoff='__CUTOFF__' -v limit=__LIMIT__ '
     BEGIN { RS=""; FS="\n" }
     {
-      date=""; action=""; packages=""
+      date=""; endDate=0; hasError=0; install=""; upgrade=""; remove=""; purge=""
       for (i=1; i<=NF; i++) {
         line=$i
-        if (line ~ /^Start-Date:/) { date=line; sub(/^Start-Date:[[:space:]]*/, "", date); date=substr(date, 1, 10) }
+        if (line ~ /^Start-Date:/) { date=line; sub(/^Start-Date:[[:space:]]*/, "", date); date=substr(date, 1, 16) }
+        else if (line ~ /^End-Date:/) { endDate=1 }
+        else if (line ~ /^Error:/) { hasError=1 }
         else if (line ~ /^(Install|Upgrade|Remove|Purge):/) {
-          if (action == "") { action=line; sub(/:.*/, "", action) }
+          action=line; sub(/:.*/, "", action)
           payload=line; sub(/^[^:]*:[[:space:]]*/, "", payload)
-          if (packages != "") packages=packages "; "
-          packages=packages payload
+          if (action == "Install") install=(install == "" ? payload : install "; " payload)
+          else if (action == "Upgrade") upgrade=(upgrade == "" ? payload : upgrade "; " payload)
+          else if (action == "Remove") remove=(remove == "" ? payload : remove "; " payload)
+          else if (action == "Purge") purge=(purge == "" ? payload : purge "; " payload)
         }
       }
-      if (date != "" && date >= cutoff && packages != "") print date "\t" action ": " packages
+      if (date != "" && substr(date,1,10) >= cutoff) {
+        status=(endDate && !hasError ? "Erfolgreich" : "Fehlgeschlagen")
+        if (install != "") print date "\t" status "\tInstall" "\t" install
+        if (upgrade != "") print date "\t" status "\tUpgrade" "\t" upgrade
+        if (remove != "") print date "\t" status "\tRemove" "\t" remove
+        if (purge != "") print date "\t" status "\tPurge" "\t" purge
+      }
     }
   ' | sort -r | head -n __LIMIT__
 elif command -v dnf >/dev/null 2>&1; then
   echo '__PKGMGR_DNF__'
-  dnf -q history list 2>&1 | awk -F'|' -v cutoff='__CUTOFF__' '
-    NR>2 && $1 ~ /[0-9]/ {
-      for(i=1;i<=5;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
-      date=$3; if (substr(date,1,10) >= cutoff) print date "\t" $1 " | " $4 " | " $5
-    }' | sort -r | head -n __LIMIT__
+  emit_history() {
+    manager=$1
+    "$manager" -q history list 2>&1 | awk -F'|' -v cutoff='__CUTOFF__' '
+      NR>2 && $1 ~ /[0-9]/ {
+        for(i=1;i<=5;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+        id=$1; gsub(/[^0-9]/, "", id); date=$3
+        if (substr(date,1,10) >= cutoff) print id "\t" date "\t" $4 "\t" $5
+      }' | while IFS="$(printf '\t')" read -r id date action altered; do
+        rc=$("$manager" -q history info "$id" 2>/dev/null | awk -F: 'tolower($1) ~ /return-code/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')
+        case "$rc" in *Success*) state="Erfolgreich" ;; *Error*|*Fail*|*Abort*) state="Fehlgeschlagen" ;; *) state="Status unbekannt" ;; esac
+        printf '%s\t%s\t%s\t%s\n' "$date" "$state" "$action" "$altered"
+      done | sort -r | head -n __LIMIT__
+  }
+  emit_history dnf
 elif command -v yum >/dev/null 2>&1; then
   echo '__PKGMGR_YUM__'
-  yum -q history list 2>&1 | awk -F'|' -v cutoff='__CUTOFF__' '
-    NR>2 && $1 ~ /[0-9]/ {
-      for(i=1;i<=5;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
-      date=$3; if (substr(date,1,10) >= cutoff) print date "\t" $1 " | " $4 " | " $5
-    }' | sort -r | head -n __LIMIT__
+  emit_history() {
+    manager=$1
+    "$manager" -q history list 2>&1 | awk -F'|' -v cutoff='__CUTOFF__' '
+      NR>2 && $1 ~ /[0-9]/ {
+        for(i=1;i<=5;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+        id=$1; gsub(/[^0-9]/, "", id); date=$3
+        if (substr(date,1,10) >= cutoff) print id "\t" date "\t" $4 "\t" $5
+      }' | while IFS="$(printf '\t')" read -r id date action altered; do
+        rc=$("$manager" -q history info "$id" 2>/dev/null | awk -F: 'tolower($1) ~ /return-code/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')
+        case "$rc" in *Success*) state="Erfolgreich" ;; *Error*|*Fail*|*Abort*) state="Fehlgeschlagen" ;; *) state="Status unbekannt" ;; esac
+        printf '%s\t%s\t%s\t%s\n' "$date" "$state" "$action" "$altered"
+      done | sort -r | head -n __LIMIT__
+  }
+  emit_history yum
 else
   echo '__HISTORY_UNAVAILABLE__ Paketmanager-/Verlaufsquelle nicht unterstützt.'
 fi
@@ -208,7 +253,9 @@ try {
                 $history = @(Get-WUHistory -ErrorAction Stop | Select-Object -First $Limit)
                 foreach ($item in $history) {
                     [pscustomobject]@{
-                        Date = [datetime]$item.Date
+                        # Als UTC-Text übertragen, damit WinRM den Zeitwert
+                        # nicht beim Serialisieren verschiebt.
+                        Date = ([datetime]$item.Date).ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
                         Result = [string]$item.Result
                         Title = [string]$item.Title
                         Details = if ($item.PSObject.Properties['KB']) { [string]$item.KB } else { '' }
@@ -230,9 +277,8 @@ try {
                     }
                     $kb = if ([string]$entry.Title -match '(?i)KB\d+') { $matches[0].ToUpperInvariant() } else { '' }
                     [pscustomobject]@{
-                        # Die Windows-Update-Agent-COM-API liefert UTC-Zeit;
-                        # für Vergleich und Bericht in die lokale Zeit umrechnen.
-                        Date = ([datetime]::SpecifyKind([datetime]$entry.Date, [DateTimeKind]::Utc)).ToLocalTime()
+                        # UTC als Text übertragen; die Umrechnung erfolgt lokal.
+                        Date = ([datetime]::SpecifyKind([datetime]$entry.Date, [DateTimeKind]::Utc)).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
                         Result = $resultName
                         Title = [string]$entry.Title
                         Details = $kb
@@ -257,17 +303,26 @@ try {
                 }
             }
             Write-HistoryLog "Windows-Verlauf auf ${name}: JEA/PSWindowsUpdate lieferte $(@($historyRows).Count) Rohereignis(se)." -LogOnly
-            $historyRows = @($historyRows | Where-Object { $_.Date -and ([datetime]$_.Date -ge $since) } | Sort-Object Date -Descending | Select-Object -First $MaxEventsPerTarget)
+            $normalizedRows = foreach ($row in $historyRows) {
+                $localDate = ConvertFrom-HistoryDate -Value $row.Date
+                if ($localDate -ge $since) {
+                    [pscustomobject]@{ Date = $localDate; Result = [string]$row.Result; Title = [string]$row.Title; Details = [string]$row.Details }
+                }
+            }
+            $historyRows = @($normalizedRows | Sort-Object Date -Descending | Select-Object -First $MaxEventsPerTarget)
             Write-HistoryLog "Windows-Verlauf auf ${name}: $(@($historyRows).Count) Ereignis(se) nach Zeitraumfilter." -LogOnly
             if ($historyRows.Count -eq 0) {
                 Write-HistoryLog "Windows-Verlauf über JEA/PSWindowsUpdate auf $name war leer; prüfe Windows Update Agent COM-API über Standard-WinRM." -LogOnly
                 try {
                     $nativeRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $nativeWuaHistory -ArgumentList @(1000))
                     Write-HistoryLog "Windows Update Agent COM-API auf $name lieferte $($nativeRows.Count) Rohereignis(se)." -LogOnly
-                    $historyRows = @($nativeRows |
-                        Where-Object { $_.Date -and ([datetime]$_.Date -ge $since) } |
-                        Sort-Object Date -Descending |
-                        Select-Object -First $MaxEventsPerTarget)
+                    $nativeNormalizedRows = foreach ($row in $nativeRows) {
+                        $localDate = ConvertFrom-HistoryDate -Value $row.Date
+                        if ($localDate -ge $since) {
+                            [pscustomobject]@{ Date = $localDate; Result = [string]$row.Result; Title = [string]$row.Title; Details = [string]$row.Details }
+                        }
+                    }
+                    $historyRows = @($nativeNormalizedRows | Sort-Object Date -Descending | Select-Object -First $MaxEventsPerTarget)
                     Write-HistoryLog "Windows Update Agent COM-API auf $name lieferte $($historyRows.Count) Ereignis(se) nach Zeitraumfilter." -LogOnly
                 }
                 catch {
@@ -301,13 +356,21 @@ try {
                 $history = Get-LinuxHistoryLines -HostEntry $hostEntry -KeyPath $linuxKey -SshPath $sshPath -SinceDate $since -Limit $MaxEventsPerTarget -ConnectTimeoutSeconds $connectTimeout
                 if (@($history.Lines | Where-Object { $_ -like '__HISTORY_UNAVAILABLE__*' -or $_ -like '__HISTORY_PERMISSION__*' }).Count -gt 0) {
                     $record.State = 'Nicht verfügbar'; $record.Message = ($history.Lines | Where-Object { $_ -like '__HISTORY_UNAVAILABLE__*' -or $_ -like '__HISTORY_PERMISSION__*' } | Select-Object -First 1) -replace '^__HISTORY_(UNAVAILABLE|PERMISSION)__\s*', ''
-                } elseif (@($history.Lines | Where-Object { $_ -match '^__PKGMGR_(DNF|YUM)__' -or $_ -match '^\d{4}-\d{2}-\d{2}\t' }).Count -gt 0) {
+                } elseif (@($history.Lines | Where-Object { $_ -match '^__PKGMGR_(DNF|YUM)__' -or $_ -match '^\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?\t' }).Count -gt 0) {
                     $record.State = 'Erfolg'
-                    $historyLines = @($history.Lines | Where-Object { $_ -notmatch '^__PKGMGR_(DNF|YUM)__' -and $_ -match '^\d{4}-\d{2}-\d{2}\t' } | Select-Object -First $MaxEventsPerTarget)
+                    $historyLines = @($history.Lines | Where-Object { $_ -notmatch '^__PKGMGR_(DNF|YUM)__' -and $_ -match '^\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?\t' } | Select-Object -First $MaxEventsPerTarget)
                     foreach ($line in $historyLines) {
-                        $parts = $line -split "`t", 2
-                        $eventDate = [datetime]::ParseExact($parts[0], 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
-                        Add-HistoryEvent -TargetResult $record -Event ([pscustomobject]@{ Date = $eventDate; Result = 'Abgeschlossen'; Title = $parts[1].Trim(); Details = 'Paketmanager-Verlauf' })
+                        $parts = $line -split "`t", 4
+                        $eventDate = [datetime]::Parse($parts[0], [Globalization.CultureInfo]::InvariantCulture)
+                        $actionLabel = switch -Regex ($parts[2]) {
+                            '^(Install|Installed)$' { 'Installation' }
+                            '^(Upgrade|Upgraded)$' { 'Aktualisierung' }
+                            '^(Remove|Erase|Removed)$' { 'Entfernung' }
+                            '^(Purge|Purged)$' { 'Bereinigung' }
+                            default { [string]$parts[2] }
+                        }
+                        $eventResult = '{0} · {1}' -f $parts[1], $actionLabel
+                        Add-HistoryEvent -TargetResult $record -Event ([pscustomobject]@{ Date = $eventDate; Result = $eventResult; Title = $parts[3].Trim(); Details = '' })
                     }
                     if ($record.Events.Count -eq 0) { $record.State = 'Leer'; $record.Message = 'Paketmanager meldet keinen Verlauf.' }
                     else { $record.Message = "$($record.Events.Count) Paketvorgang/-vorgänge im Zeitraum" }
@@ -373,14 +436,11 @@ try {
                         'InProgress' { 'In Bearbeitung' }
                         default { [string]$event.Result }
                     }
-                    $resultStyle = switch ($resultLabel) {
-                        'Erfolgreich' { 'color:#176b35;' }
-                        'Erfolgreich mit Fehlern' { 'color:#765600;' }
-                        'Fehlgeschlagen' { 'color:#a12622;' }
-                        'Abgebrochen' { 'color:#a12622;' }
-                        'In Bearbeitung' { 'color:#765600;' }
-                        default { 'color:#394454;' }
-                    }
+                    $resultStyle = if ($resultLabel -match '^Erfolgreich mit Fehlern') { 'color:#765600;' }
+                        elseif ($resultLabel -match '^Erfolgreich') { 'color:#176b35;' }
+                        elseif ($resultLabel -match '^(Fehlgeschlagen|Abgebrochen)') { 'color:#a12622;' }
+                        elseif ($resultLabel -match '^(Status unbekannt|In Bearbeitung)') { 'color:#765600;' }
+                        else { 'color:#394454;' }
                     '<tr><td width="132" style="width:132px;padding:9px 12px;border-top:1px solid #e6eaf0;color:#596579;font-size:13px;white-space:nowrap;vertical-align:top;">{0}</td><td width="145" style="width:145px;padding:9px 12px;border-top:1px solid #e6eaf0;font-size:13px;font-weight:bold;vertical-align:top;{1}">{2}</td><td style="padding:9px 12px;border-top:1px solid #e6eaf0;color:#202938;font-size:14px;line-height:1.45;overflow-wrap:anywhere;">{3}</td></tr>' -f (ConvertTo-HtmlSafe $dateText), $resultStyle, (ConvertTo-HtmlSafe $resultLabel), (ConvertTo-HtmlSafe $event.Title)
                 }
             }
