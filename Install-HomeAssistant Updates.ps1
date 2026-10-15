@@ -189,9 +189,24 @@ function Get-NextHARebootTime {
 }
 
 function Test-HAIsVirtual {
-    $output = Invoke-HA -Command 'systemd-detect-virt --vm 2>/dev/null || true' -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
-    $virtualization = ($output -join '').Trim()
-    return $virtualization -match '^(kvm|vmware|oracle|microsoft|qemu|xen|bhyve|zvm|apple)$'
+    try {
+        # Die Abfrage beeinflusst nur die Neustartplanung. Sie darf bei einem
+        # nicht antwortenden Remote-Befehl den gesamten Update-Lauf nicht
+        # blockieren oder fehlschlagen lassen.
+        $output = Invoke-HA -Command 'systemd-detect-virt --vm 2>/dev/null || true' `
+            -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath `
+            -SSHPath $SSHPath -LogFile $LogFile -TimeoutSeconds 15
+        $virtualization = ($output -join '').Trim()
+        return $virtualization -match '^(kvm|vmware|oracle|microsoft|qemu|xen|bhyve|zvm|apple)$'
+    }
+    catch {
+        Write-HostLog -Message 'Virtualisierungsstatus von Home Assistant konnte nicht ermittelt werden; Neustart wird sicherheitshalber nach dem Zeitplan für physische Systeme behandelt.' `
+            -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile -LogOnly } `
+            -Operation 'HomeAssistant-Virtualisierung erkennen' -Target $HAHost -ErrorRecord $_ `
+            -Context @('Fallback=Neustart nach physischem Wartungszeitplan')
+        return $false
+    }
 }
 
 function Register-HAReboot {
@@ -371,8 +386,11 @@ function Invoke-HA {
         [Parameter(Mandatory=$true)][int]$Port,
         [Parameter(Mandatory=$true)][string]$KeyPath,
         [Parameter(Mandatory=$true)][string]$SSHPath,
-        [Parameter(Mandatory=$true)][AllowEmptyString()][string]$LogFile
+        [Parameter(Mandatory=$true)][AllowEmptyString()][string]$LogFile,
+        [ValidateRange(0, 3600)][int]$TimeoutSeconds = 0
     )
+
+    $effectiveTimeoutSeconds = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds } else { $script:HACommandTimeoutSeconds }
 
     $sshArguments = @(Get-WindowsUpdateSshArguments -KeyPath $KeyPath -Port $Port -BatchMode -AcceptNewHostKey)
     $sshArguments += ("{0}@{1}" -f $User, $RemoteHost), $Command
@@ -391,9 +409,9 @@ function Invoke-HA {
 
     $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
     $stderrTask = $proc.StandardError.ReadToEndAsync()
-    if (-not $proc.WaitForExit($script:HACommandTimeoutSeconds * 1000)) {
+    if (-not $proc.WaitForExit($effectiveTimeoutSeconds * 1000)) {
         try { $proc.Kill($true) } catch { }
-        throw "HA-Befehl '$Command' hat das Zeitlimit von $script:HACommandTimeoutSeconds Sekunden überschritten."
+        throw "HA-Befehl '$Command' hat das Zeitlimit von $effectiveTimeoutSeconds Sekunden überschritten."
     }
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
