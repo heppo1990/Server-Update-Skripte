@@ -531,23 +531,33 @@ try {
 
                 Write-SetupLog "Client-Zertifikat importiert: $($clientCert.Thumbprint)" "SUCCESS"
 
-                # Ein bestehendes Mapping ist vollständig nutzbar und braucht bei
-                # erneuter Verteilung weder Passwort noch eine Änderung.
+                # Ein Mapping gilt nur dann als aktuell, wenn auch sein Issuer
+                # auf den gerade importierten Zertifikat-Thumbprint zeigt.
                 # WSMan:\ ist kein IPropertyCmdletProvider; die Eigenschaften
                 # stehen direkt am Child-Item.
                 $mappingSubject = "$($clientCert.Subject.Replace('CN=',''))@localhost"
-                $existingMapping = Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                $subjectMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
                     Where-Object {
                         # Der WSMan-Provider liefert beim rekursiven Abruf auch
                         # Container ohne Subject-Eigenschaft. Diese sind kein
                         # Zertifikats-Mapping und werden sicher übersprungen.
                         $subjectProperty = $_.PSObject.Properties['Subject']
                         $null -ne $subjectProperty -and [string]$subjectProperty.Value -eq $mappingSubject
-                    }
+                    })
+                $currentMapping = @($subjectMappings | Where-Object {
+                    $issuerProperty = $_.PSObject.Properties['Issuer']
+                    $null -ne $issuerProperty -and [string]$issuerProperty.Value -eq $clientCert.Thumbprint
+                })
 
-                if ($existingMapping -and -not $ForceUpdate) {
-                    Write-SetupLog "Zertifikat-Mapping bereits vorhanden; keine Einrichtungsdaten erforderlich." "SUCCESS"
-                } elseif ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
+                if ($currentMapping.Count -gt 0 -and -not $ForceUpdate) {
+                    Write-SetupLog "Zertifikat-Mapping für den aktuellen Thumbprint bereits vorhanden." "SUCCESS"
+                    foreach ($staleMapping in $subjectMappings | Where-Object {
+                        $issuerProperty = $_.PSObject.Properties['Issuer']
+                        $null -eq $issuerProperty -or [string]$issuerProperty.Value -ne $clientCert.Thumbprint
+                    }) {
+                        Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
+                    }
+                } elseif ($PreserveExistingCertificateMapping -and -not $ForceUpdate -and $subjectMappings.Count -eq 0) {
                     Write-SetupLog "Bestehende Zertifikatsverbindung wurde vor dem Setup erfolgreich geprüft; Mapping bleibt unverändert." "SUCCESS"
                 } elseif (-not $CertificateMappingCredential) {
                     throw "Für ein neues oder zu erneuerndes Zertifikat-Mapping wurden keine Einrichtungs-Administrator-Anmeldedaten übergeben."
@@ -559,8 +569,10 @@ try {
                         $localUser = "$env:COMPUTERNAME\$localUser"
                     }
                     try {
-                        if ($existingMapping) {
-                            Remove-Item $existingMapping.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                        foreach ($staleMapping in $subjectMappings | Where-Object {
+                            $ForceUpdate -or $currentMapping -notcontains $_
+                        }) {
+                            Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
                         }
                         New-Item -Path WSMan:\localhost\ClientCertificate `
                             -Subject    $mappingSubject `
@@ -577,6 +589,40 @@ try {
                         Write-SetupLog 'Zertifikat-Mapping fehlgeschlagen; Details im Setup-Protokoll.' 'WARN'
                         Write-SetupDiagnostic -Operation 'WinRM-Zertifikatmapping' -ErrorRecord $_ -Context @("User=$localUser")
                     }
+                }
+
+                # Alte öffentliche Kopien erst entfernen, nachdem das Mapping
+                # für den aktuellen Thumbprint auf dem Ziel bestätigt wurde.
+                $confirmedMapping = Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $subjectProperty = $_.PSObject.Properties['Subject']
+                        $issuerProperty = $_.PSObject.Properties['Issuer']
+                        $null -ne $subjectProperty -and $null -ne $issuerProperty -and
+                        [string]$subjectProperty.Value -eq $mappingSubject -and
+                        [string]$issuerProperty.Value -eq $clientCert.Thumbprint
+                    } | Select-Object -First 1
+
+                if ($confirmedMapping) {
+                    foreach ($storeName in @('Root', 'TrustedPeople')) {
+                        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
+                        try {
+                            $store.Open('ReadWrite')
+                            $oldCertificates = @($store.Certificates | Where-Object {
+                                $_.Subject -eq $clientCert.Subject -and $_.Thumbprint -ne $clientCert.Thumbprint
+                            })
+                            foreach ($oldCertificate in $oldCertificates) {
+                                $store.Remove($oldCertificate)
+                            }
+                            if ($oldCertificates.Count -gt 0) {
+                                Write-SetupLog "$($oldCertificates.Count) altes öffentliches Client-Zertifikat(e) aus LocalMachine\$storeName entfernt." 'SUCCESS'
+                            }
+                        }
+                        finally {
+                            $store.Close()
+                        }
+                    }
+                } else {
+                    Write-SetupLog 'Alte öffentliche Zertifikate bleiben erhalten: Mapping für den aktuellen Thumbprint konnte nicht bestätigt werden.' 'WARN'
                 }
             }
             catch {
