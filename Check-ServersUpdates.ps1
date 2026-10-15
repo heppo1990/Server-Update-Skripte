@@ -686,6 +686,7 @@ if ($ServerADList -ne $null) {
   ForEach ($Server in $ServerADList) {
     $index += 1
     $Servername = $Server.Name
+    $isLocalManagementTarget = $Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ComputerFQDN
 
     if (!([String]::IsNullOrWhiteSpace($Servername))) {
       if ($Anzahl -ne 0) { $PercCompl = $index * 100 / $Anzahl } else { $PercCompl = 100 }
@@ -802,12 +803,13 @@ if ($ServerADList -ne $null) {
             Write-ScriptLog "WindowsUpdateAdm-Endpunkt und Update-Abfrage auf $Servername erfolgreich." $true
           } catch {
             $useJEA = $false
-            Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-JEA-Verbindungstest ist fehlgeschlagen; der Check versucht Standard-Remoting als Fallback.'
-            if ($Servername -ieq $env:COMPUTERNAME) {
-              Write-ScriptLog "FEHLER: WindowsUpdateAdm auf dem Verwaltungsserver $Servername ist nicht erreichbar; der abweichende Loopback-Pfad wird nicht verwendet."
-              Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=keiner; Verwaltungsserver muss denselben WindowsUpdateAdm-Endpunkt wie der Download verwenden')
+            if ($isLocalManagementTarget) {
+              Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-JEA-Endpunkt des Verwaltungsservers ist nicht erreichbar; Verteilung prüfen.'
+              Write-ScriptLog "FEHLER: WindowsUpdateAdm auf dem Verwaltungsserver $Servername ist nicht erreichbar; der Check wird ohne lokalen Fallback abgebrochen."
+              Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=keiner; lokale Windows-Zieloperationen müssen über WindowsUpdateAdm/JEA laufen')
               throw "WindowsUpdateAdm auf dem Verwaltungsserver $Servername ist nicht erreichbar; Update-Check abgebrochen."
             }
+            Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-JEA-Verbindungstest ist fehlgeschlagen; der Check versucht Standard-Remoting als Fallback.'
             Write-ScriptLog "INFO: '$Servername' nutzt Standard-Remoting (WindowsUpdateAdm nicht verfügbar; Details im Log)."
             Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Standard-Remoting')
           }
@@ -839,16 +841,11 @@ if ($ServerADList -ne $null) {
               throw
             }
           }
-        } elseif ($Servername -ieq $env:COMPUTERNAME) {
-          Write-ScriptLog "Update-Check via Loopback-WinRM auf $Servername..."
-          $loopbackParams = @{
-            ComputerName  = $Servername
-            ErrorAction   = 'Stop'
-            SessionOption = New-PSSessionOption -IncludePortInSPN
-          }
-          $UpdResult = Invoke-WindowsUpdateWithRetry -OperationName "Loopback-WinRM-Update-Check auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock {
-            Invoke-Command @loopbackParams -ArgumentList $SucheOnline, $modulePaths -ScriptBlock $sbWU_Full
-          }
+        } elseif ($isLocalManagementTarget) {
+          $reason = 'WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver nicht verfügbar; direkter lokaler oder uneingeschränkter Loopback-Fallback ist deaktiviert.'
+          Add-CheckRedistributionNotice -Target $Servername -Reason 'WindowsUpdateAdm-Verteilung auf dem Verwaltungsserver prüfen.'
+          Write-ScriptLog "FEHLER: $reason"
+          throw $reason
         } elseif (-not $jeaSupported -and $svcCredential) {
           # Windows Server 2016 außerhalb der AD: Windows Update wird im
           # SYSTEM-Kontext einer kurzlebigen, selbstlöschenden Aufgabe geprüft.
