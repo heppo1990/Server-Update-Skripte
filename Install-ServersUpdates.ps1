@@ -895,13 +895,36 @@ exit /b %WORKER_EXIT%
       (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)
     if ($scheduledTaskCmdletsAvailable) {
       $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/d /c ""{0}""' -f $RunnerPath) -WorkingDirectory (Split-Path -Parent $WorkerPath)
-      $triggers = if ($RunAt -gt [datetime]::MinValue) {
-        $windowTrigger = New-ScheduledTaskTrigger -Daily -At $RunAt -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration $repeatDuration
-        @($windowTrigger, (New-ScheduledTaskTrigger -AtStartup))
-      } else {
-        $retryTrigger = New-ScheduledTaskTrigger -Daily -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration $repeatDuration
-        @($retryTrigger, (New-ScheduledTaskTrigger -AtStartup))
+      # RepetitionInterval/RepetitionDuration gehören beim Cmdlet zum
+      # Parametersatz -Once, nicht zu -Daily. Pro möglichem Wartungstag wird
+      # daher ein eigener einmaliger Wiederholungstrigger erstellt. Der Worker
+      # prüft weiterhin selbst das Wartungsfenster und den Ablaufzeitpunkt.
+      $triggerStarts = [System.Collections.Generic.List[datetime]]::new()
+      $firstTriggerStart = if ($RunAt -gt [datetime]::MinValue) { $RunAt } else { (Get-Date).AddMinutes(1) }
+      $triggerStarts.Add($firstTriggerStart)
+      if ($TaskExpiresAt -gt [datetime]::MinValue) {
+        $nextTriggerStart = $firstTriggerStart.Date.AddDays(1).Add($firstTriggerStart.TimeOfDay)
+        while ($nextTriggerStart -lt $TaskExpiresAt) {
+          $triggerStarts.Add($nextTriggerStart)
+          $nextTriggerStart = $nextTriggerStart.Date.AddDays(1).Add($firstTriggerStart.TimeOfDay)
+        }
       }
+
+      $triggers = @(
+        foreach ($triggerStart in $triggerStarts) {
+          $triggerDuration = $repeatDuration
+          if ($TaskExpiresAt -gt [datetime]::MinValue) {
+            $remainingUntilExpiry = $TaskExpiresAt - $triggerStart
+            if ($remainingUntilExpiry -lt $triggerDuration) { $triggerDuration = $remainingUntilExpiry }
+          }
+          if ($triggerDuration -gt [TimeSpan]::Zero) {
+            New-ScheduledTaskTrigger -Once -At $triggerStart `
+              -RepetitionInterval (New-TimeSpan -Minutes 15) `
+              -RepetitionDuration $triggerDuration
+          }
+        }
+        New-ScheduledTaskTrigger -AtStartup
+      )
       if ($TaskExpiresAt -gt [datetime]::MinValue) { $triggers += New-ScheduledTaskTrigger -Once -At $TaskExpiresAt }
       $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
       Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
