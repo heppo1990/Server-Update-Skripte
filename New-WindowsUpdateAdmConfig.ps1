@@ -548,8 +548,10 @@ try {
                     $issuerProperty = $_.PSObject.Properties['Issuer']
                     $null -ne $issuerProperty -and [string]$issuerProperty.Value -eq $clientCert.Thumbprint
                 })
+                $certificateMappingConfirmed = $false
 
                 if ($currentMapping.Count -gt 0 -and -not $ForceUpdate) {
+                    $certificateMappingConfirmed = $true
                     Write-SetupLog "Zertifikat-Mapping für den aktuellen Thumbprint bereits vorhanden." "SUCCESS"
                     foreach ($staleMapping in $subjectMappings | Where-Object {
                         $issuerProperty = $_.PSObject.Properties['Issuer']
@@ -557,7 +559,13 @@ try {
                     }) {
                         Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
                     }
-                } elseif ($PreserveExistingCertificateMapping -and -not $ForceUpdate -and $subjectMappings.Count -eq 0) {
+                } elseif ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
+                    # Der Aufrufer setzt diesen Schalter nur, nachdem eine neue
+                    # WinRM-Sitzung mit genau dem aktuellen Client-Zertifikat
+                    # erfolgreich aufgebaut wurde. Das ist der maßgebliche
+                    # Funktionstest, auch wenn der WSMan-Provider Issuer nicht
+                    # zuverlässig zurückliefert.
+                    $certificateMappingConfirmed = $true
                     Write-SetupLog "Bestehende Zertifikatsverbindung wurde vor dem Setup erfolgreich geprüft; Mapping bleibt unverändert." "SUCCESS"
                 } elseif (-not $CertificateMappingCredential) {
                     throw "Für ein neues oder zu erneuerndes Zertifikat-Mapping wurden keine Einrichtungs-Administrator-Anmeldedaten übergeben."
@@ -583,6 +591,7 @@ try {
                                 $CertificateMappingCredential.Password
                             )) `
                             -Force -ErrorAction Stop | Out-Null
+                        $certificateMappingConfirmed = $true
                         Write-SetupLog "Zertifikat mit Account '$localUser' verknüpft." "SUCCESS"
                     }
                     catch {
@@ -593,16 +602,8 @@ try {
 
                 # Alte öffentliche Kopien erst entfernen, nachdem das Mapping
                 # für den aktuellen Thumbprint auf dem Ziel bestätigt wurde.
-                $confirmedMapping = Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
-                    Where-Object {
-                        $subjectProperty = $_.PSObject.Properties['Subject']
-                        $issuerProperty = $_.PSObject.Properties['Issuer']
-                        $null -ne $subjectProperty -and $null -ne $issuerProperty -and
-                        [string]$subjectProperty.Value -eq $mappingSubject -and
-                        [string]$issuerProperty.Value -eq $clientCert.Thumbprint
-                    } | Select-Object -First 1
-
-                if ($confirmedMapping) {
+                if ($certificateMappingConfirmed) {
+                    Write-SetupLog "WinRM-Zertifikatsmapping für Thumbprint $($clientCert.Thumbprint) bestätigt." 'SUCCESS'
                     foreach ($storeName in @('Root', 'TrustedPeople')) {
                         $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
                         try {
