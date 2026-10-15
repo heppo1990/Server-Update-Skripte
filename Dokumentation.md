@@ -326,9 +326,9 @@ Normaler Lauf für alle konfigurierten Ziele:
 
 ### `Updateverlauf auslesen.ps1`
 
-Erstellt einen zentralen Updateverlaufsbericht und versendet ihn über die konfigurierten `MailSettings`. Ohne Parameter werden die in `UpdateSettings`, `LinuxSettings` und `HomeAssistantSettings` konfigurierten Ziele verwendet. Windows-Verläufe werden über WinRM und den vorhandenen `WindowsUpdateAdm`-JEA-Endpunkt (`Get-WUHistory`) gelesen; Zusatz- und Hypervisorziele verwenden die vorhandene Zertifikatsauthentifizierung. Linux liest nur die vorhandenen apt-, dnf- oder yum-Verlaufsprotokolle per SSH. Es werden keine Updates installiert.
+Erstellt einen zentralen Updateverlaufsbericht und versendet ihn über die konfigurierten `MailSettings`. Ohne Parameter werden die in `UpdateSettings`, `LinuxSettings` und `HomeAssistantSettings` konfigurierten Ziele verwendet. Windows-Verläufe werden über WinRM und den vorhandenen `WindowsUpdateAdm`-JEA-Endpunkt (`Get-WUHistory`) gelesen; bei Fehlern folgen Standard-WinRM und als weiterer Fallback die native Windows Update Agent COM-API. Zusatz- und Hypervisorziele verwenden die vorhandene Zertifikatsauthentifizierung. Linux liest apt-, dnf- oder yum-Verlaufsprotokolle per SSH, gruppiert Paketänderungen nach Vorgang und filtert sie auf denselben Zeitraum. Sensible apt-Befehlszeilen werden nicht ausgegeben. Es werden keine Updates installiert.
 
-Aufruf mit dem Standardzeitraum von 90 Tagen und höchstens 100 Linux-Protokollzeilen je Host:
+Aufruf mit dem Standardzeitraum von 90 Tagen und höchstens 100 Linux-Paketvorgängen je Ziel:
 
 ```powershell
 .\Updateverlauf auslesen.ps1

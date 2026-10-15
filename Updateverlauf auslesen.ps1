@@ -92,12 +92,21 @@ function Invoke-HistoryRemoteCommand {
 }
 
 function Get-LinuxHistoryLines {
-    param([Parameter(Mandatory)]$HostEntry, [Parameter(Mandatory)][string]$KeyPath, [Parameter(Mandatory)][string]$SshPath, [int]$ConnectTimeoutSeconds = 15)
+    param(
+        [Parameter(Mandatory)]$HostEntry,
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][string]$SshPath,
+        [Parameter(Mandatory)][datetime]$SinceDate,
+        [ValidateRange(1, 1000)][int]$Limit = 100,
+        [int]$ConnectTimeoutSeconds = 15
+    )
     $hostName = if ($HostEntry.PSObject.Properties['Host']) { [string]$HostEntry.Host } else { [string]$HostEntry.Name }
     $userName = [string]$HostEntry.User
     if ([string]::IsNullOrWhiteSpace($hostName) -or [string]::IsNullOrWhiteSpace($userName)) { throw 'Linux-Ziel benötigt Host/Name und User.' }
 
     # Nur lesender Abruf der Paketmanager-Protokolle; keine sudo- oder Updatebefehle.
+    # Die ISO-Datumsgrenze erlaubt einen stabilen lexikografischen Vergleich in awk.
+    $cutoff = $SinceDate.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
     $remoteCommand = @'
 if [ -d /var/log/apt ] && ls /var/log/apt/history.log* >/dev/null 2>&1; then
   readable=0
@@ -106,17 +115,42 @@ if [ -d /var/log/apt ] && ls /var/log/apt/history.log* >/dev/null 2>&1; then
   for f in /var/log/apt/history.log*; do
     [ -r "$f" ] || continue
     case "$f" in *.gz) zcat -f "$f" 2>/dev/null ;; *) cat "$f" ;; esac
-  done | grep -hE '^(Start-Date|End-Date|Install|Upgrade|Remove|Purge|Error):' | tail -n 100
+  done | awk -v cutoff='__CUTOFF__' -v limit=__LIMIT__ '
+    BEGIN { RS=""; FS="\n" }
+    {
+      date=""; action=""; packages=""
+      for (i=1; i<=NF; i++) {
+        line=$i
+        if (line ~ /^Start-Date:/) { date=line; sub(/^Start-Date:[[:space:]]*/, "", date); date=substr(date, 1, 10) }
+        else if (line ~ /^(Install|Upgrade|Remove|Purge):/) {
+          if (action == "") { action=line; sub(/:.*/, "", action) }
+          payload=line; sub(/^[^:]*:[[:space:]]*/, "", payload)
+          if (packages != "") packages=packages "; "
+          packages=packages payload
+        }
+      }
+      if (date != "" && date >= cutoff && packages != "") print date "\t" action ": " packages
+    }
+  ' | sort -r | head -n __LIMIT__
 elif command -v dnf >/dev/null 2>&1; then
   echo '__PKGMGR_DNF__'
-  dnf -q history list 2>&1 | awk -F'|' 'NR>2 && $1 ~ /[0-9]/ { for(i=1;i<=5;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); print $1 " | " $3 " | " $4 " | " $5 }' | tail -n 100
+  dnf -q history list 2>&1 | awk -F'|' -v cutoff='__CUTOFF__' '
+    NR>2 && $1 ~ /[0-9]/ {
+      for(i=1;i<=5;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+      date=$3; if (substr(date,1,10) >= cutoff) print date "\t" $1 " | " $4 " | " $5
+    }' | sort -r | head -n __LIMIT__
 elif command -v yum >/dev/null 2>&1; then
   echo '__PKGMGR_YUM__'
-  yum -q history list 2>&1 | awk -F'|' 'NR>2 && $1 ~ /[0-9]/ { for(i=1;i<=5;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); print $1 " | " $3 " | " $4 " | " $5 }' | tail -n 100
+  yum -q history list 2>&1 | awk -F'|' -v cutoff='__CUTOFF__' '
+    NR>2 && $1 ~ /[0-9]/ {
+      for(i=1;i<=5;i++) gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+      date=$3; if (substr(date,1,10) >= cutoff) print date "\t" $1 " | " $4 " | " $5
+    }' | sort -r | head -n __LIMIT__
 else
   echo '__HISTORY_UNAVAILABLE__ Paketmanager-/Verlaufsquelle nicht unterstützt.'
 fi
 '@
+    $remoteCommand = $remoteCommand.Replace('__CUTOFF__', $cutoff).Replace('__LIMIT__', [string]$Limit)
     $sshArguments = Get-WindowsUpdateSshArguments -KeyPath $KeyPath -ConnectTimeoutSeconds $ConnectTimeoutSeconds -BatchMode
     $sshArguments += @("${userName}@${hostName}", $remoteCommand)
     $lines = @(& $SshPath @sshArguments 2>&1 | ForEach-Object { [string]$_ })
@@ -168,7 +202,10 @@ try {
             }
             $remoteHistory = {
                 param($SinceDate, $Limit)
-                $history = @(Get-WUHistory -ErrorAction Stop | Where-Object { $_.Date -ge $SinceDate } | Sort-Object Date -Descending | Select-Object -First $Limit)
+                # Die JEA-Rolle stellt Get-WUHistory, Where-Object und
+                # Select-Object bereit, aber nicht Sort-Object. Sortierung
+                # erfolgt deshalb erst nach der Rückgabe auf dem Client.
+                $history = @(Get-WUHistory -ErrorAction Stop | Where-Object { $_.Date -ge $SinceDate } | Select-Object -First $Limit)
                 foreach ($item in $history) {
                     [pscustomobject]@{
                         Date = [datetime]$item.Date
@@ -178,15 +215,47 @@ try {
                     }
                 }
             }
+            $nativeWuaHistory = {
+                param($SinceDate, $Limit)
+                $updateSession = New-Object -ComObject 'Microsoft.Update.Session' -ErrorAction Stop
+                $entries = $updateSession.QueryHistory('', 0, 1000)
+                $count = 0
+                foreach ($entry in $entries) {
+                    if ([datetime]$entry.Date -lt $SinceDate) { continue }
+                    $resultName = switch ([int]$entry.ResultCode) {
+                        2 { 'Succeeded' }
+                        3 { 'Succeeded With Errors' }
+                        4 { 'Failed' }
+                        5 { 'Aborted' }
+                        default { 'Unknown' }
+                    }
+                    $kb = if ([string]$entry.Title -match '(?i)KB\d+') { $matches[0].ToUpperInvariant() } else { '' }
+                    [pscustomobject]@{
+                        Date = [datetime]$entry.Date
+                        Result = $resultName
+                        Title = [string]$entry.Title
+                        Details = $kb
+                    }
+                    $count++
+                    if ($count -ge $Limit) { break }
+                }
+            }
             try {
                 $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ConfigurationName 'WindowsUpdateAdm' -ScriptBlock $remoteHistory -ArgumentList @($since, $MaxEventsPerTarget))
             }
             catch {
                 Write-HistoryLog "WindowsUpdateAdm-Verlauf auf $name nicht abrufbar; versuche Standard-WinRM. Ursache und Ergebnis stehen im Protokoll." -LogOnly
                 Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HistoryLog $message -LogOnly } -Operation 'Windows-Updateverlauf via JEA' -Target $name -ErrorRecord $_ -Context @('Fallback=Standard-WinRM')
-                $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $remoteHistory -ArgumentList @($since, $MaxEventsPerTarget))
+                try {
+                    $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $remoteHistory -ArgumentList @($since, $MaxEventsPerTarget))
+                }
+                catch {
+                    Write-HistoryLog "PSWindowsUpdate-Verlauf über Standard-WinRM auf $name fehlgeschlagen; versuche Windows Update API. Details stehen im Protokoll." -LogOnly
+                    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HistoryLog $message -LogOnly } -Operation 'Windows-Updateverlauf via PSWindowsUpdate' -Target $name -ErrorRecord $_ -Context @('Fallback=Windows Update Agent COM API')
+                    $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $nativeWuaHistory -ArgumentList @($since, $MaxEventsPerTarget))
+                }
             }
-            foreach ($event in $historyRows) { Add-HistoryEvent -TargetResult $record -Event $event }
+            foreach ($event in @($historyRows | Sort-Object Date -Descending)) { Add-HistoryEvent -TargetResult $record -Event $event }
             $record.State = if ($record.Events.Count -gt 0) { 'Erfolg' } else { 'Leer' }
             $record.Message = if ($record.Events.Count -gt 0) { "$($record.Events.Count) Ereignis(se)" } else { 'Kein Updateverlauf im Zeitraum.' }
         }
@@ -208,17 +277,19 @@ try {
             $record = [pscustomobject]@{ Target = $name; Type = 'Linux'; State = 'Fehler'; Message = ''; Events = @() }
             try {
                 if (-not (Test-Path -LiteralPath $linuxKey -PathType Leaf)) { throw "SSH-Schlüssel fehlt: $linuxKey" }
-                $history = Get-LinuxHistoryLines -HostEntry $hostEntry -KeyPath $linuxKey -SshPath $sshPath -ConnectTimeoutSeconds $connectTimeout
+                $history = Get-LinuxHistoryLines -HostEntry $hostEntry -KeyPath $linuxKey -SshPath $sshPath -SinceDate $since -Limit $MaxEventsPerTarget -ConnectTimeoutSeconds $connectTimeout
                 if (@($history.Lines | Where-Object { $_ -like '__HISTORY_UNAVAILABLE__*' -or $_ -like '__HISTORY_PERMISSION__*' }).Count -gt 0) {
                     $record.State = 'Nicht verfügbar'; $record.Message = ($history.Lines | Where-Object { $_ -like '__HISTORY_UNAVAILABLE__*' -or $_ -like '__HISTORY_PERMISSION__*' } | Select-Object -First 1) -replace '^__HISTORY_(UNAVAILABLE|PERMISSION)__\s*', ''
-                } elseif (@($history.Lines | Where-Object { $_ -match '^Start-Date:|^__PKGMGR_(DNF|YUM)__' }).Count -gt 0) {
+                } elseif (@($history.Lines | Where-Object { $_ -match '^__PKGMGR_(DNF|YUM)__' -or $_ -match '^\d{4}-\d{2}-\d{2}\t' }).Count -gt 0) {
                     $record.State = 'Erfolg'
-                    $historyLines = @($history.Lines | Where-Object { $_ -notmatch '^__PKGMGR_(DNF|YUM)__' } | Select-Object -Last $MaxEventsPerTarget)
+                    $historyLines = @($history.Lines | Where-Object { $_ -notmatch '^__PKGMGR_(DNF|YUM)__' -and $_ -match '^\d{4}-\d{2}-\d{2}\t' } | Select-Object -First $MaxEventsPerTarget)
                     foreach ($line in $historyLines) {
-                        Add-HistoryEvent -TargetResult $record -Event ([pscustomobject]@{ Date = ''; Result = 'Protokoll'; Title = $line.Trim(); Details = '' })
+                        $parts = $line -split "`t", 2
+                        $eventDate = [datetime]::ParseExact($parts[0], 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+                        Add-HistoryEvent -TargetResult $record -Event ([pscustomobject]@{ Date = $eventDate; Result = 'Abgeschlossen'; Title = $parts[1].Trim(); Details = 'Paketmanager-Verlauf' })
                     }
                     if ($record.Events.Count -eq 0) { $record.State = 'Leer'; $record.Message = 'Paketmanager meldet keinen Verlauf.' }
-                    else { $record.Message = "$($record.Events.Count) Protokollzeile(n)" }
+                    else { $record.Message = "$($record.Events.Count) Paketvorgang/-vorgänge im Zeitraum" }
                 } elseif (@($history.Lines | Where-Object { $_ -match 'No transactions|No history|__NO_HISTORY__' }).Count -gt 0 -or @($history.Lines).Count -eq 0) {
                     $record.State = 'Leer'; $record.Message = 'Paketmanager meldet keinen Verlauf.'
                 } else {
@@ -270,7 +341,7 @@ try {
         $html = @"
 <!doctype html><html><head><meta charset="utf-8"><style>
 body{font-family:Arial,sans-serif;color:#222}h1{color:#1565c0}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{border:1px solid #ccc;padding:7px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#eaf2f8}tr:nth-child(even){background:#f7f7f7}.summary{margin:12px 0;padding:10px;background:#f1f5f9}
-</style></head><body><h1>Updateverlauf</h1><p>Windows: letzte $Days Tage · Linux: bis zu $MaxEventsPerTarget aktuelle, lokal protokollierte Paketmanager-Ereignisse · Erstellt: $(Get-Date -Format 'dd.MM.yyyy HH:mm')</p>
+</style></head><body><h1>Updateverlauf</h1><p>Windows und Linux: letzte $Days Tage · maximal $MaxEventsPerTarget Paketvorgänge je Linux-Ziel · Erstellt: $(Get-Date -Format 'dd.MM.yyyy HH:mm')</p>
 <table><thead><tr><th style="width:11%">Ziel</th><th style="width:12%">System</th><th style="width:14%">Zeit/Status</th><th style="width:14%">Ergebnis</th><th style="width:35%">Update / Meldung</th><th style="width:14%">Details</th></tr></thead><tbody>$($rows -join "`n")</tbody></table>
 <p>„Leer“ bedeutet, dass die Abfrage erfolgreich war und im Zeitraum keine Verlaufseinträge lieferte. „Nicht verfügbar“ bedeutet, dass keine verlässliche Quelle vorliegt.</p></body></html>
 "@
