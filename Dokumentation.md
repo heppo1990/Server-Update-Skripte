@@ -373,6 +373,11 @@ Beide Skripte werden bei einem normalen Aufruf von `Install-ServersUpdates.ps1` 
 
 `Install-Linux Updates.ps1 -DryRun` prüft zusätzlich die verfügbaren Linux-Paketupdates, ohne eine Installation, Paketlisten-Aktualisierung oder einen Neustart auszuführen.
 
+### WindowsUpdateAdm-Bereitstellungsstatus
+
+Das Setup bettet die Bereitstellungskennung in eine schreibgeschützte JEA-Statusfunktion ein. Die Funktion gibt ausschließlich diese Versionsnummer zurück und liest keine Dateien. Der Check vergleicht sie mit der erwarteten Kennung aus `WindowsUpdate.Common.psm1`. Fehlt die Kennung, ist sie veraltet oder lässt sie sich nicht lesen, meldet der Check den konkreten Handlungsbedarf in Konsole und Check-Mail; eine funktionierende Updateabfrage wird dadurch nicht abgebrochen. Bei Änderungen an der JEA-Einrichtung, die eine Neuverteilung erfordern, muss `Get-WindowsUpdateAdmDeploymentVersion` erhöht werden. Normale Check-/Installationsänderungen benötigen keine solche Erhöhung.
+
+Zum gefahrlosen Testen auf einem Testziel kann die Versionsnummer in `C:\Program Files\WindowsPowerShell\Modules\JEA_Updates\JEA_Updates.psm1` vorübergehend auf einen abweichenden Wert gesetzt werden. Danach Check ausführen und die Warnung in Konsole und Mail prüfen; eine erfolgreiche erneute Verteilung schreibt die aktuelle Kennung zurück und der nächste Check soll keine Warnung mehr anzeigen.
 ## Protokolle und Berichte
 
 Unter `Logs` werden – abhängig von den Einstellungen – Protokolle und HTML-Berichte gespeichert. Die Anzahl aufbewahrter Dateien wird über `KeepLogFiles` und `KeepReportFiles` gesteuert. Die Windows-Hauptskripte verwenden dafür dieselbe zentrale Aufbewahrungslogik; die Verteilung wendet dieselben Settings für ihre eigenen Logs an. Linux und Home Assistant schreiben ausführliche eigene `.log`-Dateien ausschließlich bei der Installation; bei Check und Download werden nur die für den Gesamtbericht benötigten Statusdateien erzeugt. Auch die Ausgabe in Konsole und Logdatei sowie der SMTP-Versand sind für die drei Windows-Hauptskripte zentral im Modul umgesetzt.

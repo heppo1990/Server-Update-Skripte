@@ -662,6 +662,18 @@ try {
     $JeaModuleName = "JEA_Updates"
     $JeaBaseDir    = "$env:ProgramFiles\WindowsPowerShell\Modules\$JeaModuleName"
     $RoleCapDir    = Join-Path $JeaBaseDir "RoleCapabilities"
+
+    $JeaModuleFile = Join-Path $JeaBaseDir "$JeaModuleName.psm1"
+    $deploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
+    $JeaModuleSource = @"
+function Get-WindowsUpdateAdmDeploymentStatus {
+    [PSCustomObject]@{ Version = '$deploymentVersion' }
+}
+Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
+"@
+    if (-not (Test-Path -LiteralPath $JeaBaseDir)) { New-Item -Path $JeaBaseDir -ItemType Directory -Force | Out-Null }
+    [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
+    Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"
     
     if (!(Test-Path $RoleCapDir)) { New-Item -Path $RoleCapDir -ItemType Directory -Force | Out-Null }
     
@@ -723,9 +735,9 @@ try {
     # ModuleVersion NICHT angeben - PowerShell findet das Modul sonst nicht wenn
     # es unter einem anderen Pfad installiert ist (z.B. SYSTEM-Profil vs. ProgramFiles)
     New-PSRoleCapabilityFile -Path $RoleCapabilityFile `
-                             -ModulesToImport 'PSWindowsUpdate' `
+                             -ModulesToImport @('PSWindowsUpdate', $JeaModuleName) `
                              -VisibleCmdlets $VisibleCmdlets `
-                             -VisibleFunctions @() `
+                             -VisibleFunctions @('Get-WindowsUpdateAdmDeploymentStatus') `
                              -VisibleExternalCommands @() `
                              -VisibleAliases @()
     Write-SetupLog "Role Capability erstellt: $RoleCapabilityFile" "SUCCESS"
@@ -743,9 +755,9 @@ try {
         Remove-Item -LiteralPath $CheckRoleCapabilityFile -Force -ErrorAction SilentlyContinue
     }
     New-PSRoleCapabilityFile -Path $CheckRoleCapabilityFile `
-                             -ModulesToImport 'PSWindowsUpdate' `
+                             -ModulesToImport @('PSWindowsUpdate', $JeaModuleName) `
                              -VisibleCmdlets $checkRoleCmdlets `
-                             -VisibleFunctions @() `
+                             -VisibleFunctions @('Get-WindowsUpdateAdmDeploymentStatus') `
                              -VisibleExternalCommands @() `
                              -VisibleAliases @()
     Write-SetupLog "Eingeschränkte Check-Rolle erstellt: $CheckRoleCapabilityFile" "SUCCESS"
