@@ -260,10 +260,15 @@ try {
                 # und Zeitraumfilter erfolgen erst nach der Rückgabe auf dem Client.
                 $history = @(Get-WUHistory -ErrorAction Stop | Select-Object -First $Limit)
                 foreach ($item in $history) {
+                    $historyDate = [datetime]$item.Date
+                    $historyDateKind = $historyDate.Kind.ToString()
+                    if ($historyDate.Kind -eq [DateTimeKind]::Utc) { $historyDate = $historyDate.ToLocalTime() }
                     [pscustomobject]@{
-                        # PSWindowsUpdate liefert die lokale Anzeigezeit.
-                        # Als Text übertragen, damit WinRM sie nicht umdeutet.
-                        Date = ([datetime]$item.Date).ToString('yyyy-MM-ddTHH:mm:ss.fffffff', [Globalization.CultureInfo]::InvariantCulture)
+                        # UTC-Werte im Zielkontext in lokale Zeit umwandeln.
+                        # Zeittext ohne Zeitzone verhindert eine weitere WinRM-Umdeutung.
+                        Date = $historyDate.ToString('yyyy-MM-ddTHH:mm:ss.fffffff', [Globalization.CultureInfo]::InvariantCulture)
+                        DateKind = $historyDateKind
+                        TimeZoneOffset = [datetime]::Now.ToString('zzz')
                         Result = [string]$item.Result
                         Title = [string]$item.Title
                         Details = if ($item.PSObject.Properties['KB']) { [string]$item.KB } else { '' }
@@ -311,6 +316,9 @@ try {
                 }
             }
             Write-HistoryLog "Windows-Verlauf auf ${name}: JEA/PSWindowsUpdate lieferte $(@($historyRows).Count) Rohereignis(se)." -LogOnly
+            $dateKinds = @($historyRows | ForEach-Object { if ($_.PSObject.Properties['DateKind']) { [string]$_.PSObject.Properties['DateKind'].Value } } | Where-Object { $_ } | Sort-Object -Unique) -join ', '
+            $timeZoneOffsets = @($historyRows | ForEach-Object { if ($_.PSObject.Properties['TimeZoneOffset']) { [string]$_.PSObject.Properties['TimeZoneOffset'].Value } } | Where-Object { $_ } | Sort-Object -Unique) -join ', '
+            if ($dateKinds -or $timeZoneOffsets) { Write-HistoryLog "PSWindowsUpdate-Zeitbasis auf ${name}: DateKind=$dateKinds; UTC-Abweichung=$timeZoneOffsets." -LogOnly }
             $normalizedRows = foreach ($row in $historyRows) {
                 $localDate = ConvertFrom-HistoryDate -Value $row.Date
                 if ($localDate -ge $since) {
