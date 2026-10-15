@@ -104,6 +104,7 @@ $LinuxCheckAttempted = $false
 $HACheckAttempted = $false
 $UpdResultFull = $null
 $script:IsLocalSystemRun = $false
+$script:CheckActionNotices = @()
 try {
   $script:IsLocalSystemRun = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18'
 } catch { }
@@ -124,11 +125,9 @@ function Add-CheckRedistributionNotice {
     [Parameter(Mandatory)][string]$Reason
   )
 
-  $message = "HANDLUNGSBEDARF: $Target – $Reason WindowsUpdateAdm-Verteilung und WinRM-Verbindung prüfen."
-  Write-ScriptLog $message
-  $safeTarget = [System.Net.WebUtility]::HtmlEncode($Target)
-  $safeReason = [System.Net.WebUtility]::HtmlEncode($Reason)
-  $script:RepBody += "<div class='warning-box'><strong>WindowsUpdateAdm-Verteilung oder Verbindung auf $safeTarget prüfen.</strong><br>$safeReason Falls der JEA-Endpunkt fehlt, falsch konfiguriert oder nach einem Zertifikatswechsel veraltet ist, Verteilung erneut ausführen und Verbindung testen.</div>"
+  $nextStep = 'WindowsUpdateAdm-Verteilung und WinRM-Verbindung prüfen; bei fehlendem oder veraltetem JEA-Endpunkt Verteilung erneut ausführen.'
+  $script:CheckActionNotices += [pscustomobject]@{ Area='WindowsUpdateAdm'; Target=$Target; Reason=$Reason; NextStep=$nextStep }
+  Write-ScriptLog "HANDLUNGSBEDARF: $Target (WindowsUpdateAdm) – $Reason $nextStep" $true
 }
 
 function Add-CheckExternalSetupNotice {
@@ -138,11 +137,6 @@ function Add-CheckExternalSetupNotice {
     [Parameter(Mandatory)][string]$Reason
   )
 
-  $message = "HANDLUNGSBEDARF: $Target ($Area) – $Reason"
-  Write-ScriptLog $message
-  $safeTarget = [System.Net.WebUtility]::HtmlEncode($Target)
-  $safeArea = [System.Net.WebUtility]::HtmlEncode($Area)
-  $safeReason = [System.Net.WebUtility]::HtmlEncode($Reason)
   if ($Reason -match 'Verbindung nicht bestätigt') {
     $nextStep = 'Zuerst Erreichbarkeit und SSH prüfen; Verteilung nur bei fehlender oder ungültiger Einrichtung erneut ausführen.'
   } elseif ($Area -eq 'Linux') {
@@ -150,8 +144,8 @@ function Add-CheckExternalSetupNotice {
   } else {
     $nextStep = 'Bei fehlendem SSH-Schlüssel die Home-Assistant-Verteilung erneut ausführen.'
   }
-  $safeNextStep = [System.Net.WebUtility]::HtmlEncode($nextStep)
-  $script:RepBody += "<div class='warning-box'><strong>$safeArea-Einrichtung auf $safeTarget prüfen.</strong><br>$safeReason $safeNextStep</div>"
+  $script:CheckActionNotices += [pscustomobject]@{ Area=$Area; Target=$Target; Reason=$Reason; NextStep=$nextStep }
+  Write-ScriptLog "HANDLUNGSBEDARF: $Target ($Area) – $Reason $nextStep" $true
 }
 
 function Get-CheckClientCertificate {
@@ -582,6 +576,16 @@ $RepBody = @"
         background-color: #d4edda;
         border-left: 4px solid #28a745;
     }
+    .critical-notice {
+        background-color: #b00020;
+        color: #fff;
+        padding: 18px;
+        margin: 16px 0;
+        border: 4px solid #760014;
+        font-size: 1.15em;
+        font-weight: bold;
+    }
+    .critical-notice li { margin: 8px 0; }
 </style>
 </head>
 <body>
@@ -1264,6 +1268,32 @@ $checkSummaryLines = @(
 if ($LinuxCheckExecuted) { $checkSummaryLines = $checkSummaryLines[0..3] + "Verfügbare Linux-Updates: $LinuxUpdateCount" + $checkSummaryLines[4] }
 if ($HACheckExecuted) { $checkSummaryLines = $checkSummaryLines[0..($checkSummaryLines.Count - 2)] + "Verfügbare Home-Assistant-Updates: $HAUpdateCount" + $checkSummaryLines[-1] }
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-CHECK ZUSAMMENFASSUNG' -Lines $checkSummaryLines -WriteLog { param($message) Write-ScriptLog $message }
+
+# Verteilungs- und Einrichtungsbedarf gesammelt am Ende der Konsole und am
+# Anfang der Mail anzeigen, statt Warnungen zwischen den einzelnen Servern.
+$checkActionNotices = @($script:CheckActionNotices | Sort-Object Area, Target, Reason -Unique)
+$actionNoticeHtml = ''
+if ($checkActionNotices.Count -gt 0) {
+  Write-Host ''
+  Write-Host '!!! VERTEILUNG / EINRICHTUNG ERFORDERLICH – BITTE PRÜFEN !!!' -ForegroundColor Red -BackgroundColor Black
+  foreach ($notice in $checkActionNotices) {
+    $consoleNotice = "  [$($notice.Area)] $($notice.Target): $($notice.Reason) $($notice.NextStep)"
+    Write-Host $consoleNotice -ForegroundColor Red -BackgroundColor Black
+    Write-ScriptLog "ZUSAMMENGEFASSTER HANDLUNGSBEDARF: $consoleNotice" $true
+  }
+  Write-Host '!!! DETAILS UND NÄCHSTE SCHRITTE STEHEN OBEN !!!' -ForegroundColor Red -BackgroundColor Black
+
+  $actionNoticeItems = foreach ($notice in $checkActionNotices) {
+    $safeArea = [System.Net.WebUtility]::HtmlEncode([string]$notice.Area)
+    $safeTarget = [System.Net.WebUtility]::HtmlEncode([string]$notice.Target)
+    $safeReason = [System.Net.WebUtility]::HtmlEncode([string]$notice.Reason)
+    $safeNextStep = [System.Net.WebUtility]::HtmlEncode([string]$notice.NextStep)
+    "<li><strong>[$safeArea] ${safeTarget}:</strong> $safeReason $safeNextStep</li>"
+  }
+  $actionNoticeHtml = "<div class='critical-notice'><div>⚠️ HANDLUNGSBEDARF: VERTEILUNG / EINRICHTUNG PRÜFEN</div><ul>$($actionNoticeItems -join '')</ul></div>"
+  $reportTitle = "<h1>Update-Check Report - $ComputerFQDN</h1>"
+  $RepBody = $RepBody.Replace($reportTitle, "$reportTitle`n$actionNoticeHtml")
+}
 
 # E-Mail versenden
 # SendMail und Subject direkt hier auswerten - sicher in PS5.1 und PS7
