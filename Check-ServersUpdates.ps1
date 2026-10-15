@@ -1276,21 +1276,12 @@ $actionNoticeHtml = ''
 if ($checkActionNotices.Count -gt 0) {
   Write-Host ''
   Write-Host '!!! VERTEILUNG / EINRICHTUNG ERFORDERLICH – BITTE PRÜFEN !!!' -ForegroundColor Red -BackgroundColor Black
-  foreach ($notice in $checkActionNotices) {
-    $consoleNotice = "  [$($notice.Area)] $($notice.Target): $($notice.Reason) $($notice.NextStep)"
-    Write-Host $consoleNotice -ForegroundColor Red -BackgroundColor Black
-    Write-ScriptLog "ZUSAMMENGEFASSTER HANDLUNGSBEDARF: $consoleNotice" $true
-  }
-  Write-Host '!!! DETAILS UND NÄCHSTE SCHRITTE STEHEN OBEN !!!' -ForegroundColor Red -BackgroundColor Black
+  $actionNoticeText = 'Mindestens ein Ziel benötigt eine Verteilung oder manuelle Einrichtung. Details stehen im Laufprotokoll.'
+  Write-Host $actionNoticeText -ForegroundColor Red -BackgroundColor Black
+  Write-Host '!!! BITTE LAUFPROTOKOLL PRÜFEN !!!' -ForegroundColor Red -BackgroundColor Black
+  Write-ScriptLog "ZUSAMMENGEFASSTER HANDLUNGSBEDARF: $actionNoticeText" $true
 
-  $actionNoticeItems = foreach ($notice in $checkActionNotices) {
-    $safeArea = [System.Net.WebUtility]::HtmlEncode([string]$notice.Area)
-    $safeTarget = [System.Net.WebUtility]::HtmlEncode([string]$notice.Target)
-    $safeReason = [System.Net.WebUtility]::HtmlEncode([string]$notice.Reason)
-    $safeNextStep = [System.Net.WebUtility]::HtmlEncode([string]$notice.NextStep)
-    "<li><strong>[$safeArea] ${safeTarget}:</strong> $safeReason $safeNextStep</li>"
-  }
-  $actionNoticeHtml = "<div class='critical-notice'><div>⚠️ HANDLUNGSBEDARF: VERTEILUNG / EINRICHTUNG PRÜFEN</div><ul>$($actionNoticeItems -join '')</ul></div>"
+  $actionNoticeHtml = "<div class='critical-notice'>⚠️ HANDLUNGSBEDARF: Mindestens ein Ziel benötigt eine Verteilung oder manuelle Einrichtung.<br>Details stehen im Laufprotokoll.</div>"
   $reportTitle = "<h1>Update-Check Report - $ComputerFQDN</h1>"
   $RepBody = $RepBody.Replace($reportTitle, "$reportTitle`n$actionNoticeHtml")
 }
