@@ -804,14 +804,15 @@ function Register-StartupRemoteTask {
     [Parameter(Mandatory)][string]$Script,
     $AuthInfo = $null,
     [datetime]$At = [datetime]::MinValue,
-    [AllowEmptyString()][string]$MailPassword = ''
+    [AllowEmptyString()][string]$MailPassword = '',
+    [AllowEmptyString()][string]$MaintenanceEndTime = ''
   )
   # Der Worker wird von powershell.exe (Windows PowerShell 5.1) ausgeführt;
   # seine Syntax muss daher auch mit dem Windows-PowerShell-Parser gültig sein.
   # Der vollständige Worker wird geschützt als temporäre Datei abgelegt. Ein
   # CMD-Starthelfer protokolliert Prozessstart und Fehler vor PowerShell.
   $sb = {
-    param($Name, $WorkerScript, $Password, $RunAt)
+    param($Name, $WorkerScript, $Password, $RunAt, $WindowEndTime)
     if (-not [string]::IsNullOrEmpty($Password)) {
       if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
         try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
@@ -828,6 +829,7 @@ function Register-StartupRemoteTask {
     $WorkerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
     $RunnerPath = Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-TaskRunner.cmd'
     New-Item -ItemType Directory -Path (Split-Path -Parent $WorkerPath) -Force | Out-Null
+    Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-LastFailureNotice.txt') -Force -ErrorAction SilentlyContinue
     New-Item -ItemType File -Path $WorkerPath -Force | Out-Null
     # SMTP-Daten im Worker dürfen nur SYSTEM und lokale Administratoren lesen.
     $acl = New-Object System.Security.AccessControl.FileSecurity
@@ -868,24 +870,33 @@ echo [%date% %time%] Taskrunner gestartet.>>"$RunnerLogPath"
 set "WORKER_EXIT=%ERRORLEVEL%"
 echo [%date% %time%] PowerShell-Worker beendet; Exitcode %WORKER_EXIT%.>>"$RunnerLogPath"
 if "%WORKER_EXIT%"=="2" exit /b 0
+if "%WORKER_EXIT%"=="1" exit /b 1
 del "%~f0" >nul 2>&1
 exit /b %WORKER_EXIT%
 "@
     [System.IO.File]::WriteAllText($RunnerPath, $runnerSource, [System.Text.Encoding]::ASCII)
     Set-Acl -LiteralPath $RunnerPath -AclObject $acl -ErrorAction Stop
+    # Wiederholungen liegen im konfigurierten Wartungsfenster; der Worker prüft
+    # vor jeder Installation zusätzlich, ob das Fenster tatsächlich offen ist.
+    $repeatDuration = New-TimeSpan -Minutes (23 * 60 + 59)
+    if ($RunAt -gt [datetime]::MinValue -and -not [string]::IsNullOrWhiteSpace($WindowEndTime)) {
+      $parsedWindowEnd = [datetime]::MinValue
+      if (-not [datetime]::TryParse($WindowEndTime, [ref]$parsedWindowEnd)) { throw "Ungültiges Wartungsfenster-Ende: $WindowEndTime" }
+      $repeatDuration = $parsedWindowEnd.TimeOfDay - $RunAt.TimeOfDay
+      if ($repeatDuration -le [TimeSpan]::Zero) { $repeatDuration = $repeatDuration.Add([TimeSpan]::FromDays(1)) }
+    }
     $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
       (Get-Command -Name New-ScheduledTaskTrigger -ErrorAction SilentlyContinue) -and
       (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
       (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)
     if ($scheduledTaskCmdletsAvailable) {
       $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/d /c ""{0}""' -f $RunnerPath) -WorkingDirectory (Split-Path -Parent $WorkerPath)
-      # Bei gesetztem Wartungsfenster wird täglich zu dieser Uhrzeit und zusätzlich
-      # direkt nach dem Systemstart geprüft. So kann die Nachinstallation nach
-      # Ablauf der Mindestwartezeit noch im selben offenen Fenster beginnen.
       $triggers = if ($RunAt -gt [datetime]::MinValue) {
-        @((New-ScheduledTaskTrigger -Daily -At $RunAt), (New-ScheduledTaskTrigger -AtStartup))
+        $windowTrigger = New-ScheduledTaskTrigger -Daily -At $RunAt -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration $repeatDuration
+        @($windowTrigger, (New-ScheduledTaskTrigger -AtStartup))
       } else {
-        @((New-ScheduledTaskTrigger -AtStartup))
+        $retryTrigger = New-ScheduledTaskTrigger -Daily -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration $repeatDuration
+        @($retryTrigger, (New-ScheduledTaskTrigger -AtStartup))
       }
       $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
       Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
@@ -897,11 +908,10 @@ exit /b %WORKER_EXIT%
       $runAt = if ($RunAt -gt [datetime]::MinValue) { $RunAt } else { (Get-Date).AddMinutes(1) }
       $startDate = $runAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
       $startTime = $runAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
-      if ($RunAt -gt [datetime]::MinValue) {
-        $windowOutput = & $schtasks /Create /TN $Name /SC DAILY /SD $startDate /ST $startTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Wartungsfenster-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($windowOutput) -join ' ').Trim())" }
-        $startupName = $Name + '-AtStartup'
-      } else { $startupName = $Name }
+      $repeatDurationText = '{0:D2}:{1:D2}' -f [int][Math]::Floor($repeatDuration.TotalHours), $repeatDuration.Minutes
+      $windowOutput = & $schtasks /Create /TN $Name /SC DAILY /SD $startDate /ST $startTime /RI 15 /DU $repeatDurationText /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
+      if ($LASTEXITCODE -ne 0) { throw "Wiederholungsaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($windowOutput) -join ' ').Trim())" }
+      $startupName = $Name + '-AtStartup'
       $startupOutput = & $schtasks /Create /TN $startupName /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
       if ($LASTEXITCODE -ne 0) {
         if ($RunAt -gt [datetime]::MinValue) { & $schtasks /Delete /TN $Name /F *> $null }
@@ -909,9 +919,9 @@ exit /b %WORKER_EXIT%
       }
     }
   }
-  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $MailPassword $At; return }
+  if ($Servername -ieq $env:COMPUTERNAME) { & $sb $TaskName $Script $MailPassword $At $MaintenanceEndTime; return }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At)
+  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At, $MaintenanceEndTime)
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-ScriptLog $message } -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
@@ -1018,6 +1028,7 @@ function Register-DeferredUpdateTask {
   $script = @"
 `$taskName = '$taskName'
 `$workerFailed = `$false
+`$taskExpired = `$false
 `$workerPhase = 'Initialisierung'
 `$removeDeferredTask = {
   param([string]`$Name)
@@ -1055,6 +1066,27 @@ try {
   Write-DeferredLog 'Nachinstallationsaufgabe gestartet.'
   `$workerPhase = 'Neustart- und Wartungsfensterprüfung'
   `$registeredAt = [DateTime]::FromFileTimeUtc($registeredAt)
+  if ([DateTime]::UtcNow -ge `$registeredAt.AddDays(5)) {
+    `$taskExpired = `$true
+    `$workerPhase = 'Maximale Laufzeit erreicht'
+    Write-DeferredLog 'Die Nachinstallationsaufgabe hat die maximale Laufzeit von fünf Tagen erreicht und wird beendet.'
+    try {
+      `$mail = Get-DeferredMailSettings
+      if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
+        `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port)
+        `$smtp.EnableSsl = [bool]`$mail.UseSSL
+        if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
+        `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, ('FEHLER Nachinstallation: ' + `$mail.Install.Subject), "Die zurückgestellten Updates auf `$env:COMPUTERNAME wurden innerhalb von fünf Tagen nicht vollständig installiert. Bitte das Protokoll DeferredUpdates.log prüfen und manuell nacharbeiten.")
+        `$smtp.Send(`$message); `$message.Dispose(); `$smtp.Dispose()
+        Write-DeferredLog 'Ablaufmeldung erfolgreich versendet.'
+      } else {
+        Write-DeferredLog 'Ablaufmeldung übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
+      }
+    } catch {
+      Write-DeferredLog "Ablaufmeldung konnte nicht versendet werden: `$(`$_.Exception.Message)"
+    }
+    return
+  }
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
   `$rebootDetected = `$lastBoot -gt `$registeredAt
   `$windowEnd = [DateTime]::MaxValue
@@ -1266,24 +1298,43 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     Write-DeferredLog "Fehlerdetails: `$failureDetails"
   } catch { }
   try {
-    `$mail = Get-DeferredMailSettings
-    if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
-      `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port); `$smtp.EnableSsl = [bool]`$mail.UseSSL
-      if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
-      `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, ('FEHLER Nachinstallation: ' + `$mail.Install.Subject), "Nachinstallation auf `$env:COMPUTERNAME fehlgeschlagen: `$(`$_.Exception.Message)")
-      `$smtp.Send(`$message); `$message.Dispose(); `$smtp.Dispose()
-      Write-DeferredLog 'Fehler-E-Mail erfolgreich versendet.'
+    `$failureNoticePath = Join-Path `$logDirectory 'DeferredUpdates-LastFailureNotice.txt'
+    `$sendFailureNotice = `$true
+    if (Test-Path -LiteralPath `$failureNoticePath) {
+      `$lastNotice = [DateTime]::MinValue
+      if ([DateTime]::TryParse((Get-Content -LiteralPath `$failureNoticePath -Raw), [ref]`$lastNotice) -and [DateTime]::UtcNow - `$lastNotice.ToUniversalTime() -lt [TimeSpan]::FromHours(24)) {
+        `$sendFailureNotice = `$false
+      }
+    }
+    if (-not `$sendFailureNotice) {
+      Write-DeferredLog 'Fehler-E-Mail übersprungen; die letzte Fehlerbenachrichtigung liegt weniger als 24 Stunden zurück.'
+    } else {
+      `$mail = Get-DeferredMailSettings
+      if (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo) {
+        `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port); `$smtp.EnableSsl = [bool]`$mail.UseSSL
+        if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
+        `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, ('FEHLER Nachinstallation: ' + `$mail.Install.Subject), "Nachinstallation auf `$env:COMPUTERNAME fehlgeschlagen: `$failureMessage")
+        `$smtp.Send(`$message); `$message.Dispose(); `$smtp.Dispose()
+        [System.IO.File]::WriteAllText(`$failureNoticePath, [DateTime]::UtcNow.ToString('o'))
+        Write-DeferredLog 'Fehler-E-Mail erfolgreich versendet.'
+      } else {
+        Write-DeferredLog 'Fehler-E-Mail übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
+      }
     }
   } catch {
     try { Write-DeferredLog "Fehler-E-Mail konnte nicht versendet werden: `$(`$_.Exception.Message)" } catch { }
   }
 } finally {
-  # Bei Fehlern bleibt die Aufgabe samt Worker-Skript erhalten, damit der nächste
-  # geplante Lauf erneut versuchen kann. Nur Wartephasen und Fehler entfernen nichts.
+  # Fehler und Wartephasen behalten Aufgabe, Worker und Starthelfer für den nächsten Versuch.
   if (-not `$waitForReboot -and -not `$workerFailed) {
-    Write-DeferredLog 'Aufgabe wird entfernt.'
+    if (`$taskExpired) {
+      Write-DeferredLog 'Fünf-Tage-Frist abgelaufen. Aufgabe wird entfernt.'
+    } else {
+      Write-DeferredLog 'Nachinstallation abgeschlossen. Aufgabe wird entfernt.'
+    }
     & `$removeDeferredTask `$taskName
     Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates-LastFailureNotice.txt') -Force -ErrorAction SilentlyContinue
   } elseif (`$workerFailed) {
     try { Write-DeferredLog "Aufgabe bleibt nach Fehler in Phase '`$workerPhase' für einen erneuten Versuch bestehen." } catch { }
   }
@@ -1295,7 +1346,7 @@ if (`$workerFailed) { exit 1 }
 if (`$waitForReboot) { exit 2 }
 
 "@
-  Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo -At $ScheduledAt -MailPassword $deferredMailPassword
+  Register-StartupRemoteTask -Servername $Servername -TaskName $taskName -Script $script -AuthInfo $AuthInfo -At $ScheduledAt -MailPassword $deferredMailPassword -MaintenanceEndTime $MaintenanceEndTime
   $selectionText = @(
     if ($DeferredKBs.Count -gt 0) { "KBs: $($DeferredKBs -join ', ')" }
     if ($DeferredCategories.Count -gt 0) { "Kategorien: $($DeferredCategories -join ', ')" }
