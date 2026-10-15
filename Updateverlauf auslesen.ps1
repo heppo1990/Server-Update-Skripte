@@ -230,7 +230,9 @@ try {
                     }
                     $kb = if ([string]$entry.Title -match '(?i)KB\d+') { $matches[0].ToUpperInvariant() } else { '' }
                     [pscustomobject]@{
-                        Date = [datetime]$entry.Date
+                        # Die Windows-Update-Agent-COM-API liefert UTC-Zeit;
+                        # für Vergleich und Bericht in die lokale Zeit umrechnen.
+                        Date = ([datetime]::SpecifyKind([datetime]$entry.Date, [DateTimeKind]::Utc)).ToLocalTime()
                         Result = $resultName
                         Title = [string]$entry.Title
                         Details = $kb
