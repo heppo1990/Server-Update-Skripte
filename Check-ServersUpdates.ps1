@@ -705,6 +705,15 @@ if ($ServerADList -ne $null) {
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.
         $remoting = Initialize-WindowsUpdateRemoting -UpdateSettings $UpdateSettings -TargetComputer $Servername -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
         $svcCredential = $remoting.AuthInfo
+        $targetEnableWinget = $enableWingetUpdates
+        $targetOperatingSystem = [string]$Server.OperatingSystem
+        if ($targetEnableWinget -and $targetOperatingSystem -match '(?i)Windows Server 2016') {
+          $targetEnableWinget = $false
+          Write-ScriptLog "WinGet auf $Servername übersprungen: $targetOperatingSystem wird nicht unterstützt; Chocolatey und Windows Update werden weiter geprüft."
+          $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
+          $osHtml = [System.Net.WebUtility]::HtmlEncode($targetOperatingSystem)
+          $RepBody += "<div class='info-box'><strong>WinGet ausgelassen auf ${serverHtml}:</strong> $osHtml wird nicht unterstützt. Chocolatey und Windows Update werden geprüft.</div>"
+        }
 
         if ($remoting.IsNonAdTarget) {
           $clientCertificate = Get-CheckClientCertificate
@@ -725,7 +734,7 @@ if ($ServerADList -ne $null) {
           if (-not $script:IsLocalSystemRun) {
             $null = Update-PSWindowsUpdateModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
           }
-          if ($enableWingetUpdates -and -not $script:IsLocalSystemRun) {
+          if ($targetEnableWinget -and -not $script:IsLocalSystemRun) {
             $null = Update-WinGetClientModule -ComputerName $Servername -AuthInfo $svcCredential -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
           }
         }
@@ -1020,7 +1029,10 @@ if ($ServerADList -ne $null) {
           if ($script:IsLocalSystemRun) {
             $packageResults = @()
           } else {
-            $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $enableWingetUpdates -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
+            $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $targetEnableWinget -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
+            if (-not $targetEnableWinget -and $targetOperatingSystem -match '(?i)Windows Server 2016') {
+              $packageResults = @($packageResults | Where-Object { $_.Manager -ne 'Winget' })
+            }
           }
         }
         catch {

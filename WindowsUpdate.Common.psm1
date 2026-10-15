@@ -232,6 +232,8 @@ function Update-PS7PackageManagementModule {
     <# Prüft PackageManagement in PowerShell 7; aus PS5 wird dafür ein neuer pwsh-Prozess gestartet. #>
     param([switch]$Force, [scriptblock]$WriteLog)
 
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         $pwsh = Get-Command -Name pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $pwsh) { return $true }
@@ -342,6 +344,8 @@ function Update-NuGetProvider {
     <# Aktualisiert den NuGet-Provider im gemeinsamen Rechnerpfad auf die neueste Bootstrap-Version. #>
     param([switch]$Force, [scriptblock]$WriteLog)
 
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
     $minimumVersion = [version]'2.8.5.201'
     $providerRoot = Join-Path $env:ProgramFiles 'PackageManagement\ProviderAssemblies\nuget'
     $availableProviders = @(Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)
@@ -436,6 +440,10 @@ function Update-PSWindowsUpdateModule {
         $AuthInfo
     )
 
+    # Windows PowerShell 5.1 verwendet ohne explizite Vorgabe häufig TLS 1.0.
+    # PSGallery und die Provider-Feeds benötigen mindestens TLS 1.2.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
     if (-not [string]::IsNullOrWhiteSpace($ComputerName) -and $ComputerName -ine $env:COMPUTERNAME) {
         $session = $null
         try {
@@ -447,6 +455,7 @@ function Update-PSWindowsUpdateModule {
             $logDefinition = (Get-Command -Name Write-PSWindowsUpdateModuleLog -CommandType Function).Definition
             $remoteWorker = {
                 param($UpdaterText, $NuGetUpdaterText, $PackageManagementUpdaterText, $LoggerText, $ForceUpdate)
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                 $windowsPowerShellModulePaths = @(
                     (Join-Path $HOME 'Documents\WindowsPowerShell\Modules'),
                     (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'),
@@ -1509,7 +1518,9 @@ function Get-WindowsUpdateTargets {
     )
 
     $adComputers = @()
-    $localComputer = [PSCustomObject]@{ Name = $env:COMPUTERNAME }
+    $localOperatingSystem = ''
+    try { $localOperatingSystem = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+    $localComputer = [PSCustomObject]@{ Name = $env:COMPUTERNAME; OperatingSystem = $localOperatingSystem }
     $isDomainJoined = $false
 
     try {
@@ -1560,6 +1571,7 @@ function Get-WindowsUpdateTargets {
             $knownNames += [string]$computer.Name
             $targetObject = New-Object PSObject
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name Name -Value ([string]$computer.Name)
+            Add-Member -InputObject $targetObject -MemberType NoteProperty -Name OperatingSystem -Value ([string]$computer.OperatingSystem)
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name IsAdditional -Value $false
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name IsHypervisor -Value $false
             Add-Member -InputObject $targetObject -MemberType NoteProperty -Name ClassificationError -Value $null
@@ -1577,9 +1589,11 @@ function Get-WindowsUpdateTargets {
             $computerName = ([string]$configuredName).Trim()
             $isInAd = $false
             $classificationError = $null
+            $operatingSystem = ''
             if ($adAvailable) {
                 try {
-                    $null = Get-ADComputer -Identity $computerName -ErrorAction Stop
+                    $adComputer = Get-ADComputer -Identity $computerName -Properties OperatingSystem -ErrorAction Stop
+                    $operatingSystem = [string]$adComputer.OperatingSystem
                     $isInAd = $true
                 }
                 catch {
@@ -1625,6 +1639,7 @@ function Get-WindowsUpdateTargets {
                 if ($classificationError) {
                     $targets += [PSCustomObject]@{
                         Name = $computerName
+                        OperatingSystem = $operatingSystem
                         IsAdditional = $false
                         IsHypervisor = $false
                         ClassificationError = $classificationError
@@ -1633,6 +1648,7 @@ function Get-WindowsUpdateTargets {
                 else {
                     $targets += [PSCustomObject]@{
                         Name = $computerName
+                        OperatingSystem = $operatingSystem
                         IsAdditional = ((-not $isInAd) -and (-not $isHypervisorGroup))
                         IsHypervisor = ((-not $isInAd) -and $isHypervisorGroup)
                         ClassificationError = $null
