@@ -420,6 +420,8 @@ if [ "$CHECK_ONLY" = '1' ]; then echo 'Linux-Update-Pruefung abgeschlossen.'; el
         else {
             Write-LinuxLog -Message "Führe Linux-Updates auf $RemoteHost aus (Ausgabe läuft mit) ..." -LogFile $LogFile
         }
+        $resultHeading = if ($DryRun) { "Ergebnis der Update-Suche auf Linux-Server ${RemoteHost}:" } else { "Ergebnis der Installation auf Linux-Server ${RemoteHost}:" }
+        Write-LinuxLog -Message $resultHeading -LogFile $LogFile
         $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
         $checkOnlyArgument = if ($DryRun) { '1' } else { '0' }
         $arguments += "${RemoteUser}@${RemoteHost}", "sh $remoteScript $checkOnlyArgument; result=`$?; rm -f $remoteScript; exit `$result"
@@ -470,6 +472,8 @@ foreach ($entry in $hostEntries) {
     if ([string]::IsNullOrWhiteSpace($remoteHost) -or [string]::IsNullOrWhiteSpace($remoteUser)) { Write-Warning 'Ungültiger Eintrag in LinuxSettings.Hosts (Host/Name und User sind Pflicht).'; continue }
     $logFile = if ($script:WriteExecutionLog) { Join-Path $script:LogDirectory ("{0}_{1}.log" -f $remoteHost,(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')) } else { '' }
     Write-LinuxLog -Message '' -LogFile $logFile
+    $actionHeading = if ($CheckOnly -or $DryRun) { "Starte Update-Check auf Linux-Server $remoteHost..." } elseif ($ConnectionOnly) { "Prüfe Verbindung zu Linux-Server $remoteHost..." } else { "Starte Update-Installation auf Linux-Server $remoteHost..." }
+    Write-LinuxLog -Message $actionHeading -LogFile $logFile
     $setupIssue = ''
     try {
         if ($CheckOnly) {

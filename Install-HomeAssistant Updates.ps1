@@ -91,6 +91,8 @@ if ($script:WriteExecutionLog -and -not (Test-Path $LogDir)) {
 
 $LogFile = if ($script:WriteExecutionLog) { Join-Path $LogDir ("{0}_{1}.log" -f $HAHost, (Get-Date -Format 'yyyyMMdd-HHmm')) } else { '' }
 
+Write-HostLog -Message "Starte Update-Installation auf Home-Assistant-Server $HAHost..." -RemoteHost $HAHost -LogFile $LogFile -Level Info
+
 # Statistik-Tracking
 $Script:UpdateStats = @{
     CoreUpdated = $false
@@ -799,6 +801,13 @@ if ($Script:UpdateStats.SupervisorUpdated) { $summaryItems += "Supervisor" }
 if ($Script:UpdateStats.OSUpdated) { $summaryItems += "OS" }
 if ($Script:UpdateStats.AddonsUpdated -gt 0) { $summaryItems += "$($Script:UpdateStats.AddonsUpdated) Add-on(s)" }
 $summaryString = if ($summaryItems.Count -gt 0) { $summaryItems -join ", " } else { "Keine Updates" }
+
+Write-HostLog -Message "Ergebnis der Installation auf Home-Assistant-Server ${HAHost}:" -RemoteHost $HAHost -LogFile $LogFile -Level Info
+if ($TotalUpdates -eq 0) {
+    Write-HostLog -Message "Keine Home-Assistant-Updates installiert auf $HAHost." -RemoteHost $HAHost -LogFile $LogFile -Level Info
+} else {
+    Write-HostLog -Message "Home-Assistant-Updates installiert auf ${HAHost}: $TotalUpdates Komponente(n)." -RemoteHost $HAHost -LogFile $LogFile -Level Success
+}
 
 # HostStatus (wie Linux-Skript)
 $HostStatus = [PSCustomObject]@{
