@@ -272,7 +272,9 @@ function Ensure-SSHKeyExists {
     }
 }
 
-Ensure-SSHKeyExists -KeyPath $KeyPath -RemoteHost $HAHost -LogFile $LogFile
+if (-not $CheckOnly) {
+    Ensure-SSHKeyExists -KeyPath $KeyPath -RemoteHost $HAHost -LogFile $LogFile
+}
 
 # ----------------------------
 # SSH-Key auf HA installieren (1 Passwortrunde)
@@ -321,10 +323,35 @@ function Ensure-SSHKeyOnHA {
     }
 }
 
-Ensure-SSHKeyOnHA -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
+function Test-HAKeyLogin {
+    param([string]$RemoteHost, [string]$User, [int]$Port, [string]$KeyPath, [string]$SSHPath)
+    $target = "$User@$RemoteHost"
+    $sshArguments = @(Get-WindowsUpdateSshArguments -KeyPath $KeyPath -Port $Port -BatchMode)
+    $sshArguments += $target, 'echo OK'
+    $test = & $SSHPath @sshArguments 2>$null
+    return ($LASTEXITCODE -eq 0 -and ($test -join "`n").Trim() -eq 'OK')
+}
+
+if ($CheckOnly) {
+    $setupIssue = ''
+    if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
+        $setupIssue = 'Lokaler SSH-Privatschlüssel fehlt; Home-Assistant-Verteilung erforderlich.'
+    } elseif (-not (Test-HAKeyLogin -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath)) {
+        $setupIssue = 'SSH-Schlüsselverbindung nicht bestätigt; Home-Assistant-Verteilung und Verbindung prüfen.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($setupIssue)) {
+        Write-HostLog -Message $setupIssue -RemoteHost $HAHost -LogFile $LogFile -Level Warning
+        $connectionStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; SetupReady=$false; SetupIssue=$setupIssue; AvailableUpdates=0; UpdateDetails=@(); Error='Einrichtung/SSH nicht bestätigt'; LogFile=$LogFile }
+        $connectionStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
+        exit 1
+    }
+    Write-HostLog -Message 'Home-Assistant-SSH-Einrichtung ist aktuell; es ist keine erneute Verteilung nötig.' -RemoteHost $HAHost -LogFile $LogFile -Level Success
+} else {
+    Ensure-SSHKeyOnHA -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
+}
 
 if ($ConnectionOnly) {
-    $connectionStats = [PSCustomObject]@{ Host=$HAHost; Success=$true; AvailableUpdates=0; UpdateDetails=@(); Error=''; LogFile=$LogFile }
+    $connectionStats = [PSCustomObject]@{ Host=$HAHost; Success=$true; SetupReady=$true; SetupIssue=''; AvailableUpdates=0; UpdateDetails=@(); Error=''; LogFile=$LogFile }
     $connectionStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
     Write-HostLog -Message "SSH-Schlüssel und Verbindung zu $HAHost funktionieren." -RemoteHost $HAHost -LogFile $LogFile -Level Success
     exit 0
@@ -537,12 +564,12 @@ if ($CheckOnly) {
         foreach ($detail in $details) {
             Write-HostLog -Message ("Update verfügbar: {0} ({1} -> {2})" -f $detail.Component, $detail.Current, $detail.Available) -RemoteHost $HAHost -LogFile $LogFile -Level Warning
         }
-        $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$true; AvailableUpdates=$details.Count; UpdateDetails=$details; Error=''; LogFile=$LogFile }
+        $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$true; SetupReady=$true; SetupIssue=''; AvailableUpdates=$details.Count; UpdateDetails=$details; Error=''; LogFile=$LogFile }
     }
     catch {
         Write-HostLog -Message 'Home-Assistant-Check fehlgeschlagen; Details im Laufprotokoll.' -RemoteHost $HAHost -LogFile $LogFile -Level Error
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-Check' -Target $HAHost -ErrorRecord $_
-        $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; AvailableUpdates=0; UpdateDetails=@(); Error='Details im Laufprotokoll'; LogFile=$LogFile }
+        $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; SetupReady=$true; SetupIssue=''; AvailableUpdates=0; UpdateDetails=@(); Error='Details im Laufprotokoll'; LogFile=$LogFile }
     }
     $checkStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
     if (-not $script:QuietMode) { Write-Host "Home-Assistant-Check: $($checkStats.AvailableUpdates) Update(s) verfügbar." -ForegroundColor Cyan }

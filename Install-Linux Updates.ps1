@@ -67,6 +67,7 @@ $script:QuietMode = $Quiet
 $scpCommand = Get-Command -Name 'scp.exe', 'scp' -ErrorAction SilentlyContinue | Select-Object -First 1
 $script:SCPPath = if ($scpCommand) { $scpCommand.Path } else { Join-Path (Split-Path -Path $script:SSHPath -Parent) 'scp.exe' }
 $script:ConnectTimeoutSeconds = if ([int]$linuxSettings.ConnectTimeoutSeconds -gt 0) { [int]$linuxSettings.ConnectTimeoutSeconds } else { 15 }
+$script:LinuxSudoSetupVersion = '1'
 $script:LockWaitIntervals = if ([int]$linuxSettings.LockWaitMinutes -gt 0) { [int]$linuxSettings.LockWaitMinutes * 2 } else { 10 }
 $script:LogDirectory = Join-Path $PSScriptRoot 'Logs'
 $script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
@@ -224,7 +225,8 @@ function Install-LinuxPublicKey {
 function Test-LinuxUpdateSudo {
     param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath)
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
-    $arguments += "${RemoteUser}@${RemoteHost}", 'sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --check >/dev/null 2>&1'
+    $remoteCommand = 'version=$(sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --version 2>/dev/null) && [ "$version" = "' + $script:LinuxSudoSetupVersion + '" ] && sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --check >/dev/null 2>&1'
+    $arguments += "${RemoteUser}@${RemoteHost}", $remoteCommand
     & $script:SSHPath @arguments 2>$null | Out-Null
     return ($LASTEXITCODE -eq 0)
 }
@@ -264,6 +266,10 @@ set -eu
 if [ "$#" -eq 1 ] && [ "$1" = "--check" ]; then
     exit 0
 fi
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+    printf '%s\n' '__SETUP_VERSION__'
+    exit 0
+fi
 if [ "$#" -ne 1 ]; then
     echo 'Expected exactly one delay in minutes.' >&2
     exit 2
@@ -280,6 +286,7 @@ if [ -x /usr/sbin/shutdown ]; then
 fi
 exec /sbin/shutdown -r "+$1"
 '@
+    $rebootHelperContent = $rebootHelperContent.Replace('__SETUP_VERSION__', $script:LinuxSudoSetupVersion)
     $encodedRebootHelper = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($rebootHelperContent))
     $remoteScript = "/tmp/configure_update_sudo_${safeUser}.sh"
     $bootstrapScript = @'
@@ -436,10 +443,9 @@ if [ "$CHECK_ONLY" = '1' ]; then echo 'Linux-Update-Pruefung abgeschlossen.'; el
 if (-not (Test-Path -LiteralPath $script:SSHPath)) { throw "OpenSSH-Client (ssh.exe) nicht gefunden: $script:SSHPath" }
 if (-not (Test-Path -LiteralPath $script:SCPPath)) { throw "OpenSSH-Kopierprogramm (scp.exe) nicht gefunden: $script:SCPPath" }
 if ($CheckOnly) { $DryRun = $true }
-# CheckOnly unterbindet ausschließlich Paketinstallation und Neustart. Die
-# Ersteinrichtung (lokaler Schlüssel, Schlüssel-Login, NOPASSWD) muss bei jedem
-# ersten Aufruf erfolgen können, auch wenn dieser von Check oder Download kommt.
-Ensure-LinuxSSHKey -KeyPath $KeyPath
+# Der Check ermittelt den Einrichtungsstatus nur lesend. Schlüssel und sudo-Regeln
+# werden ausschließlich durch Download/Installation bzw. die Verteilung eingerichtet.
+if (-not $CheckOnly) { Ensure-LinuxSSHKey -KeyPath $KeyPath }
 if ($script:WriteExecutionLog -and -not (Test-Path -LiteralPath $script:LogDirectory)) { New-Item -Path $script:LogDirectory -ItemType Directory -Force | Out-Null }
 $hostEntries = @(
     foreach ($entry in @($linuxSettings.Hosts)) {
@@ -464,15 +470,29 @@ foreach ($entry in $hostEntries) {
     if ([string]::IsNullOrWhiteSpace($remoteHost) -or [string]::IsNullOrWhiteSpace($remoteUser)) { Write-Warning 'Ungültiger Eintrag in LinuxSettings.Hosts (Host/Name und User sind Pflicht).'; continue }
     $logFile = if ($script:WriteExecutionLog) { Join-Path $script:LogDirectory ("{0}_{1}.log" -f $remoteHost,(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')) } else { '' }
     Write-LinuxLog -Message '' -LogFile $logFile
+    $setupIssue = ''
     try {
-        if (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
+        if ($CheckOnly) {
+            if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
+                $setupIssue = 'Lokaler SSH-Privatschlüssel fehlt; Linux-Verteilung erforderlich.'
+                throw $setupIssue
+            }
+            if (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
+                $setupIssue = 'SSH-Schlüsselverbindung nicht bestätigt; Linux-Verteilung und Verbindung prüfen.'
+                throw $setupIssue
+            }
+            if (-not (Test-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
+                $setupIssue = "Linux-Updateeinrichtung fehlt oder ist veraltet (erwartete Version $script:LinuxSudoSetupVersion); Verteilung erforderlich."
+                throw $setupIssue
+            }
+        } elseif (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
             Install-LinuxPublicKey -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile
         } else {
             Write-LinuxLog -Message "SSH-Schlüssel-Login für $remoteHost funktioniert bereits." -LogFile $logFile -Level Success
         }
-        Set-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile
+        if (-not $CheckOnly) { Set-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile }
         if ($ConnectionOnly) {
-            $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Erfolgreich'; UpdateCount=0; Packages=''; PackageList=@(); LogFile=$logFile }
+            $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Erfolgreich'; SetupReady=$true; SetupIssue=''; UpdateCount=0; Packages=''; PackageList=@(); LogFile=$logFile }
             Write-LinuxLog -Message "SSH-Schlüssel und Verbindung zu $remoteHost funktionieren." -LogFile $logFile -Level Success
             continue
         }
@@ -496,7 +516,7 @@ foreach ($entry in $hostEntries) {
         if ($result.UpdateCount -gt 0) { $updateDetails += [PSCustomObject]@{ Host=$remoteHost; UpdateCount=$result.UpdateCount; Packages=$result.UpdatedPackages } }
         $statusText = if ($rebootError) { 'Updates installiert; Neustartplanung fehlgeschlagen' } elseif ($result.RebootRequired) { 'Erfolgreich (Neustart erforderlich)' } else { 'Erfolgreich' }
         $rebootErrorText = if ($rebootError) { 'Details im Laufprotokoll' } else { '' }
-        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status=$statusText; UpdateCount=$result.UpdateCount; Packages=($result.UpdatedPackages -join ', '); PackageList=@($result.UpdatedPackages); IsVirtual=$isVirtual; RebootScheduled=$rebootScheduled; RebootError=$rebootErrorText; LogFile=$logFile }
+        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status=$statusText; SetupReady=$true; SetupIssue=''; UpdateCount=$result.UpdateCount; Packages=($result.UpdatedPackages -join ', '); PackageList=@($result.UpdatedPackages); IsVirtual=$isVirtual; RebootScheduled=$rebootScheduled; RebootError=$rebootErrorText; LogFile=$logFile }
         $completionText = if ($DryRun) {
             "Linux-Update-Prüfung auf $remoteHost abgeschlossen: $($result.UpdateCount) Update(s) verfügbar."
         }
@@ -505,7 +525,7 @@ foreach ($entry in $hostEntries) {
         }
         if ($result.UpdateCount -gt 0) { Write-LinuxLog -Message $completionText -LogFile $logFile -Level Success }
     } catch {
-        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; UpdateCount=0; Packages=''; Error='Details im Laufprotokoll'; LogFile=$logFile }
+        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; SetupReady=([string]::IsNullOrWhiteSpace($setupIssue)); SetupIssue=$setupIssue; UpdateCount=0; Packages=''; Error='Details im Laufprotokoll'; LogFile=$logFile }
         Write-LinuxLog -Message "Fehler bei ${remoteHost}; Details im Laufprotokoll." -LogFile $logFile -Level Error
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $logFile } -Operation 'Linux-Host-Update' -Target $remoteHost -ErrorRecord $_
     } finally {

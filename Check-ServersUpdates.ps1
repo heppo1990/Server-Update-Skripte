@@ -131,6 +131,29 @@ function Add-CheckRedistributionNotice {
   $script:RepBody += "<div class='warning-box'><strong>WindowsUpdateAdm-Verteilung oder Verbindung auf $safeTarget prüfen.</strong><br>$safeReason Falls der JEA-Endpunkt fehlt, falsch konfiguriert oder nach einem Zertifikatswechsel veraltet ist, Verteilung erneut ausführen und Verbindung testen.</div>"
 }
 
+function Add-CheckExternalSetupNotice {
+  param(
+    [Parameter(Mandatory)][string]$Area,
+    [Parameter(Mandatory)][string]$Target,
+    [Parameter(Mandatory)][string]$Reason
+  )
+
+  $message = "HANDLUNGSBEDARF: $Target ($Area) – $Reason"
+  Write-ScriptLog $message
+  $safeTarget = [System.Net.WebUtility]::HtmlEncode($Target)
+  $safeArea = [System.Net.WebUtility]::HtmlEncode($Area)
+  $safeReason = [System.Net.WebUtility]::HtmlEncode($Reason)
+  if ($Reason -match 'Verbindung nicht bestätigt') {
+    $nextStep = 'Zuerst Erreichbarkeit und SSH prüfen; Verteilung nur bei fehlender oder ungültiger Einrichtung erneut ausführen.'
+  } elseif ($Area -eq 'Linux') {
+    $nextStep = 'Bei fehlendem/veraltetem SSH-Schlüssel oder sudo-Setup die Linux-Verteilung erneut ausführen.'
+  } else {
+    $nextStep = 'Bei fehlendem SSH-Schlüssel die Home-Assistant-Verteilung erneut ausführen.'
+  }
+  $safeNextStep = [System.Net.WebUtility]::HtmlEncode($nextStep)
+  $script:RepBody += "<div class='warning-box'><strong>$safeArea-Einrichtung auf $safeTarget prüfen.</strong><br>$safeReason $safeNextStep</div>"
+}
+
 function Get-CheckClientCertificate {
   $thumbprint = [string]$UpdateSettings.ClientCertThumbprint
   if (-not [string]::IsNullOrWhiteSpace($thumbprint)) {
@@ -1098,14 +1121,19 @@ if (-not $script:IsLocalSystemRun -and $LinuxConfigured -and (Test-Path -Literal
         if ($linuxHost.Status -eq 'Fehler') {
           $linuxError = [string]$linuxHost.Error
           if (-not [string]::IsNullOrWhiteSpace($linuxError)) { Write-ScriptLog "Linux-Check auf $($linuxHost.Host) fehlgeschlagen: $linuxError (Log: $($linuxHost.LogFile))" }
+          if (-not [string]::IsNullOrWhiteSpace([string]$linuxHost.SetupIssue)) {
+            Add-CheckExternalSetupNotice -Area 'Linux' -Target ([string]$linuxHost.Host) -Reason ([string]$linuxHost.SetupIssue)
+          }
           $RepBody += "<div class='error-box'>Linux-Check fehlgeschlagen.</div>"
         } elseif ([int]$linuxHost.UpdateCount -gt 0) {
+          Write-ScriptLog "Linux-Einrichtung auf $($linuxHost.Host) aktuell; keine erneute Verteilung erforderlich." $true
           $packageList = @(([string]$linuxHost.Packages -split ',\s*') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
           $packages = [System.Net.WebUtility]::HtmlEncode(($packageList -join "`n")) -replace "`n", '<br>'
           Write-ScriptLog "Linux auf $($linuxHost.Host): $($linuxHost.UpdateCount) Paketupdates verfügbar."
           foreach ($package in $packageList) { Write-ScriptLog "  $($linuxHost.Host): $package" }
           $RepBody += "<div class='info-box'><strong>$($linuxHost.UpdateCount) Paketupdate(s) verfügbar:</strong><br>$packages</div>"
         } else {
+          Write-ScriptLog "Linux-Einrichtung auf $($linuxHost.Host) aktuell; keine erneute Verteilung erforderlich." $true
           Write-ScriptLog "Linux auf $($linuxHost.Host): keine Paketupdates verfügbar."
           $RepBody += "<div class='no-updates'>Keine Linux-Updates verfügbar.</div>"
         }
@@ -1139,10 +1167,15 @@ if (-not $script:IsLocalSystemRun -and $HAConfigured -and (Test-Path -LiteralPat
       $HAUpdateCount = @($haCheckStats.UpdateDetails).Count
       if (-not $haCheckStats.Success) { $HACheckErrors++ }
       if (-not $haCheckStats.Success) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$haCheckStats.SetupIssue)) {
+          Add-CheckExternalSetupNotice -Area 'Home Assistant' -Target ([string]$haCheckStats.Host) -Reason ([string]$haCheckStats.SetupIssue)
+        }
         Write-ScriptLog "Home-Assistant-Check auf $($haCheckStats.Host) fehlgeschlagen: $($haCheckStats.Error)"
       } elseif ($HAUpdateCount -eq 0) {
+        Write-ScriptLog "Home-Assistant-SSH-Einrichtung auf $($haCheckStats.Host) aktuell; keine erneute Verteilung erforderlich." $true
         Write-ScriptLog "Home Assistant auf $($haCheckStats.Host): keine Updates verfügbar."
       } else {
+        Write-ScriptLog "Home-Assistant-SSH-Einrichtung auf $($haCheckStats.Host) aktuell; keine erneute Verteilung erforderlich." $true
         Write-ScriptLog "Home Assistant auf $($haCheckStats.Host): $HAUpdateCount Update(s) verfügbar."
         foreach ($detail in @($haCheckStats.UpdateDetails)) {
           Write-ScriptLog ("  {0}: {1} → {2}" -f $detail.Component, $detail.Current, $detail.Available)
