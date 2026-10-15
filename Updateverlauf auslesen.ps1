@@ -201,11 +201,11 @@ try {
                 $authInfo = $remoting.AuthInfo
             }
             $remoteHistory = {
-                param($SinceDate, $Limit)
+                param($Limit)
                 # Die JEA-Rolle stellt Get-WUHistory, Where-Object und
                 # Select-Object bereit, aber nicht Sort-Object. Sortierung
-                # erfolgt deshalb erst nach der Rückgabe auf dem Client.
-                $history = @(Get-WUHistory -ErrorAction Stop | Where-Object { $_.Date -ge $SinceDate } | Select-Object -First $Limit)
+                # und Zeitraumfilter erfolgen erst nach der Rückgabe auf dem Client.
+                $history = @(Get-WUHistory -ErrorAction Stop | Select-Object -First $Limit)
                 foreach ($item in $history) {
                     [pscustomobject]@{
                         Date = [datetime]$item.Date
@@ -216,12 +216,11 @@ try {
                 }
             }
             $nativeWuaHistory = {
-                param($SinceDate, $Limit)
+                param($Limit)
                 $updateSession = New-Object -ComObject 'Microsoft.Update.Session' -ErrorAction Stop
                 $entries = $updateSession.QueryHistory('', 0, 1000)
                 $count = 0
                 foreach ($entry in $entries) {
-                    if ([datetime]$entry.Date -lt $SinceDate) { continue }
                     $resultName = switch ([int]$entry.ResultCode) {
                         2 { 'Succeeded' }
                         3 { 'Succeeded With Errors' }
@@ -241,21 +240,41 @@ try {
                 }
             }
             try {
-                $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ConfigurationName 'WindowsUpdateAdm' -ScriptBlock $remoteHistory -ArgumentList @($since, $MaxEventsPerTarget))
+                $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ConfigurationName 'WindowsUpdateAdm' -ScriptBlock $remoteHistory -ArgumentList @(1000))
             }
             catch {
                 Write-HistoryLog "WindowsUpdateAdm-Verlauf auf $name nicht abrufbar; versuche Standard-WinRM. Ursache und Ergebnis stehen im Protokoll." -LogOnly
                 Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HistoryLog $message -LogOnly } -Operation 'Windows-Updateverlauf via JEA' -Target $name -ErrorRecord $_ -Context @('Fallback=Standard-WinRM')
                 try {
-                    $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $remoteHistory -ArgumentList @($since, $MaxEventsPerTarget))
+                    $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $remoteHistory -ArgumentList @(1000))
                 }
                 catch {
                     Write-HistoryLog "PSWindowsUpdate-Verlauf über Standard-WinRM auf $name fehlgeschlagen; versuche Windows Update API. Details stehen im Protokoll." -LogOnly
                     Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HistoryLog $message -LogOnly } -Operation 'Windows-Updateverlauf via PSWindowsUpdate' -Target $name -ErrorRecord $_ -Context @('Fallback=Windows Update Agent COM API')
-                    $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $nativeWuaHistory -ArgumentList @($since, $MaxEventsPerTarget))
+                    $historyRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $nativeWuaHistory -ArgumentList @(1000))
                 }
             }
-            foreach ($event in @($historyRows | Sort-Object Date -Descending)) { Add-HistoryEvent -TargetResult $record -Event $event }
+            Write-HistoryLog "Windows-Verlauf auf ${name}: JEA/PSWindowsUpdate lieferte $(@($historyRows).Count) Rohereignis(se)." -LogOnly
+            $historyRows = @($historyRows | Where-Object { $_.Date -and ([datetime]$_.Date -ge $since) } | Sort-Object Date -Descending | Select-Object -First $MaxEventsPerTarget)
+            Write-HistoryLog "Windows-Verlauf auf ${name}: $(@($historyRows).Count) Ereignis(se) nach Zeitraumfilter." -LogOnly
+            if ($historyRows.Count -eq 0) {
+                Write-HistoryLog "Windows-Verlauf über JEA/PSWindowsUpdate auf $name war leer; prüfe Windows Update Agent COM-API über Standard-WinRM." -LogOnly
+                try {
+                    $nativeRows = @(Invoke-HistoryRemoteCommand -ComputerName $name -AuthInfo $authInfo -ScriptBlock $nativeWuaHistory -ArgumentList @(1000))
+                    Write-HistoryLog "Windows Update Agent COM-API auf $name lieferte $($nativeRows.Count) Rohereignis(se)." -LogOnly
+                    $historyRows = @($nativeRows |
+                        Where-Object { $_.Date -and ([datetime]$_.Date -ge $since) } |
+                        Sort-Object Date -Descending |
+                        Select-Object -First $MaxEventsPerTarget)
+                    Write-HistoryLog "Windows Update Agent COM-API auf $name lieferte $($historyRows.Count) Ereignis(se) nach Zeitraumfilter." -LogOnly
+                }
+                catch {
+                    Write-HistoryLog "Windows Update Agent COM-API über Standard-WinRM auf $name fehlgeschlagen; Details im Protokoll." -LogOnly
+                    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HistoryLog $message -LogOnly } -Operation 'Windows-Updateverlauf via Windows Update Agent COM API' -Target $name -ErrorRecord $_
+                    throw
+                }
+            }
+            foreach ($event in $historyRows) { Add-HistoryEvent -TargetResult $record -Event $event }
             $record.State = if ($record.Events.Count -gt 0) { 'Erfolg' } else { 'Leer' }
             $record.Message = if ($record.Events.Count -gt 0) { "$($record.Events.Count) Ereignis(se)" } else { 'Kein Updateverlauf im Zeitraum.' }
         }
