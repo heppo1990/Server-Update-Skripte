@@ -496,7 +496,13 @@ if [ "$CHECK_ONLY" = '1' ]; then echo 'Linux-Update-Pruefung abgeschlossen.'; el
         if ($LASTEXITCODE -ne 0) { throw "Linux-Update auf $RemoteHost wurde mit Exit-Code $LASTEXITCODE beendet." }
         return [PSCustomObject]@{ Success=$true; UpdateCount=$updateCount; UpdatedPackages=$updatedPackages; RebootRequired=$rebootRequired }
     }
-    finally { Remove-Item -LiteralPath $localScript -Force -ErrorAction SilentlyContinue }
+    finally {
+        try { Remove-Item -LiteralPath $localScript -Force -ErrorAction Stop }
+        catch {
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Lokales Linux-Update-Temporärskript entfernen' -Target $RemoteHost -ErrorRecord $_ -Context "Pfad=$localScript"
+            Write-LinuxLog -Message "WARNUNG: Temporäres Linux-Update-Skript konnte lokal nicht entfernt werden; Details stehen im Protokoll." -LogFile $LogFile -Level Warning
+        }
+    }
 }
 
 if (-not (Test-Path -LiteralPath $script:SSHPath)) { throw "OpenSSH-Client (ssh.exe) nicht gefunden: $script:SSHPath" }
