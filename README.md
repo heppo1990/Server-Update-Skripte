@@ -25,6 +25,7 @@ PowerShell 7 prüft zusätzlich PackageManagement auf Updates; auf Remotezielen 
 - Die Verteilung zeigt farbige Einrichtungsschritte, prüft bei Linux und Home Assistant nur SSH-Schlüssel und Verbindung und zählt alle Zielsysteme getrennt und gemeinsam. Zielarten mit Anzahl null werden in der Kopfzeile ausgeblendet. SSH-Rückfragen bleiben bei Check, Download, Install und Verteilung sichtbar; Details stehen gemäß `WriteLogFile` und `KeepLogFiles` im Log.
 - Check, Download und Install trennen Ergebnisblöcke je Ziel mit Leerzeilen. Zusammenfassungen nennen nur Systemarten, für die Ziele vorhanden sind.
 - Der Check prüft WindowsUpdateAdm-Versionen, Linux-SSH-/sudo-Einrichtungen und den Home-Assistant-SSH-Zugang. Fehlende oder veraltete Voraussetzungen werden in Konsole und Check-Mail als Handlungsbedarf gemeldet.
+- Bei Nicht-AD-Zielen erkennt die Verteilung bestehende WinRM-Zertifikatszuordnungen auch dann, wenn Windows ihre Schlüssel nur im WSMan-Attribut `Keys` liefert. Scheitert die Zertifikatsanmeldung, wird die Zuordnung anhand der einmalig eingegebenen lokalen Administrator-Anmeldedaten erneuert.
 - Nicht konfigurierte Linux- und Home-Assistant-Ziele werden still ausgelassen und nicht als übersprungen ausgegeben.
 - Zurückgestellte Windows-Updates und Neustart-Wartungsfenster werden über `UpdateSettings` konfiguriert.
 - Alle Skripte zeigen Ziele, Updates und Aktionen knapp, farbig und mit Leerzeilen getrennt. Installierte Paketmanager melden auch dann ihren Status, wenn keine Updates verfügbar sind; Fehlerdetails stehen im Log.

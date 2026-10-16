@@ -226,6 +226,7 @@ Richtet die sichere Update-Verbindung auf den Windows-Zielen ein oder aktualisie
 - AD-Rechner verwenden Kerberos und benötigen kein Client-Zertifikat.
 - Nicht-AD-Rechner verwenden WinRM über HTTPS mit Client-Zertifikat.
 - Bei einer Wiederholung prüft das Skript zuerst die Zertifikatsverbindung. Nur falls sie noch nicht funktioniert, werden einmalig lokale Administrator-Anmeldedaten abgefragt.
+- Die WinRM-Zertifikatszuordnung wird anhand der Schlüssel `Subject` und `Issuer` geprüft. Der WSMan-Provider liefert diese abhängig von der Windows-Version direkt oder als `Keys`-Liste. Wenn die Zertifikatsanmeldung scheitert und die Verteilung auf die Einrichtungs-Anmeldedaten zurückfällt, wird die Zuordnung für genau dieses Zertifikat-Subject mit dem geprüften lokalen Konto neu angelegt; dadurch wird auch ein möglicherweise veraltetes gespeichertes Kennwort ersetzt.
 - Das Admin-Share (`C$`) ist keine Voraussetzung.
 - Eigene Update-Service-Accounts werden nicht verwendet. Alte Konten `svc-updates` und `svc-wupdate-hv` werden bei der erneuten Einrichtung eines Nicht-AD-Geräts entfernt.
 - Die Verteilung übernimmt das am Nicht-AD-Ziel gebundene WinRM-Serverzertifikat in den vertrauenswürdigen Zertifikatsspeicher des Verwaltungsservers und prüft die anschließende Verbindung vollständig. Check, Download und Installation verwenden danach keine `SkipCACheck`- oder `SkipCNCheck`-Optionen mehr. Deshalb Ziele immer per DNS-Namen, nicht per IP-Adresse eintragen.

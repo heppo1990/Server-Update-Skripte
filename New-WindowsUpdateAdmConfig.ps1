@@ -535,40 +535,51 @@ try {
 
                 # Ein Mapping gilt nur dann als aktuell, wenn auch sein Issuer
                 # auf den gerade importierten Zertifikat-Thumbprint zeigt.
-                # WSMan:\ ist kein IPropertyCmdletProvider; die Eigenschaften
-                # stehen direkt am Child-Item.
+                # Der WSMan-Provider liefert diese Werte je nach Windows-Version
+                # direkt als Eigenschaften oder gebündelt in der Keys-Auflistung.
+                function Get-WUAdmClientCertificateMappingValue {
+                    param($Mapping, [string]$Name)
+                    $property = $Mapping.PSObject.Properties[$Name]
+                    if ($null -ne $property -and $null -ne $property.Value) {
+                        return [string]$property.Value
+                    }
+                    $keysProperty = $Mapping.PSObject.Properties['Keys']
+                    if ($null -ne $keysProperty -and $null -ne $keysProperty.Value) {
+                        foreach ($key in @($keysProperty.Value)) {
+                            $parts = ([string]$key) -split '=', 2
+                            if ($parts.Count -eq 2 -and $parts[0] -ieq $Name) {
+                                return [string]$parts[1]
+                            }
+                        }
+                    }
+                    return $null
+                }
                 $mappingSubject = "$($clientCert.Subject.Replace('CN=',''))@localhost"
                 $subjectMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
                     Where-Object {
-                        # Der WSMan-Provider liefert beim rekursiven Abruf auch
-                        # Container ohne Subject-Eigenschaft. Diese sind kein
-                        # Zertifikats-Mapping und werden sicher übersprungen.
-                        $subjectProperty = $_.PSObject.Properties['Subject']
-                        $null -ne $subjectProperty -and [string]$subjectProperty.Value -eq $mappingSubject
+                        (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject') -eq $mappingSubject
                     })
                 $currentMapping = @($subjectMappings | Where-Object {
-                    $issuerProperty = $_.PSObject.Properties['Issuer']
-                    $null -ne $issuerProperty -and [string]$issuerProperty.Value -eq $clientCert.Thumbprint
+                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
                 })
                 $certificateMappingConfirmed = $false
 
-                if ($currentMapping.Count -gt 0 -and -not $ForceUpdate) {
+                if ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
                     $certificateMappingConfirmed = $true
-                    Write-SetupLog "Zertifikat-Mapping für den aktuellen Thumbprint bereits vorhanden." "SUCCESS"
-                    foreach ($staleMapping in $subjectMappings | Where-Object {
-                        $issuerProperty = $_.PSObject.Properties['Issuer']
-                        $null -eq $issuerProperty -or [string]$issuerProperty.Value -ne $clientCert.Thumbprint
-                    }) {
-                        Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
+                    Write-SetupLog "Zertifikatverbindung wurde vor dem Setup bestätigt; Mapping für den aktuellen Thumbprint bleibt erhalten." "SUCCESS"
+                    if ($currentMapping.Count -gt 0) {
+                        foreach ($staleMapping in $subjectMappings | Where-Object {
+                            (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -ne $clientCert.Thumbprint
+                        }) {
+                            Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
+                        }
                     }
-                } elseif ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
-                    # Der Aufrufer setzt diesen Schalter nur, nachdem eine neue
-                    # WinRM-Sitzung mit genau dem aktuellen Client-Zertifikat
-                    # erfolgreich aufgebaut wurde. Das ist der maßgebliche
-                    # Funktionstest, auch wenn der WSMan-Provider Issuer nicht
-                    # zuverlässig zurückliefert.
+                } elseif ($currentMapping.Count -gt 0 -and -not $CertificateMappingCredential -and -not $ForceUpdate) {
+                    # Ohne Einrichtungsdaten kann ein vorhandener Eintrag nicht
+                    # erneuert werden. Die Verteilung bestätigt die Verbindung
+                    # normalerweise vorher und setzt dann PreserveExisting... .
                     $certificateMappingConfirmed = $true
-                    Write-SetupLog "Bestehende Zertifikatsverbindung wurde vor dem Setup erfolgreich geprüft; Mapping bleibt unverändert." "SUCCESS"
+                    Write-SetupLog "Zertifikat-Mapping für den aktuellen Thumbprint ist vorhanden; keine Einrichtungsdaten zum Erneuern übergeben." "SUCCESS"
                 } elseif (-not $CertificateMappingCredential) {
                     throw "Für ein neues oder zu erneuerndes Zertifikat-Mapping wurden keine Einrichtungs-Administrator-Anmeldedaten übergeben."
                 } else {
@@ -579,9 +590,12 @@ try {
                         $localUser = "$env:COMPUTERNAME\$localUser"
                     }
                     try {
-                        foreach ($staleMapping in $subjectMappings | Where-Object {
-                            $ForceUpdate -or $currentMapping -notcontains $_
-                        }) {
+                        # Diese Anmeldedaten wurden vom Aufrufer verwendet, wenn
+                        # die Client-Zertifikatsverbindung nicht funktioniert hat.
+                        # Daher alle Einträge genau dieses Zertifikat-Subjects
+                        # ersetzen, auch wenn Thumbprint und Subject schon passen:
+                        # das gespeicherte WinRM-Passwort kann veraltet sein.
+                        foreach ($staleMapping in $subjectMappings) {
                             Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
                         }
                         New-Item -Path WSMan:\localhost\ClientCertificate `
