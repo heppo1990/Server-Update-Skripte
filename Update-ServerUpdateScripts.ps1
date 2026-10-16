@@ -957,10 +957,26 @@ catch {
                         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedBootstrap) `
                         -Wait -PassThru -WindowStyle Hidden `
                         -RedirectStandardOutput $bootstrapStdoutPath -RedirectStandardError $bootstrapStderrPath -ErrorAction Stop
-                    foreach ($outputPath in @($bootstrapStdoutPath, $bootstrapStderrPath)) {
-                        if (Test-Path -LiteralPath $outputPath -PathType Leaf) {
-                            Get-Content -LiteralPath $outputPath -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ([string]$_) }
+                    $bootstrapStdout = if (Test-Path -LiteralPath $bootstrapStdoutPath -PathType Leaf) { @(Get-Content -LiteralPath $bootstrapStdoutPath -ErrorAction Stop) } else { @() }
+                    $bootstrapStderr = if (Test-Path -LiteralPath $bootstrapStderrPath -PathType Leaf) { @(Get-Content -LiteralPath $bootstrapStderrPath -ErrorAction Stop) } else { @() }
+                    $restartMarker = 'PowerShell 7 wurde aktualisiert; starte Install-ServersUpdates.ps1 mit der aktualisierten Version neu.'
+                    $restartMarkerIndex = [Array]::IndexOf([string[]]$bootstrapStdout, $restartMarker)
+                    $preflightStdout = if ($restartMarkerIndex -ge 0) { @($bootstrapStdout | Select-Object -First ($restartMarkerIndex + 1)) } else { @($bootstrapStdout) }
+                    Write-ServerUpdateUpdaterOutput -Phase 'PS7-Vorabprüfung' -Stream 'stdout' -Text ($preflightStdout -join [Environment]::NewLine)
+                    Write-ServerUpdateUpdaterOutput -Phase 'PS7-Vorabprüfung' -Stream 'stderr' -Text ($bootstrapStderr -join [Environment]::NewLine)
+
+                    foreach ($line in $preflightStdout) {
+                        $text = [string]$line
+                        if ($text -match '^(Prüfe mit Microsoft\.WinGet\.Client|WinGet ist nicht installiert; prüfe mit Windows PowerShell 5\.1 Chocolatey|PowerShell 7 wurde aktualisiert; starte Install-ServersUpdates)') {
+                            Write-Host $text
                         }
+                    }
+                    $preflightWarning = @($preflightStdout + $bootstrapStderr | Where-Object { ([string]$_) -match '(?i)(WARNUNG|WARNING|FEHLER|ERROR|failed|fehlgeschlagen|Exception)' }).Count -gt 0
+                    if ($preflightWarning -or $bootstrapProcess.ExitCode -ne 0) {
+                        Write-Warning 'PowerShell-7-Vorabprüfung meldete einen Fehler; der Installationslauf wird fortgesetzt. Details stehen im Updater-Protokoll.'
+                    }
+                    if ($restartMarkerIndex -ge 0 -and $restartMarkerIndex + 1 -lt $bootstrapStdout.Count) {
+                        foreach ($line in $bootstrapStdout[($restartMarkerIndex + 1)..($bootstrapStdout.Count - 1)]) { Write-Host ([string]$line) }
                     }
                 }
                 finally {
@@ -1041,6 +1057,30 @@ function Write-ServerUpdateUpdaterDiagnostic {
     }
     catch {
         Write-Verbose "Updater-Diagnose konnte nicht in Datei geschrieben werden: $($_.Exception.Message)"
+    }
+}
+
+function Write-ServerUpdateUpdaterOutput {
+    param(
+        [Parameter(Mandatory)][string]$Phase,
+        [Parameter(Mandatory)][string]$Stream,
+        [AllowEmptyString()][string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace([string]$script:ServerUpdateUpdaterLogPath)) { return }
+    try {
+        $logDirectory = Split-Path -Parent $script:ServerUpdateUpdaterLogPath
+        if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) {
+            New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        foreach ($line in ($Text -split "`r?`n")) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $entry = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [INFO] $Phase [$Stream] $line"
+            Add-Content -LiteralPath $script:ServerUpdateUpdaterLogPath -Value $entry -Encoding UTF8 -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Verbose "Updater-Ausgabe konnte nicht protokolliert werden: $($_.Exception.Message)"
     }
 }
 
