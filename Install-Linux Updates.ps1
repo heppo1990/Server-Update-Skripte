@@ -137,11 +137,20 @@ function Get-NextLinuxScheduledTime {
 }
 
 function Test-LinuxHostIsVirtual {
-    param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath)
+    param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile)
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
-    $arguments += "${RemoteUser}@${RemoteHost}", 'systemd-detect-virt --vm 2>/dev/null || true'
+    $arguments += "${RemoteUser}@${RemoteHost}", 'systemd-detect-virt --vm 2>/dev/null; result=$?; if [ "$result" -eq 1 ]; then exit 0; fi; exit "$result"'
     $output = & $script:SSHPath @arguments 2>&1
-    return -not [string]::IsNullOrWhiteSpace(($output -join '').Trim())
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-Virtualisierung vor Neustart bestimmen' -Target $RemoteHost -DiagnosticText ($output -join [Environment]::NewLine) -Context @("User=$RemoteUser", "SSHPath=$script:SSHPath", "ExitCode=$exitCode")
+        throw "Virtualisierungstyp auf $RemoteHost konnte nicht sicher bestimmt werden (SSH-Exitcode $exitCode)."
+    }
+    $virtualizationType = ($output -join '').Trim()
+    $isVirtual = -not [string]::IsNullOrWhiteSpace($virtualizationType)
+    $decision = if ($isVirtual) { "Linux-Host $RemoteHost als virtuelle Maschine erkannt ($virtualizationType)." } else { "Linux-Host $RemoteHost als physischer Computer erkannt." }
+    Write-LinuxLog -Message $decision -LogFile $LogFile
+    return $isVirtual
 }
 
 function Register-LinuxReboot {
@@ -185,19 +194,32 @@ function Register-LinuxReboot {
 }
 
 function Ensure-LinuxSSHKey {
-    param([Parameter(Mandatory)][string]$KeyPath)
+    param([Parameter(Mandatory)][string]$KeyPath, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile)
     $keyDirectory = Split-Path $KeyPath -Parent
     if (-not (Test-Path -LiteralPath $keyDirectory)) { New-Item -Path $keyDirectory -ItemType Directory -Force | Out-Null }
     $keygen = Get-Command -Name 'ssh-keygen.exe','ssh-keygen' -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $keygen) { throw 'OpenSSH-Keygen (ssh-keygen) wurde nicht gefunden.' }
     if (-not (Test-Path -LiteralPath $KeyPath)) {
-        & $keygen.Path -t ed25519 -f $KeyPath -N '' | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "SSH-Schlüssel konnte nicht erstellt werden: $KeyPath" }
+        $keygenOutput = @(& $keygen.Path -t ed25519 -f $KeyPath -N '' 2>&1)
+        $keygenExitCode = $LASTEXITCODE
+        if ($keygenExitCode -ne 0) {
+            $safeOutput = ($keygenOutput -join [Environment]::NewLine) -replace '(?m)^\s*(ssh-(?:rsa|ed25519)|ecdsa-sha2-\S+)\s+\S+.*$', '[öffentlicher Schlüssel ausgelassen]'
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Lokalen Linux-SSH-Schlüssel erstellen' -Target $KeyPath -DiagnosticText $safeOutput -Context "ssh-keygen=$($keygen.Path); ExitCode=$keygenExitCode"
+            throw "SSH-Schlüssel konnte nicht erstellt werden (Exitcode $keygenExitCode); Details stehen im Linux-Protokoll."
+        }
         if (-not $script:QuietMode) { Write-Host "Neuer ED25519-SSH-Schlüssel erstellt: $KeyPath" -ForegroundColor Green }
     }
     if (-not (Test-Path -LiteralPath "$KeyPath.pub")) {
-        & $keygen.Path -y -f $KeyPath | Set-Content -LiteralPath "$KeyPath.pub" -Encoding utf8
-        if ($LASTEXITCODE -ne 0) { throw "Öffentlicher SSH-Schlüssel konnte nicht erstellt werden: $KeyPath.pub" }
+        $publicKeyOutput = @(& $keygen.Path -y -P '' -f $KeyPath 2>&1)
+        $keygenExitCode = $LASTEXITCODE
+        if ($keygenExitCode -ne 0) {
+            $safeOutput = ($publicKeyOutput -join [Environment]::NewLine) -replace '(?m)^\s*(ssh-(?:rsa|ed25519)|ecdsa-sha2-\S+)\s+\S+.*$', '[öffentlicher Schlüssel ausgelassen]'
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Öffentlichen Linux-SSH-Schlüssel ableiten' -Target $KeyPath -DiagnosticText $safeOutput -Context "ssh-keygen=$($keygen.Path); ExitCode=$keygenExitCode"
+            throw "Öffentlicher SSH-Schlüssel konnte nicht erstellt werden (Exitcode $keygenExitCode); Details stehen im Linux-Protokoll."
+        }
+        $publicKey = ($publicKeyOutput | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\s*(ssh-(?:rsa|ed25519)|ecdsa-sha2-\S+)\s+\S+' } | Select-Object -First 1)
+        if ([string]::IsNullOrWhiteSpace($publicKey)) { throw "ssh-keygen lieferte keinen gültigen öffentlichen Schlüssel für $KeyPath." }
+        Set-Content -LiteralPath "$KeyPath.pub" -Value $publicKey.Trim() -Encoding utf8 -ErrorAction Stop
     }
 }
 
@@ -317,6 +339,7 @@ echo SUDOERS_CONFIGURED
 '@.Replace('__SUDOERS_B64__',$encodedSudoers).Replace('__SUDOERS_PATH__',$remoteSudoers).Replace('__REBOOT_HELPER_B64__',$encodedRebootHelper)
     $localScript = Join-Path ([IO.Path]::GetTempPath()) ("configure_update_sudo_{0}_{1}.sh" -f $safeUser,[guid]::NewGuid().ToString('N'))
     $localPassword = Join-Path ([IO.Path]::GetTempPath()) ("sudo_password_{0}_{1}.txt" -f $safeUser,[guid]::NewGuid().ToString('N'))
+    $stdoutFile = $null; $stderrFile = $null; $credentialCleanupFailed = $false
     $bstr = [IntPtr]::Zero
     try {
         [IO.File]::WriteAllText($localScript,($bootstrapScript -replace "`r`n","`n"),[Text.UTF8Encoding]::new($false))
@@ -341,10 +364,29 @@ echo SUDOERS_CONFIGURED
     }
     finally {
         if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-        Remove-Item -LiteralPath $localScript,$localPassword -Force -ErrorAction SilentlyContinue
-        $cleanupArguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
-        $cleanupArguments += "${RemoteUser}@${RemoteHost}", "rm -f $remoteScript"
-        & $script:SSHPath @cleanupArguments 2>$null | Out-Null
+        foreach ($temporaryFile in @($localPassword, $localScript, $stdoutFile, $stderrFile)) {
+            if ([string]::IsNullOrWhiteSpace([string]$temporaryFile) -or -not (Test-Path -LiteralPath $temporaryFile -PathType Leaf)) { continue }
+            try { Remove-Item -LiteralPath $temporaryFile -Force -ErrorAction Stop }
+            catch {
+                $isCredentialFile = $temporaryFile -eq $localPassword
+                $operation = if ($isCredentialFile) { 'Lokale temporäre Passwortdatei entfernen' } else { 'Temporäre Linux-Setupdatei entfernen' }
+                Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation $operation -Target $temporaryFile -ErrorRecord $_ -Context "RemoteHost=$RemoteHost; Kennwortinhalt wird nicht protokolliert; Passwortdatei=$isCredentialFile"
+                if ($isCredentialFile) { $credentialCleanupFailed = $true }
+            }
+        }
+        try {
+            $cleanupArguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
+            $cleanupArguments += "${RemoteUser}@${RemoteHost}", "rm -f $remoteScript"
+            $cleanupOutput = @(& $script:SSHPath @cleanupArguments 2>&1)
+            $cleanupExitCode = $LASTEXITCODE
+            if ($cleanupExitCode -ne 0) {
+                Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Temporäres Linux-Setupskript entfernen' -Target $RemoteHost -DiagnosticText ($cleanupOutput -join [Environment]::NewLine) -Context "User=$RemoteUser; SSHPath=$script:SSHPath; ExitCode=$cleanupExitCode; RemotePath=$remoteScript"
+            }
+        }
+        catch {
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Temporäres Linux-Setupskript entfernen' -Target $RemoteHost -ErrorRecord $_ -Context "User=$RemoteUser; RemotePath=$remoteScript"
+        }
+        if ($credentialCleanupFailed) { throw 'Temporäre sudo-Passwortdatei konnte nicht entfernt werden; Details stehen im Linux-Protokoll.' }
     }
     if (-not (Test-LinuxUpdateSudo -RemoteHost $RemoteHost -RemoteUser $RemoteUser -KeyPath $KeyPath -LogFile $LogFile)) { throw 'NOPASSWD konnte nicht verifiziert werden.' }
     Write-LinuxLog -Message "NOPASSWD für Updates wurde auf $RemoteHost eingerichtet und geprüft." -LogFile $LogFile -Level Success
@@ -462,7 +504,6 @@ if (-not (Test-Path -LiteralPath $script:SCPPath)) { throw "OpenSSH-Kopierprogra
 if ($CheckOnly) { $DryRun = $true }
 # Der Check ermittelt den Einrichtungsstatus nur lesend. Schlüssel und sudo-Regeln
 # werden ausschließlich durch Download/Installation bzw. die Verteilung eingerichtet.
-if (-not $CheckOnly) { Ensure-LinuxSSHKey -KeyPath $KeyPath }
 if ($script:WriteExecutionLog -and -not (Test-Path -LiteralPath $script:LogDirectory)) { New-Item -Path $script:LogDirectory -ItemType Directory -Force | Out-Null }
 $hostEntries = @(
     foreach ($entry in @($linuxSettings.Hosts)) {
@@ -491,6 +532,7 @@ foreach ($entry in $hostEntries) {
     Write-LinuxLog -Message $actionHeading -LogFile $logFile
     $setupIssue = ''
     try {
+        if (-not $CheckOnly) { Ensure-LinuxSSHKey -KeyPath $KeyPath -LogFile $logFile }
         if ($CheckOnly) {
             if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
                 $setupIssue = 'Lokaler SSH-Privatschlüssel fehlt; Linux-Verteilung erforderlich.'
@@ -522,7 +564,7 @@ foreach ($entry in $hostEntries) {
         $totalUpdatesInstalled += $result.UpdateCount
         if (-not $DryRun -and $result.RebootRequired) {
             try {
-                $isVirtual = Test-LinuxHostIsVirtual -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath
+                $isVirtual = Test-LinuxHostIsVirtual -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile
                 $rebootScheduled = Register-LinuxReboot -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -IsVirtual $isVirtual -LogFile $logFile
             } catch {
                 $rebootError = $_
