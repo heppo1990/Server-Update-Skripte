@@ -1849,7 +1849,17 @@ try {
     $response = @{ Success = $true; Results = @($items) }
 }
 catch {
-    $response = @{ Success = $false; Error = $_.Exception.Message; Results = @() }
+    $errorRecord = $_
+    $response = @{
+        Success = $false
+        Error = [string]$errorRecord.Exception.Message
+        ErrorId = [string]$errorRecord.FullyQualifiedErrorId
+        Category = [string]$errorRecord.CategoryInfo.Category
+        Position = if ($errorRecord.InvocationInfo) { [string]$errorRecord.InvocationInfo.PositionMessage } else { '' }
+        ScriptStackTrace = [string]$errorRecord.ScriptStackTrace
+        ExceptionType = [string]$errorRecord.Exception.GetType().FullName
+        Results = @()
+    }
 }
 [IO.File]::WriteAllText($ResponsePath, (ConvertTo-Json -InputObject $response -Depth 20 -Compress), [Text.UTF8Encoding]::new($false))
 '@
@@ -1892,7 +1902,15 @@ catch {
         if (-not $response.Success) {
             $stdout = if (Test-Path -LiteralPath $stdoutPath) { (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
             $stderr = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
-            throw "$OperationName fehlgeschlagen. Ursache: $([string]$response.Error) Ausgabe: $stdout Fehlerausgabe: $stderr"
+            $failureDetails = @(
+                "$OperationName fehlgeschlagen. Ursache: $([string]$response.Error)"
+                "Fehlertyp: $([string]$response.ExceptionType); ErrorId: $([string]$response.ErrorId); Kategorie: $([string]$response.Category)"
+                "Position: $([string]$response.Position)"
+                "Stacktrace: $([string]$response.ScriptStackTrace)"
+                "Ausgabe: $stdout"
+                "Fehlerausgabe: $stderr"
+            ) -join [Environment]::NewLine
+            throw $failureDetails
         }
         return @($response.Results)
     }
