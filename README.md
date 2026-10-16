@@ -14,6 +14,7 @@ Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen 
 
 Beim PSWindowsUpdate-Check werden NuGet und PSWindowsUpdate auf dem Verwaltungsrechner und den Windows-Zielen geprüft und bei Bedarf aktualisiert.
 PowerShell 7 prüft zusätzlich PackageManagement auf Updates; auf Remotezielen erfolgt das nur, wenn PowerShell 7 installiert ist.
+Bei der WindowsUpdateAdm-Verteilung lädt der Verwaltungsserver PSWindowsUpdate und – sofern WinGet-Updates aktiviert sind – Microsoft.WinGet.Client vorab als Offline-Pakete. Die Ziele benötigen dafür keinen Zugriff auf NuGet oder PSGallery; temporäre Paketablagen werden nach der Verteilung entfernt.
 
 ## Wichtig
 

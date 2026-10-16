@@ -207,6 +207,55 @@ if ($nonAdTargets.Count -gt 0) {
     }
 }
 
+# Module werden einmal auf dem Verwaltungsserver aus PSGallery gespeichert und
+# danach ausschließlich als temporäres Offline-Paket an die Ziele übertragen.
+$script:OfflineModulePayloadRoot = $null
+if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
+    $moduleNames = @('PSWindowsUpdate')
+    if ($enableWingetUpdates) { $moduleNames += 'Microsoft.WinGet.Client' }
+    $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdateAdm-ModulePayload-{0}' -f [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $payloadRoot -Force -ErrorAction Stop | Out-Null
+    foreach ($moduleName in $moduleNames) {
+        $modulePayload = Join-Path $payloadRoot $moduleName
+        $previousProgress = $ProgressPreference
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            Save-Module -Name $moduleName -Repository PSGallery -Path $payloadRoot -IncludeDependencies -Force -ErrorAction Stop | Out-Null
+            if (-not (Test-Path -LiteralPath $modulePayload -PathType Container)) { throw "Save-Module hat kein Paket für $moduleName abgelegt." }
+            Write-DeployLog "Modul $moduleName für Offline-Verteilung vorbereitet." -LogOnly
+        }
+        catch {
+            if (Test-Path -LiteralPath $modulePayload) { Remove-Item -LiteralPath $modulePayload -Recurse -Force -ErrorAction SilentlyContinue }
+            $localModule = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if ($localModule) {
+                try {
+                    $fallbackVersion = Join-Path $modulePayload ([string]$localModule.Version)
+                    New-Item -ItemType Directory -Path $fallbackVersion -Force -ErrorAction Stop | Out-Null
+                    Copy-Item -Path (Join-Path $localModule.ModuleBase '*') -Destination $fallbackVersion -Recurse -Force -ErrorAction Stop
+                    Write-DeployLog "PSGallery-Download für $moduleName fehlgeschlagen; lokale Version $($localModule.Version) wird als Offline-Fallback verwendet." -Level Warning
+                }
+                catch {
+                    Write-DeployLog "Offline-Paket für $moduleName konnte nicht erstellt werden: $($_.Exception.Message)" -Level Warning
+                }
+            } else {
+                Write-DeployLog "Offline-Paket für $moduleName konnte nicht geladen werden; Ursache: $($_.Exception.Message)" -Level Warning
+            }
+        }
+        finally {
+            if ($null -ne $previousProgress) { $ProgressPreference = $previousProgress }
+        }
+    }
+    $stagedModules = @(Get-ChildItem -LiteralPath $payloadRoot -Directory -ErrorAction SilentlyContinue)
+    if ($stagedModules.Count -gt 0) {
+        $script:OfflineModulePayloadRoot = $payloadRoot
+        Write-DeployLog "Offline-Modulpakete bereit; PSGallery-Zugriff wird nur auf dem Verwaltungsserver benötigt." -Level Info
+    } else {
+        Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Write-DeployLog 'Keine Offline-Modulpakete verfügbar; das Setup versucht den bisherigen Onlineweg.' -Level Warning
+    }
+}
+
 # Ergebnis-Tracking
 $Results      = @()
 $SuccessCount = 0
@@ -262,6 +311,7 @@ function Invoke-WinRMDeployment {
         [string]$Servername,
         [string]$PSSCfgSkriptFile,
         [string]$RootDirectory,
+        [string]$OfflineModulePayloadRoot,
         [string]$DeployType,
         [switch]$CleanupLegacyTempOnly
     )
@@ -464,6 +514,12 @@ function Invoke-WinRMDeployment {
         Copy-Item -Path (Join-Path $RootDirectory $CommonModuleFile) `
                   -Destination (Join-Path $remoteTemp $CommonModuleFile) `
                   -ToSession $session -Force -ErrorAction Stop
+        if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
+            foreach ($moduleDirectory in @(Get-ChildItem -LiteralPath $OfflineModulePayloadRoot -Directory -ErrorAction Stop)) {
+                Copy-Item -LiteralPath $moduleDirectory.FullName -Destination $remoteTemp `
+                          -ToSession $session -Recurse -Force -ErrorAction Stop
+            }
+        }
 
         # AD-Geräte erhalten weder Client-Zertifikat noch Zertifikats-Mapping.
         if ($DeployType -ne 'AD') {
@@ -477,6 +533,9 @@ function Invoke-WinRMDeployment {
 
         $setupParameters = @{}
         if ($enableWingetUpdates) { $setupParameters.InstallWinGetClientModule = $true }
+        if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
+            $setupParameters.OfflineModuleRoot = $remoteTemp
+        }
         if ($DeployType -ne 'AD') { $setupParameters.EnableClientCertificateRemoting = $true }
         if ($DeployType -eq 'Hypervisor' -and -not $usedCertificate) {
             $setupParameters.CertificateMappingCredential = $bootstrapCredential
@@ -713,6 +772,7 @@ function Invoke-ServerDeployment {
         [string]$Servername,
         [string]$PSSCfgSkriptFile,
         [string]$RootDirectory,
+        [string]$OfflineModulePayloadRoot,
         [string]$DeployType = "AD",
         [switch]$CleanupLegacyTempOnly
     )
@@ -744,6 +804,7 @@ function Invoke-ServerDeployment {
                 -Servername $Servername `
                 -PSSCfgSkriptFile $PSSCfgSkriptFile `
                 -RootDirectory $RootDirectory `
+                -OfflineModulePayloadRoot $OfflineModulePayloadRoot `
                 -DeployType $DeployType `
                 -CleanupLegacyTempOnly:$CleanupLegacyTempOnly
         }
@@ -773,6 +834,9 @@ function Invoke-ServerDeployment {
         Write-DeployLog "[$Servername] Führe lokales Setup aus."
         $localParameters = @{}
         if ($enableWingetUpdates) { $localParameters.InstallWinGetClientModule = $true }
+        if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
+            $localParameters.OfflineModuleRoot = $OfflineModulePayloadRoot
+        }
         # Alle Details protokollieren; wichtige Setup-Phasen live anzeigen,
         # damit längere lokale Einrichtungsschritte erkennbar bleiben.
         & (Join-Path $RootDirectory $PSSCfgSkriptFile) @localParameters *>&1 | ForEach-Object {
@@ -810,6 +874,7 @@ function Invoke-ServerDeployment {
 }
 
 # Server verarbeiten
+try {
 ForEach ($Server in $Serverlist) {
     $Servername = $Server.Name
     if ([String]::IsNullOrWhiteSpace($Servername)) {
@@ -836,6 +901,7 @@ ForEach ($Server in $Serverlist) {
             -Servername                $Servername `
             -PSSCfgSkriptFile          $PSSCfgSkriptFile `
             -RootDirectory             $PSScriptRoot `
+            -OfflineModulePayloadRoot $script:OfflineModulePayloadRoot `
             -DeployType                $deployTypeLabel `
             -CleanupLegacyTempOnly:$CleanupLegacyTempOnly
     }
@@ -863,6 +929,17 @@ ForEach ($Server in $Serverlist) {
         Write-DeployLog "[$Servername] FEHLER – Einrichtung fehlgeschlagen; Details im Log." -Level Error -ConsoleOnly
     } else {
         Write-DeployLog "[$Servername] Übersprungen – $($deployResult.Message)" -Level Warning -ConsoleOnly
+    }
+}
+}
+finally {
+    if ($script:OfflineModulePayloadRoot -and (Test-Path -LiteralPath $script:OfflineModulePayloadRoot)) {
+        try {
+            Remove-Item -LiteralPath $script:OfflineModulePayloadRoot -Recurse -Force -ErrorAction Stop
+            Write-DeployLog 'Temporäre Offline-Modulpakete auf dem Verwaltungsserver bereinigt.' -LogOnly
+        } catch {
+            Write-DeployLog "Temporäre Offline-Modulpakete konnten nicht entfernt werden: $($_.Exception.Message)" -Level Warning
+        }
     }
 }
 

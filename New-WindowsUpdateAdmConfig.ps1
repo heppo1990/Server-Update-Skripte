@@ -64,6 +64,11 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$InstallWinGetClientModule,
 
+    # Temporärer Stammordner mit auf dem Verwaltungsserver bereitgestellten
+    # Offline-Modulpaketen (Modulname\Version). Wird nach dem Setup entfernt.
+    [Parameter(Mandatory=$false)]
+    [string]$OfflineModuleRoot,
+
     # Computerkonto des Verwaltungsservers. Dieses erhält ausschließlich die
     # eingeschränkte JEA-Rolle für Update-Abfragen aus einem SYSTEM-Aufgabenlauf.
     [Parameter(Mandatory=$false)]
@@ -164,10 +169,12 @@ try {
     Write-SetupLog "Computer: $env:COMPUTERNAME" "INFO"
     Write-SetupLog "PowerShell Version: $($PSVersionTable.PSVersion)" "INFO"
     Write-SetupLog "TLS-Protokolle: $([Net.ServicePointManager]::SecurityProtocol)" "INFO"
+    $offlineRoot = if ($OfflineModuleRoot) { $OfflineModuleRoot } else { $PSScriptRoot }
+    $offlinePSWU = Join-Path $offlineRoot 'PSWindowsUpdate'
 
     if ($InstallWinGetClientModule) {
         Write-SetupLog "=== WinGet-Client-Modul ===" "INFO"
-        $winGetClientReady = Update-WinGetClientModule -WriteLog {
+        $winGetClientReady = Update-WinGetClientModule -OfflineModulePath $offlineRoot -WriteLog {
             param($message, $level)
             Write-SetupLog $message $level
         }
@@ -184,18 +191,26 @@ try {
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== NuGet Provider Check ===" "INFO"
     
-    $nugetReady = Update-NuGetProvider -Force:$ForceUpdate -WriteLog {
-        param($message, $level)
-        Write-SetupLog $message $level
-    }
-    if (-not $nugetReady) {
-        Write-SetupLog 'PSWindowsUpdate-Installation wird möglicherweise fehlschlagen.' 'WARN'
+    $offlineModulesPresent = Test-Path -LiteralPath $offlinePSWU -PathType Container
+    if ($offlineModulesPresent) {
+        Write-SetupLog 'Offline-Modulpakete bereitgestellt; NuGet- und PSGallery-Bootstrap auf dem Ziel wird übersprungen.' 'INFO'
+    } else {
+        $nugetReady = Update-NuGetProvider -Force:$ForceUpdate -WriteLog {
+            param($message, $level)
+            Write-SetupLog $message $level
+        }
+        if (-not $nugetReady) {
+            Write-SetupLog 'PSWindowsUpdate-Installation wird möglicherweise fehlschlagen.' 'WARN'
+        }
     }
     # === PowerShell Gallery konfigurieren
     # =========================================================
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== PowerShell Gallery Konfiguration ===" "INFO"
     
+    if ($offlineModulesPresent) {
+        Write-SetupLog 'PSGallery-Konfiguration übersprungen; PSWindowsUpdate wird aus dem bereitgestellten Offline-Paket gepflegt.' 'INFO'
+    } else {
     try {
         $PSGallery = Get-PSRepository -Name PSGallery -ErrorAction Stop
         if ($PSGallery.InstallationPolicy -ne 'Trusted') {
@@ -210,6 +225,7 @@ try {
         Write-SetupLog 'PSGallery-Konfiguration übersprungen; Details im Setup-Protokoll.' 'WARN'
         Write-SetupDiagnostic -Operation 'PSGallery-Konfiguration' -ErrorRecord $_
     }
+    }
     
     # =========================================================
     # === PSWindowsUpdate installieren/aktualisieren (mit Retry)
@@ -217,7 +233,6 @@ try {
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== PSWindowsUpdate Installation/Update ===" "INFO"
     
-    $offlinePSWU = Join-Path $PSScriptRoot 'PSWindowsUpdate'
     $Success = Update-PSWindowsUpdateModule -Force:$ForceUpdate -OfflineModulePath $offlinePSWU `
         -WriteLog { param($message, $level) Write-SetupLog $message $level }
 
@@ -1143,8 +1158,15 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== Installierte Versionen ===" "INFO"
     
-    $NuGetVer = (Get-PackageProvider -Name NuGet).Version
-    Write-SetupLog "NuGet Provider: $NuGetVer" "INFO"
+    $NuGetProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending | Select-Object -First 1
+    if ($NuGetProvider) {
+        Write-SetupLog "NuGet Provider: $($NuGetProvider.Version)" "INFO"
+    } elseif ($offlineModulesPresent) {
+        Write-SetupLog 'NuGet Provider: nicht installiert (Offline-Modulpakete verwendet; auf dem Ziel nicht erforderlich).' 'INFO'
+    } else {
+        Write-SetupLog 'NuGet Provider: nicht verfügbar; Online-Modulpflege auf diesem Ziel ist eingeschränkt.' 'WARN'
+    }
     
     foreach ($TargetBase in @($PS5Path, $PS7Path)) {
     $Label = if ($TargetBase -contains "WindowsPowerShell") { "PS 5.1" } else { "PS 7  " }

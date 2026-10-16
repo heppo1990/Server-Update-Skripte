@@ -548,7 +548,42 @@ function Update-PSWindowsUpdateModule {
     $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
         Sort-Object Version -Descending | Select-Object -First 1
     $galleryVersion = $null
+    $offlineVersions = @()
+    if ($OfflineModulePath -and (Test-Path -LiteralPath $OfflineModulePath -PathType Container)) {
+        $offlineVersions = @(Get-ChildItem -LiteralPath $OfflineModulePath -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+)*$' } |
+            Sort-Object { [version]$_.Name } -Descending)
+    }
+    $offlineHandled = $false
+    if ($offlineVersions.Count -gt 0) {
+        $offlineVersion = [version]$offlineVersions[0].Name
+        if (-not $installedModule -or $offlineVersion -gt $installedModule.Version -or $Force) {
+            try {
+                $offlineTarget = Join-Path (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules') 'PSWindowsUpdate'
+                $offlineTargetVersion = Join-Path $offlineTarget ([string]$offlineVersion)
+                New-Item -ItemType Directory -Path $offlineTarget -Force -ErrorAction Stop | Out-Null
+                if (Test-Path -LiteralPath $offlineTargetVersion) {
+                    Remove-Item -LiteralPath $offlineTargetVersion -Recurse -Force -ErrorAction Stop
+                }
+                Copy-Item -LiteralPath $offlineVersions[0].FullName -Destination $offlineTargetVersion -Recurse -Force -ErrorAction Stop
+                $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
+                    Sort-Object Version -Descending | Select-Object -First 1
+                if (-not $installedModule -or $installedModule.Version -lt $offlineVersion) {
+                    throw "PSWindowsUpdate $offlineVersion wurde aus dem Offline-Paket nicht gefunden."
+                }
+                Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate aus Offline-Paket bereitgestellt (Version $($installedModule.Version)); NuGet/PSGallery auf dem Ziel nicht erforderlich." 'SUCCESS'
+                $offlineHandled = $true
+            }
+            catch {
+                Write-PSWindowsUpdateModuleLog $WriteLog "Offline-Bereitstellung von PSWindowsUpdate fehlgeschlagen: $($_.Exception.Message)" 'WARN'
+            }
+        } else {
+            Write-PSWindowsUpdateModuleLog $WriteLog "Offline-Paket PSWindowsUpdate $offlineVersion geprüft; vorhandene Version $($installedModule.Version) bleibt erhalten." 'SUCCESS'
+            $offlineHandled = $true
+        }
+    }
 
+    if (-not $offlineHandled) {
     try {
         $null = Update-NuGetProvider -WriteLog $WriteLog -Force:$Force
         $null = Update-PS7PackageManagementModule -WriteLog $WriteLog -Force:$Force
@@ -583,6 +618,7 @@ function Update-PSWindowsUpdateModule {
     }
     catch {
         Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Onlineprüfung fehlgeschlagen: $($_.Exception.Message)" 'WARN'
+    }
     }
 
     $sourceModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
@@ -661,12 +697,13 @@ function Update-WinGetClientModule {
     [CmdletBinding()]
     param(
         [scriptblock]$WriteLog,
+        [string]$OfflineModulePath,
         [string]$ComputerName,
         $AuthInfo
     )
 
     $worker = {
-        param()
+        param([string]$OfflineModulePath)
         $ErrorActionPreference = 'Stop'
         $ProgressPreference = 'SilentlyContinue'
         $logs = [System.Collections.Generic.List[object]]::new()
@@ -686,6 +723,38 @@ try {
         $windowsPowerShellModulePaths += Join-Path ${env:ProgramFiles(x86)} 'WindowsPowerShell\Modules'
     }
     $env:PSModulePath = ($windowsPowerShellModulePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) -join ';'
+    $offlinePathEncoded = '__OFFLINE_MODULE_PATH__'
+    $offlineModulePath = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($offlinePathEncoded))
+    if ($offlineModulePath -and (Test-Path -LiteralPath $offlineModulePath -PathType Container)) {
+        $offlineClientRoot = Join-Path $offlineModulePath 'Microsoft.WinGet.Client'
+        $offlineClientVersions = @(Get-ChildItem -LiteralPath $offlineClientRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+)*$' } |
+            Sort-Object { [version]$_.Name } -Descending)
+        if ($offlineClientVersions.Count -gt 0) {
+            $offlineModules = @(Get-ChildItem -LiteralPath $offlineModulePath -Directory -ErrorAction SilentlyContinue)
+            $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
+            foreach ($offlineModule in $offlineModules) {
+                $versionFolders = @(Get-ChildItem -LiteralPath $offlineModule.FullName -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^\d+(\.\d+)*$' })
+                foreach ($versionFolder in $versionFolders) {
+                    $targetVersion = Join-Path (Join-Path $moduleRoot $offlineModule.Name) $versionFolder.Name
+                    if (-not (Test-Path -LiteralPath $targetVersion -PathType Container)) {
+                        New-Item -ItemType Directory -Path (Split-Path -Parent $targetVersion) -Force -ErrorAction Stop | Out-Null
+                        Copy-Item -LiteralPath $versionFolder.FullName -Destination $targetVersion -Recurse -Force -ErrorAction Stop
+                    }
+                }
+            }
+            $stagedVersion = [version]$offlineClientVersions[0].Name
+            $installedOffline = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if (-not $installedOffline -or $installedOffline.Version -lt $stagedVersion) {
+                throw "Microsoft.WinGet.Client $stagedVersion wurde bereitgestellt, ist aber nach der Kopie nicht auffindbar."
+            }
+            $state = if ($installedOffline.Version -gt $stagedVersion) { 'vorhandene neuere Version beibehalten' } else { 'aus Offline-Paket bereitgestellt/geprüft' }
+            "__WINGETCLIENT__SUCCESS`t$($installedOffline.Version)`t$state"
+            exit 0
+        }
+    }
     Import-Module PackageManagement -ErrorAction Stop
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $minimumNuGetVersion = [version]'2.8.5.201'
@@ -720,6 +789,10 @@ catch {
     exit 1
 }
 '@
+            $offlinePathEncoded = if ([string]::IsNullOrWhiteSpace($OfflineModulePath)) { '' } else {
+                [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($OfflineModulePath))
+            }
+            $childScript = $childScript.Replace('__OFFLINE_MODULE_PATH__', $offlinePathEncoded)
             $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
             $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
@@ -766,14 +839,14 @@ catch {
     }
 
     if ([string]::IsNullOrWhiteSpace($ComputerName) -or $ComputerName -ieq $env:COMPUTERNAME -or $ComputerName -ieq 'localhost') {
-        $results = @(& $worker)
+        $results = @(& $worker $OfflineModulePath)
     }
     else {
         $session = $null
         try {
             $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
             $session = New-PSSession @sessionParameters
-            $results = @(Invoke-Command -Session $session -ScriptBlock $worker -ErrorAction Stop)
+            $results = @(Invoke-Command -Session $session -ScriptBlock $worker -ArgumentList $OfflineModulePath -ErrorAction Stop)
         }
         catch {
             Write-PSWindowsUpdateModuleLog $WriteLog "WinGet-Client-Modulpflege auf $ComputerName fehlgeschlagen: $($_.Exception.Message)" 'WARN'
@@ -2247,7 +2320,8 @@ finally {
     }
 }
 '@
-            $bootstrapScript = $bootstrapScript.Replace('__REFRESH_SOURCE__', [string]([bool]$Refresh).ToString().ToLowerInvariant())
+            $refreshSourceLiteral = if ($Refresh) { '$true' } else { '$false' }
+            $bootstrapScript = $bootstrapScript.Replace('__REFRESH_SOURCE__', $refreshSourceLiteral)
             $shellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if (-not (Test-Path -LiteralPath $shellPath -PathType Leaf)) {
                 throw 'Windows PowerShell 5.1 wurde für die WinGet-Quellenregistrierung nicht gefunden.'
