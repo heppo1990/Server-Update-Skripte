@@ -1685,7 +1685,8 @@ function Invoke-WindowsUpdateRemoteCommandWithTimeout {
         [Parameter(Mandatory)][scriptblock]$ScriptBlock,
         [object[]]$ArgumentList = @(),
         [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300,
-        [Parameter(Mandatory)][string]$OperationName
+        [Parameter(Mandatory)][string]$OperationName,
+        [scriptblock]$WriteLog
     )
 
     $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
@@ -1697,8 +1698,18 @@ function Invoke-WindowsUpdateRemoteCommandWithTimeout {
         $job = Invoke-Command @invokeParameters
         $completedJob = Wait-Job -Job $job -Timeout $TimeoutSeconds
         if (-not $completedJob) {
-            try { $null = Stop-Job -Job $job -ErrorAction SilentlyContinue } catch { }
-            throw [System.TimeoutException]::new("$OperationName hat das Zeitlimit von $TimeoutSeconds Sekunden überschritten.")
+            $timeoutDetails = [System.Collections.Generic.List[string]]::new()
+            try { $null = Stop-Job -Job $job -ErrorAction Stop }
+            catch { $timeoutDetails.Add("Stop-Job fehlgeschlagen: $($_.Exception.ToString())") }
+            try {
+                $partialOutput = (@(Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-String -Width 400) -join '').Trim()
+                if ($partialOutput.Length -gt 3000) { $partialOutput = $partialOutput.Substring(0, 3000) + ' … [gekürzt]' }
+                if (-not [string]::IsNullOrWhiteSpace($partialOutput)) { $timeoutDetails.Add("Teilausgabe vor dem Zeitlimit: $partialOutput") }
+            }
+            catch { $timeoutDetails.Add("Teilausgabe konnte nicht gelesen werden: $($_.Exception.ToString())") }
+            $detailText = $timeoutDetails -join [Environment]::NewLine
+            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation $OperationName -Target $ComputerName -DiagnosticText $detailText -Context "Zeitlimit=${TimeoutSeconds}s; JobStatus=$($job.State)"
+            throw [System.TimeoutException]::new("$OperationName hat das Zeitlimit von $TimeoutSeconds Sekunden überschritten. $detailText")
         }
         if ($job.State -ne 'Completed') {
             $reason = @($job.ChildJobs | ForEach-Object { $_.JobStateInfo.Reason.Message } | Where-Object { $_ }) -join '; '
@@ -1710,9 +1721,11 @@ function Invoke-WindowsUpdateRemoteCommandWithTimeout {
     finally {
         if ($job) {
             if ($job.State -in @('Running', 'NotStarted')) {
-                try { $null = Stop-Job -Job $job -ErrorAction SilentlyContinue } catch { }
+                try { $null = Stop-Job -Job $job -ErrorAction Stop }
+                catch { Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "${OperationName}: Job stoppen" -Target $ComputerName -ErrorRecord $_ -Context "JobStatus=$($job.State)" }
             }
-            try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch { }
+            try { Remove-Job -Job $job -Force -ErrorAction Stop }
+            catch { Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "${OperationName}: Job entfernen" -Target $ComputerName -ErrorRecord $_ -Context "JobStatus=$($job.State)" }
         }
     }
 }
@@ -1721,7 +1734,8 @@ function Get-WindowsUpdateTargetOperatingSystem {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
         $AuthInfo,
-        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 30
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 30,
+        [scriptblock]$WriteLog
     )
 
     $localNames = @($env:COMPUTERNAME, [System.Net.Dns]::GetHostName()) | Where-Object { $_ }
@@ -1736,7 +1750,7 @@ function Get-WindowsUpdateTargetOperatingSystem {
     }
 
     $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
-        -ScriptBlock $probe -TimeoutSeconds $TimeoutSeconds -OperationName "Windows-Version auf $ComputerName ermitteln")
+        -ScriptBlock $probe -TimeoutSeconds $TimeoutSeconds -OperationName "Windows-Version auf $ComputerName ermitteln" -WriteLog $WriteLog)
     if ($result.Count -eq 0) { throw "Windows-Version auf '$ComputerName' lieferte keine Daten." }
     return $result[-1]
 }
@@ -1788,7 +1802,7 @@ function Reset-WindowsUpdateRemoteWinGetSources {
             # AppX kann vorübergehend mit einem zum Löschen markierten Schlüssel
             # scheitern; nur diesen bekannten transienten Fehler einmal erneut versuchen.
             $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
-                -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName "Quellenreset auf $ComputerName")
+                -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName "Quellenreset auf $ComputerName" -WriteLog $WriteLog)
             if ($result.Count -eq 0 -or -not $result[-1].Success) { throw "Quellenreset auf $ComputerName lieferte keine Erfolgsbestätigung." }
             if ($attempt -gt 1) { Write-CommonLog $WriteLog "WinGet-Quellenreset auf $ComputerName nach einmaliger Wiederholung erfolgreich." }
             return $result[-1]
@@ -1921,11 +1935,11 @@ catch {
 }
 
 function Reset-WindowsUpdateLocalWinGetSources {
-    param([ValidateRange(1, 3600)][int]$TimeoutSeconds = 300)
+    param([ValidateRange(1, 3600)][int]$TimeoutSeconds = 300, [scriptblock]$WriteLog)
     # Quellenreset wie jede andere WinGet-Aktion im Zielkontext ausführen;
     # der lokale Start-Process-Worker löste denselben WinGet-COM-Fehler aus.
     return Reset-WindowsUpdateRemoteWinGetSources -ComputerName $env:COMPUTERNAME `
-        -TimeoutSeconds $TimeoutSeconds
+        -TimeoutSeconds $TimeoutSeconds -WriteLog $WriteLog
 }
 
 function Invoke-WindowsUpdatePackageWorker {
@@ -1937,7 +1951,8 @@ function Invoke-WindowsUpdatePackageWorker {
         [bool]$IsLocalTarget = $false,
         [switch]$NoTimeout,
         [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300,
-        [Parameter(Mandatory)][string]$OperationName
+        [Parameter(Mandatory)][string]$OperationName,
+        [scriptblock]$WriteLog
     )
 
     # Lokale Paketmanager-Prüfungen liefen zuvor in einem versteckten
@@ -1955,7 +1970,7 @@ function Invoke-WindowsUpdatePackageWorker {
     }
 
     return @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $workerComputerName -AuthInfo $AuthInfo `
-        -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds -OperationName $OperationName)
+        -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds -OperationName $OperationName -WriteLog $WriteLog)
 }
 
 function ConvertTo-WindowsUpdatePackageRows {
@@ -3239,6 +3254,7 @@ catch {
                 ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','))
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
+                WriteLog = $WriteLog
             }
             if ($hasCheckTimeout) { $initialParameters.TimeoutSeconds = $wingetTimeoutSeconds }
             else { $initialParameters.NoTimeout = $true }
@@ -3279,7 +3295,7 @@ catch {
             try {
                 if ($retryRequiresSourceReset) {
                     if ($isLocalTarget) {
-                        $null = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds $wingetTimeoutSeconds
+                        $null = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds $wingetTimeoutSeconds -WriteLog $WriteLog
                     } else {
                         $null = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds $wingetTimeoutSeconds -WriteLog $WriteLog
                     }
@@ -3294,6 +3310,7 @@ catch {
                     ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','))
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
+                    WriteLog = $WriteLog
                 }
                 if ($hasCheckTimeout) { $retryParameters.TimeoutSeconds = $wingetTimeoutSeconds }
                 else { $retryParameters.NoTimeout = $true }
