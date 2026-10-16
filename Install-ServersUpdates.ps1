@@ -1726,10 +1726,13 @@ elseif ($shouldPreflightManagementPowerShell -and ($wingetEnabledForManagement -
         continue
       }
       $managerRows = @(ConvertTo-WindowsUpdatePackageRows -ComputerName $env:COMPUTERNAME -Manager $managerName -Packages @($managerCheck[0].Packages))
-      $candidate = if ($managerName -eq 'Winget') {
-        @($managerRows | Where-Object { $_.Id -ieq 'Microsoft.PowerShell' -and $_.Source -ieq 'winget' } | Select-Object -First 1)
+      # Eine if-Expression entpackt ein einzelnes Array-Element in PowerShell.
+      # Danach ist .Count unter StrictMode nicht zuverlässig verfügbar.
+      [object[]]$candidate = @()
+      if ($managerName -eq 'Winget') {
+        $candidate = @($managerRows | Where-Object { $_.Id -ieq 'Microsoft.PowerShell' -and $_.Source -ieq 'winget' } | Select-Object -First 1)
       } else {
-        @($managerRows | Where-Object { $_.Id -ieq 'powershell-core' } | Select-Object -First 1)
+        $candidate = @($managerRows | Where-Object { $_.Id -ieq 'powershell-core' } | Select-Object -First 1)
       }
       if ($candidate.Count -gt 0) {
         $candidate[0] | Add-Member -NotePropertyName Manager -NotePropertyValue $managerName -Force
@@ -2715,7 +2718,11 @@ if (@($ManualActions).Count -gt 0) {
   foreach ($manualAction in @($ManualActions)) {
     $manualServerHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Server)
     $manualManagerHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Manager)
-    $manualPackages = ConvertTo-WindowsUpdatePackageHtmlTable -ComputerName $manualAction.Server -Manager $manualAction.Manager -Packages $manualAction.Packages
+    $manualPackages = ''
+    $manualPackageRows = @($manualAction.Packages)
+    if ($manualAction.Manager -in @('Winget', 'Chocolatey') -and $manualPackageRows.Count -gt 0) {
+      $manualPackages = ConvertTo-WindowsUpdatePackageHtmlTable -ComputerName $manualAction.Server -Manager $manualAction.Manager -Packages $manualPackageRows
+    }
     $manualTextHtml = [System.Net.WebUtility]::HtmlEncode([string]$manualAction.Text) -replace "`r?`n", '<br>'
     $RepBody += "<li><strong>$manualServerHtml ($manualManagerHtml)</strong>"
     if ($manualPackages) { $RepBody += $manualPackages }
