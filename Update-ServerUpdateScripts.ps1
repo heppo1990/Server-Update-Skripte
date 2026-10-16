@@ -724,10 +724,18 @@ function Invoke-ServerUpdateScripts {
                     $localPath = Join-Path $scriptRoot $relativePath
                     $backupPath = Join-Path $backupDirectory $relativePath
                     if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
-                        Copy-Item -LiteralPath $backupPath -Destination $localPath -Force -ErrorAction SilentlyContinue
+                        try { Copy-Item -LiteralPath $backupPath -Destination $localPath -Force -ErrorAction Stop }
+                        catch {
+                            Write-ServerUpdateUpdaterDiagnostic -Operation 'Skriptdatei nach Updatefehler wiederherstellen' -ErrorRecord $_ -Context "RelativeDatei=$relativePath; Sicherung=$backupPath; Ziel=$localPath"
+                            Write-Warning "Rollback für '$relativePath' fehlgeschlagen; Details stehen im Updater-Protokoll."
+                        }
                     }
                     elseif (Test-Path -LiteralPath $localPath -PathType Leaf) {
-                        Remove-Item -LiteralPath $localPath -Force -ErrorAction SilentlyContinue
+                        try { Remove-Item -LiteralPath $localPath -Force -ErrorAction Stop }
+                        catch {
+                            Write-ServerUpdateUpdaterDiagnostic -Operation 'Neu hinzugefügte Skriptdatei nach Updatefehler entfernen' -ErrorRecord $_ -Context "RelativeDatei=$relativePath; Ziel=$localPath"
+                            Write-Warning "Neue Datei '$relativePath' konnte beim Rollback nicht entfernt werden; Details stehen im Updater-Protokoll."
+                        }
                     }
                 }
                 throw
@@ -746,7 +754,11 @@ function Invoke-ServerUpdateScripts {
             }
         }
         finally {
-            Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            try { Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction Stop }
+            catch {
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'Temporäre Updater-Dateien bereinigen' -ErrorRecord $_ -Context $temporaryDirectory
+                Write-Warning 'Temporäre Updater-Dateien konnten nicht vollständig bereinigt werden; Details stehen im Updater-Protokoll.'
+            }
         }
 
         $restartRequired = $changedFiles.Count -gt 0
