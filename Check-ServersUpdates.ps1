@@ -160,13 +160,20 @@ function Add-CheckExternalSetupNotice {
 
 function Get-CheckClientCertificate {
   $thumbprint = [string]$UpdateSettings.ClientCertThumbprint
-  if (-not [string]::IsNullOrWhiteSpace($thumbprint)) {
-    return Get-ChildItem -Path 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
-      Where-Object { $_.Thumbprint -eq $thumbprint } |
-      Select-Object -First 1
+  try {
+    $certificates = @(Get-ChildItem -Path 'Cert:\CurrentUser\My' -ErrorAction Stop)
+  }
+  catch {
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message $true } -Operation 'WinRM-Clientzertifikate lesen' -Target 'Cert:\CurrentUser\My' -ErrorRecord $_ -Context 'Zertifikatsauthentifizierung für Zusatz- und Hypervisorziele kann nicht bestätigt werden.'
+    Write-ScriptLog 'WARNUNG: Lokaler Zertifikatsspeicher konnte nicht gelesen werden; Zertifikatsverbindung ist nicht verfügbar. Details stehen im Protokoll.'
+    return $null
   }
 
-  return Get-ChildItem -Path 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
+  if (-not [string]::IsNullOrWhiteSpace($thumbprint)) {
+    return $certificates | Where-Object { $_.Thumbprint -eq $thumbprint } | Select-Object -First 1
+  }
+
+  return $certificates |
     Where-Object { $_.Subject -eq "CN=WinRM-UpdateClient-$env:COMPUTERNAME" } |
     Sort-Object NotAfter -Descending |
     Select-Object -First 1
