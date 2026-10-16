@@ -203,10 +203,17 @@ function Clear-WindowsUpdateCache {
     param([int]$DetectNowWaitSec = 60)
     try {
       $result = "SUCCESS"
+      $diagnostics = [System.Collections.Generic.List[string]]::new()
+      $serviceStartFailed = $false
       
       # Dienste stoppen: erst wuauserv, dann bits
-      Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
-      Stop-Service -Name bits    -Force -ErrorAction SilentlyContinue
+      foreach ($svc in @('wuauserv','bits')) {
+        try { Stop-Service -Name $svc -Force -ErrorAction Stop }
+        catch {
+          $result = 'SERVICE_STOP_FAILED'
+          $diagnostics.Add("Dienst '$svc' konnte nicht gestoppt werden: $($_.Exception.ToString())")
+        }
+      }
 
       # Warte bis beide Dienste wirklich gestoppt sind (max 30 Sekunden)
       $maxWait = 30
@@ -217,21 +224,31 @@ function Clear-WindowsUpdateCache {
           $waited++
         }
         if ((Get-Service -Name $svc).Status -ne 'Stopped') {
-          $result = "TIMEOUT_STOP_$svc"
+          if ($result -eq 'SUCCESS') { $result = "TIMEOUT_STOP_$svc" }
+          $diagnostics.Add("Dienst '$svc' blieb nach $maxWait Sekunden aktiv.")
         }
       }
 
       if ($result -eq "SUCCESS") {
-        # Download-Ordner leeren (wie bisher)
-        Remove-Item "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
-        
-        # NEU: DataStore leeren (enthält die Update-Metadaten/Datenbank)
-        Remove-Item "C:\Windows\SoftwareDistribution\DataStore\*" -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($cachePath in @('C:\Windows\SoftwareDistribution\Download\*', 'C:\Windows\SoftwareDistribution\DataStore\*')) {
+          try {
+            Remove-Item $cachePath -Recurse -Force -ErrorAction Stop
+          }
+          catch {
+            $result = 'ERROR_CACHE_DELETE'
+            $diagnostics.Add("Cachepfad '$cachePath' konnte nicht bereinigt werden: $($_.Exception.ToString())")
+          }
+        }
       }
 
       # Dienste wieder starten
-      Start-Service -Name bits    -ErrorAction SilentlyContinue
-      Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+      foreach ($svc in @('bits','wuauserv')) {
+        try { Start-Service -Name $svc -ErrorAction Stop }
+        catch {
+          $serviceStartFailed = $true
+          $diagnostics.Add("Dienst '$svc' konnte nicht gestartet werden: $($_.Exception.ToString())")
+        }
+      }
 
       # Warte bis wuauserv läuft
       $waited = 0
@@ -240,12 +257,18 @@ function Clear-WindowsUpdateCache {
         $waited++
       }
       if ((Get-Service -Name wuauserv).Status -ne 'Running') {
-        return "SERVICE_FAILED"
+        $serviceStartFailed = $true
+        $diagnostics.Add("Dienst 'wuauserv' lief nach $maxWait Sekunden noch nicht.")
       }
+      if ($serviceStartFailed) { $result = 'SERVICE_FAILED' }
 
       # NEU: DetectNow auslösen damit WU frisch bei Microsoft sucht
       # Methode 1: wuauclt (klassisch, funktioniert auf allen Versionen)
-      & wuauclt.exe /detectnow 2>$null
+      $wuaucltDiagnostic = $null
+      try {
+        & wuauclt.exe /detectnow 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { $wuaucltDiagnostic = "wuauclt.exe /detectnow endete mit Exitcode $LASTEXITCODE." }
+      } catch { $wuaucltDiagnostic = "wuauclt.exe /detectnow fehlgeschlagen: $($_.Exception.ToString())" }
       
       # Methode 2: COM-Objekt (zuverlässiger auf neueren Systemen)
       $detectNowDiagnostic = $null
@@ -253,14 +276,15 @@ function Clear-WindowsUpdateCache {
         $AutoUpdate = New-Object -ComObject Microsoft.Update.AutoUpdate
         $AutoUpdate.DetectNow()
       } catch { $detectNowDiagnostic = $_.Exception.ToString() }
+      if ($wuaucltDiagnostic) { $diagnostics.Add($wuaucltDiagnostic) }
 
       # Warten bis der WU-Scan abgeschlossen ist
       Start-Sleep -Seconds $DetectNowWaitSec
 
-      return [PSCustomObject]@{ Status = $result; DetectNowDiagnostic = $detectNowDiagnostic; Diagnostic = $null }
+      return [PSCustomObject]@{ Status = $result; DetectNowDiagnostic = $detectNowDiagnostic; Diagnostic = ($diagnostics -join [Environment]::NewLine) }
     }
     catch {
-      return [PSCustomObject]@{ Status = 'ERROR'; Diagnostic = $_.Exception.ToString() }
+      return [PSCustomObject]@{ Status = 'ERROR'; DetectNowDiagnostic = $null; Diagnostic = $_.Exception.ToString() }
     }
   }
   
