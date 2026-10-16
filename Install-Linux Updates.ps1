@@ -202,11 +202,16 @@ function Ensure-LinuxSSHKey {
 }
 
 function Test-LinuxKeyLogin {
-    param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath)
+    param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath, [AllowEmptyString()][string]$LogFile = '')
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
     $arguments += "${RemoteUser}@${RemoteHost}", 'printf OK'
     $result = & $script:SSHPath @arguments 2>&1
-    return ($LASTEXITCODE -eq 0 -and (($result -join "`n") -match 'OK'))
+    $exitCode = $LASTEXITCODE
+    $success = ($exitCode -eq 0 -and (($result -join "`n") -match '(?m)^OK\s*$'))
+    if (-not $success -and $LogFile) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-SSH-Schlüsselverbindung prüfen' -Target $RemoteHost -DiagnosticText ($result -join [Environment]::NewLine) -Context @("User=$RemoteUser", "SSHPath=$script:SSHPath", "ExitCode=$exitCode")
+    }
+    return $success
 }
 
 function Install-LinuxPublicKey {
@@ -218,22 +223,32 @@ function Install-LinuxPublicKey {
     $arguments += @('-o','PreferredAuthentications=password,keyboard-interactive','-o','PubkeyAuthentication=no',"${RemoteUser}@${RemoteHost}",$remoteCommand)
     Write-LinuxLog -Message "SSH-Schlüssel auf $RemoteHost fehlt. Bitte das SSH-Passwort einmal eingeben ..." -LogFile $LogFile -Level Warning
     & $script:SSHPath @arguments 2>&1 | ForEach-Object { if ($_){ Write-LinuxLog -Message ([string]$_) -LogFile $LogFile } }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-LinuxKeyLogin -RemoteHost $RemoteHost -RemoteUser $RemoteUser -KeyPath $KeyPath)) { throw "SSH-Schlüssel konnte auf $RemoteHost nicht eingerichtet oder geprüft werden." }
+    $installExitCode = $LASTEXITCODE
+    if ($installExitCode -ne 0) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-SSH-Schlüssel installieren' -Target $RemoteHost -Context @("User=$RemoteUser", "SSHPath=$script:SSHPath", 'Authentication=interaktiv', "ExitCode=$installExitCode")
+        throw "SSH-Schlüsselinstallation auf $RemoteHost fehlgeschlagen (Exitcode $installExitCode)."
+    }
+    if (-not (Test-LinuxKeyLogin -RemoteHost $RemoteHost -RemoteUser $RemoteUser -KeyPath $KeyPath -LogFile $LogFile)) { throw "SSH-Schlüssel konnte auf $RemoteHost nicht geprüft werden." }
     Write-LinuxLog -Message "SSH-Schlüssel-Login für $RemoteHost ist eingerichtet." -LogFile $LogFile -Level Success
 }
 
 function Test-LinuxUpdateSudo {
-    param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath)
+    param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath, [AllowEmptyString()][string]$LogFile = '')
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
-    $remoteCommand = 'version=$(sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --version 2>/dev/null) && [ "$version" = "' + $script:LinuxSudoSetupVersion + '" ] && sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --check >/dev/null 2>&1'
+    $remoteCommand = 'version=$(sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --version) || { echo "SUDO_VERSION_CHECK_FAILED"; exit 41; }; [ "$version" = "' + $script:LinuxSudoSetupVersion + '" ] || { echo "SUDO_VERSION_MISMATCH:$version"; exit 42; }; sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --check'
     $arguments += "${RemoteUser}@${RemoteHost}", $remoteCommand
-    & $script:SSHPath @arguments 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    $result = @(& $script:SSHPath @arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    $success = ($exitCode -eq 0)
+    if (-not $success -and $LogFile) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-NOPASSWD-Updateeinrichtung prüfen' -Target $RemoteHost -DiagnosticText ($result -join [Environment]::NewLine) -Context @("User=$RemoteUser", "SSHPath=$script:SSHPath", "ExpectedVersion=$script:LinuxSudoSetupVersion", "ExitCode=$exitCode")
+    }
+    return $success
 }
 
 function Set-LinuxUpdateSudo {
     param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile)
-    if (Test-LinuxUpdateSudo -RemoteHost $RemoteHost -RemoteUser $RemoteUser -KeyPath $KeyPath) {
+    if (Test-LinuxUpdateSudo -RemoteHost $RemoteHost -RemoteUser $RemoteUser -KeyPath $KeyPath -LogFile $LogFile) {
         Write-LinuxLog -Message "NOPASSWD für Updates ist auf $RemoteHost bereits eingerichtet." -LogFile $LogFile -Level Success
         return
     }
@@ -331,7 +346,7 @@ echo SUDOERS_CONFIGURED
         $cleanupArguments += "${RemoteUser}@${RemoteHost}", "rm -f $remoteScript"
         & $script:SSHPath @cleanupArguments 2>$null | Out-Null
     }
-    if (-not (Test-LinuxUpdateSudo -RemoteHost $RemoteHost -RemoteUser $RemoteUser -KeyPath $KeyPath)) { throw 'NOPASSWD konnte nicht verifiziert werden.' }
+    if (-not (Test-LinuxUpdateSudo -RemoteHost $RemoteHost -RemoteUser $RemoteUser -KeyPath $KeyPath -LogFile $LogFile)) { throw 'NOPASSWD konnte nicht verifiziert werden.' }
     Write-LinuxLog -Message "NOPASSWD für Updates wurde auf $RemoteHost eingerichtet und geprüft." -LogFile $LogFile -Level Success
 }
 
@@ -481,15 +496,15 @@ foreach ($entry in $hostEntries) {
                 $setupIssue = 'Lokaler SSH-Privatschlüssel fehlt; Linux-Verteilung erforderlich.'
                 throw $setupIssue
             }
-            if (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
+            if (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile)) {
                 $setupIssue = 'SSH-Schlüsselverbindung nicht bestätigt; Linux-Verteilung und Verbindung prüfen.'
                 throw $setupIssue
             }
-            if (-not (Test-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
+            if (-not (Test-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile)) {
                 $setupIssue = "Linux-Updateeinrichtung fehlt oder ist veraltet (erwartete Version $script:LinuxSudoSetupVersion); Verteilung erforderlich."
                 Write-LinuxLog -Message "$setupIssue Die lesende Update-Suche wird trotzdem versucht." -LogFile $logFile -Level Warning
             }
-        } elseif (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath)) {
+        } elseif (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile)) {
             Install-LinuxPublicKey -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile
         } else {
             Write-LinuxLog -Message "SSH-Schlüssel-Login für $remoteHost funktioniert bereits." -LogFile $logFile -Level Success
