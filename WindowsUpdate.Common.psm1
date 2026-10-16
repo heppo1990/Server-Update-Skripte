@@ -82,7 +82,7 @@ function Format-WindowsUpdateConsoleError {
     if ($Message -notmatch '(?i)^\s*(WARNUNG|WARNING|FEHLER\b|ERROR\b|\[WARN\]|\[ERROR\])|^\s*Fehler bei\b|fehlgeschlagen|konnte nicht|UnableToDownload|Access is denied|Zugriff verweigert|Exception|Fehler beim') { return $Message }
 
     $target = $null
-    if ($Message -match "(?i)\b(?:auf|für|bei Server|von Server)\s+'?(?<Target>[A-Za-z0-9_.-]+)") {
+    if ($Message -match "(?i)\b(?:auf|für|bei Server|von Server)\s+(?!dem\b|der\b|den\b|einem\b|einer\b)'?(?<Target>[A-Za-z0-9_.-]+)") {
         $target = $Matches.Target.TrimEnd("'", '!', ':', '.')
     }
 
