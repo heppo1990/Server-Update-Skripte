@@ -122,6 +122,7 @@ if (-not [string]::IsNullOrWhiteSpace($ManagementPowerShellRunLogPath)) { $LogFi
 $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_Report_${TimeStamp}.html"
 $script:ManagementPowerShellUpdateState = $null
 $script:ManagementPowerShellUpdateExcludeId = @()
+$script:ManagementPowerShellUpdateExcludeChocolateyId = @()
 $script:ManagementPowerShellPreflightFailure = ''
 
 ############################################################################################################################################################################
@@ -148,7 +149,8 @@ function Invoke-PackageManagerUpdates {
   param(
     [Parameter(Mandatory)][string]$Servername,
     $AuthInfo = $null,
-    [string[]]$ExcludeWinGetIds = @()
+    [string[]]$ExcludeWinGetIds = @(),
+    [string[]]$ExcludeChocolateyIds = @()
   )
 
   try {
@@ -157,7 +159,7 @@ function Invoke-PackageManagerUpdates {
     if ($enableWinget) {
       $null = Update-WinGetClientModule -ComputerName $Servername -AuthInfo $AuthInfo -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
     }
-    $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -ExcludeWinGetIds $ExcludeWinGetIds -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:([bool]$logOnly) })
+    $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -ExcludeWinGetIds $ExcludeWinGetIds -ExcludeChocolateyIds $ExcludeChocolateyIds -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:([bool]$logOnly) })
     # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
     $successfulPackagesByManager = @{}
     $manualPackageCount = 0
@@ -1520,8 +1522,8 @@ $UpdateSettings = $Settings.UpdateSettings
 $MailSettings = $Settings.MailSettings
 
 # PowerShell 7 darf sich auf dem Verwaltungsserver nicht selbst aktualisieren:
-# WinGet kann den laufenden pwsh-Prozess beim Austausch beenden. PS 5.1 bleibt
-# als unabhängiger Prozess bestehen und startet den Lauf anschließend neu.
+# WinGet oder Chocolatey können den laufenden pwsh-Prozess beim Austausch beenden.
+# PS 5.1 bleibt als unabhängiger Prozess bestehen und startet den Lauf anschließend neu.
 $shouldPreflightManagementPowerShell = $PSVersionTable.PSEdition -eq 'Core' -and
   $PSVersionTable.PSVersion.Major -ge 7 -and -not $TestDeferredMail
 if ($TargetComputer -and $TargetComputer.Count -gt 0) {
@@ -1531,6 +1533,7 @@ if ($TargetComputer -and $TargetComputer.Count -gt 0) {
     @($TargetComputer | Where-Object { $localManagementNames -contains $_ }).Count -gt 0
 }
 $wingetEnabledForManagement = -not $UpdateSettings.PSObject.Properties['EnableWingetUpdates'] -or [bool]$UpdateSettings.EnableWingetUpdates
+$chocolateyEnabledForManagement = -not $UpdateSettings.PSObject.Properties['EnableChocolateyUpdates'] -or [bool]$UpdateSettings.EnableChocolateyUpdates
 
 if ($ManagementPowerShellResume) {
   if ([string]::IsNullOrWhiteSpace($ManagementPowerShellStatePath) -or -not (Test-Path -LiteralPath $ManagementPowerShellStatePath -PathType Leaf)) {
@@ -1543,7 +1546,12 @@ if ($ManagementPowerShellResume) {
   finally {
     Remove-Item -LiteralPath $ManagementPowerShellStatePath -Force -ErrorAction SilentlyContinue
   }
+  $resumedPowerShellManager = if ($script:ManagementPowerShellUpdateState.PSObject.Properties['Manager'] -and
+    -not [string]::IsNullOrWhiteSpace([string]$script:ManagementPowerShellUpdateState.Manager)) {
+    [string]$script:ManagementPowerShellUpdateState.Manager
+  } else { 'Winget' }
   $script:ManagementPowerShellUpdateExcludeId = @('Microsoft.PowerShell')
+  $script:ManagementPowerShellUpdateExcludeChocolateyId = @('powershell-core')
   if ([bool]$script:ManagementPowerShellUpdateState.Success) {
     try {
       $targetPowerShellVersion = [version]::Parse([string]$script:ManagementPowerShellUpdateState.AvailableVersion)
@@ -1566,10 +1574,10 @@ if ($ManagementPowerShellResume) {
       Source = [string]$script:ManagementPowerShellUpdateState.Source
     }
     $PackageUpdateCount++
-    $WingetUpdateCount++
-    $PackageUpdateDetails += [PSCustomObject]@{ Server=$env:COMPUTERNAME; Manager='Winget'; Packages=@($managementPowerShellPackage); Success=$true }
-    Write-ScriptLog "Verwaltungsserver-Update in PowerShell $($PSVersionTable.PSVersion) fortgesetzt; PowerShell $($managementPowerShellPackage.InstalledVersion) → $($managementPowerShellPackage.AvailableVersion) wird als WinGet-Update gezählt."
-    $managementPowerShellTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $env:COMPUTERNAME -Manager Winget -Packages @($managementPowerShellPackage)
+    if ($resumedPowerShellManager -eq 'Chocolatey') { $ChocolateyUpdateCount++ } else { $WingetUpdateCount++ }
+    $PackageUpdateDetails += [PSCustomObject]@{ Server=$env:COMPUTERNAME; Manager=$resumedPowerShellManager; Packages=@($managementPowerShellPackage); Success=$true }
+    Write-ScriptLog "Verwaltungsserver-Update in PowerShell $($PSVersionTable.PSVersion) fortgesetzt; PowerShell $($managementPowerShellPackage.InstalledVersion) → $($managementPowerShellPackage.AvailableVersion) wird als $resumedPowerShellManager-Update gezählt."
+    $managementPowerShellTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $env:COMPUTERNAME -Manager $resumedPowerShellManager -Packages @($managementPowerShellPackage)
     foreach ($tableLine in ($managementPowerShellTable -split "`r?`n")) {
       if (-not $tableLine) { continue }
       Write-ScriptLog $tableLine -LogOnly
@@ -1578,7 +1586,7 @@ if ($ManagementPowerShellResume) {
   }
   else {
     $script:ManagementPowerShellPreflightFailure = [string]$script:ManagementPowerShellUpdateState.Error
-    if ([string]::IsNullOrWhiteSpace($script:ManagementPowerShellPreflightFailure)) { $script:ManagementPowerShellPreflightFailure = 'WinGet konnte PowerShell 7 auf dem Verwaltungsserver nicht aktualisieren.' }
+    if ([string]::IsNullOrWhiteSpace($script:ManagementPowerShellPreflightFailure)) { $script:ManagementPowerShellPreflightFailure = 'Der Paketmanager konnte PowerShell 7 auf dem Verwaltungsserver nicht aktualisieren.' }
     Write-ScriptLog "WARNUNG: $script:ManagementPowerShellPreflightFailure"
     if (-not [string]::IsNullOrWhiteSpace([string]$script:ManagementPowerShellUpdateState.Id)) {
       $failedManagementPackage = [PSCustomObject]@{
@@ -1588,53 +1596,88 @@ if ($ManagementPowerShellResume) {
         AvailableVersion = [string]$script:ManagementPowerShellUpdateState.AvailableVersion
         Source = [string]$script:ManagementPowerShellUpdateState.Source
       }
-      $PackageUpdateDetails += [PSCustomObject]@{ Server=$env:COMPUTERNAME; Manager='Winget'; Packages=@($failedManagementPackage); Success=$false }
+      $failedManager = if ($script:ManagementPowerShellUpdateState.PSObject.Properties['Manager'] -and $script:ManagementPowerShellUpdateState.Manager) { [string]$script:ManagementPowerShellUpdateState.Manager } else { 'Winget' }
+      $PackageUpdateDetails += [PSCustomObject]@{ Server=$env:COMPUTERNAME; Manager=$failedManager; Packages=@($failedManagementPackage); Success=$false }
     }
   }
 }
-elseif ($shouldPreflightManagementPowerShell -and $wingetEnabledForManagement) {
+elseif ($shouldPreflightManagementPowerShell -and ($wingetEnabledForManagement -or $chocolateyEnabledForManagement)) {
   Write-ScriptLog "Prüfe vorab auf ein PowerShell-7-Update für den Verwaltungsserver $env:COMPUTERNAME..."
   $managementPowerShellHandoffStarted = $false
   try {
-    $managementPreflightResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $env:COMPUTERNAME -Mode Check -EnableWinget $true -EnableChocolatey $false -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:([bool]$logOnly) })
-    $managementWingetCheck = @($managementPreflightResults | Where-Object { $_.Manager -eq 'Winget' } | Select-Object -Last 1)
-    if ($managementWingetCheck.Count -eq 0 -or -not [bool]$managementWingetCheck[0].Success) {
-      $diagnostic = if ($managementWingetCheck.Count -gt 0 -and $managementWingetCheck[0].PSObject.Properties['DiagnosticOutput']) { [string]$managementWingetCheck[0].DiagnosticOutput } else { '' }
-      $script:ManagementPowerShellPreflightFailure = 'PowerShell-7-Update auf dem Verwaltungsserver konnte vor dem Installationslauf nicht zuverlässig geprüft werden.'
-      $script:ManagementPowerShellUpdateExcludeId = @('Microsoft.PowerShell')
-      Write-ScriptLog "WARNUNG: $script:ManagementPowerShellPreflightFailure Das PowerShell-Paket wird auf diesem Server in diesem Lauf nicht erneut gestartet."
-      if (-not [string]::IsNullOrWhiteSpace($diagnostic)) {
-        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Verwaltungsserver-PowerShell-Vorabprüfung' -Target $env:COMPUTERNAME -DiagnosticText $diagnostic
+    $managementPreflightResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $env:COMPUTERNAME -Mode Check -EnableWinget $wingetEnabledForManagement -EnableChocolatey $chocolateyEnabledForManagement -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:([bool]$logOnly) })
+    $managementPowerShellCandidates = @()
+    $managementPreflightFailures = @()
+    foreach ($managerName in @('Winget', 'Chocolatey')) {
+      $managerEnabled = if ($managerName -eq 'Winget') { $wingetEnabledForManagement } else { $chocolateyEnabledForManagement }
+      if (-not $managerEnabled) { continue }
+      $managerCheck = @($managementPreflightResults | Where-Object { $_.Manager -eq $managerName } | Select-Object -Last 1)
+      if ($managerCheck.Count -eq 0 -or -not [bool]$managerCheck[0].Success) {
+        $detail = if ($managerCheck.Count -gt 0) {
+          $diagnosticProperty = $managerCheck[0].PSObject.Properties['DiagnosticOutput']
+          if ($diagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticProperty.Value)) { [string]$diagnosticProperty.Value } else { [string]$managerCheck[0].ActionOutput }
+        } else { 'Der Paketmanager lieferte kein Prüfergebnis.' }
+        $managementPreflightFailures += [PSCustomObject]@{ Manager=$managerName; Detail=$detail }
+        continue
+      }
+      $managerRows = @(ConvertTo-WindowsUpdatePackageRows -ComputerName $env:COMPUTERNAME -Manager $managerName -Packages @($managerCheck[0].Packages))
+      $candidate = if ($managerName -eq 'Winget') {
+        @($managerRows | Where-Object { $_.Id -ieq 'Microsoft.PowerShell' -and $_.Source -ieq 'winget' } | Select-Object -First 1)
+      } else {
+        @($managerRows | Where-Object { $_.Id -ieq 'powershell-core' } | Select-Object -First 1)
+      }
+      if ($candidate.Count -gt 0) {
+        $candidate[0] | Add-Member -NotePropertyName Manager -NotePropertyValue $managerName -Force
+        $managementPowerShellCandidates += $candidate[0]
       }
     }
-    else {
-      $managementUpdateRows = @(ConvertTo-WindowsUpdatePackageRows -ComputerName $env:COMPUTERNAME -Manager Winget -Packages @($managementWingetCheck[0].Packages))
-      $managementPowerShellUpdate = @($managementUpdateRows | Where-Object { $_.Id -ieq 'Microsoft.PowerShell' -and $_.Source -ieq 'winget' } | Select-Object -First 1)
-      if ($managementPowerShellUpdate.Count -eq 0) {
-        Write-ScriptLog "Kein PowerShell-7-Update für den Verwaltungsserver $env:COMPUTERNAME verfügbar."
+    $managementPowerShellUpdate = @($managementPowerShellCandidates | Sort-Object { if ($_.Manager -eq 'Winget') { 0 } else { 1 } } | Select-Object -First 1)
+    if ($managementPowerShellUpdate.Count -eq 0 -and $managementPreflightFailures.Count -gt 0) {
+      $script:ManagementPowerShellPreflightFailure = 'PowerShell-7-Update auf dem Verwaltungsserver konnte mit den aktivierten Paketmanagern nicht zuverlässig geprüft werden.'
+      $script:ManagementPowerShellUpdateExcludeId = @('Microsoft.PowerShell')
+      $script:ManagementPowerShellUpdateExcludeChocolateyId = @('powershell-core')
+      Write-ScriptLog "WARNUNG: $script:ManagementPowerShellPreflightFailure Das PowerShell-Paket wird in diesem Lauf nicht erneut automatisch gestartet."
+      foreach ($failure in $managementPreflightFailures) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation "Verwaltungsserver-PowerShell-Vorabprüfung-$($failure.Manager)" -Target $env:COMPUTERNAME -DiagnosticText ([string]$failure.Detail)
       }
-      else {
+    }
+    elseif ($managementPowerShellUpdate.Count -eq 0) {
+      Write-ScriptLog "Kein PowerShell-7-Update für den Verwaltungsserver $env:COMPUTERNAME verfügbar."
+    }
+    else {
         $managementPowerShellUpdate = $managementPowerShellUpdate[0]
-        Write-ScriptLog "PowerShell-7-Update für den Verwaltungsserver gefunden: $($managementPowerShellUpdate.InstalledVersion) → $($managementPowerShellUpdate.AvailableVersion). Starte die Installation über Windows PowerShell 5.1."
+        $managementPowerShellManager = [string]$managementPowerShellUpdate.Manager
+        Write-ScriptLog "PowerShell-7-Update für den Verwaltungsserver gefunden: $($managementPowerShellUpdate.InstalledVersion) → $($managementPowerShellUpdate.AvailableVersion) ($managementPowerShellManager). Starte die Installation über Windows PowerShell 5.1."
         $windowsPowerShell51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $pwshExecutable = Join-Path $PSHOME 'pwsh.exe'
         $wingetExecutable = $null
-        $wingetCommand = Get-Command -Name winget.exe, winget -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($wingetCommand) { $wingetExecutable = [string]$wingetCommand.Source }
-        if ([string]::IsNullOrWhiteSpace($wingetExecutable) -and -not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-          $wingetAliasPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
-          if (Test-Path -LiteralPath $wingetAliasPath -PathType Leaf) { $wingetExecutable = $wingetAliasPath }
-        }
-        if ([string]::IsNullOrWhiteSpace($wingetExecutable)) {
+        $chocolateyExecutable = $null
+        if ($managementPowerShellManager -eq 'Winget') {
           $appInstallerPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Sort-Object { [version]$_.Version } -Descending)
           foreach ($appInstallerPackage in $appInstallerPackages) {
             $candidateWinget = Join-Path ([string]$appInstallerPackage.InstallLocation) 'winget.exe'
             if (Test-Path -LiteralPath $candidateWinget -PathType Leaf) { $wingetExecutable = $candidateWinget; break }
           }
+          if ([string]::IsNullOrWhiteSpace($wingetExecutable)) {
+            $appInstallerPaths = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles 'WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe') -ErrorAction SilentlyContinue |
+              Sort-Object { if ($_.FullName -match 'Microsoft\.DesktopAppInstaller_(\d+(?:\.\d+){1,3})_') { [version]$Matches[1] } else { [version]'0.0' } } -Descending)
+            if ($appInstallerPaths.Count -gt 0) { $wingetExecutable = [string]$appInstallerPaths[0].FullName }
+          }
+          if ([string]::IsNullOrWhiteSpace($wingetExecutable) -and -not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            $wingetAliasPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+            if (Test-Path -LiteralPath $wingetAliasPath -PathType Leaf) { $wingetExecutable = $wingetAliasPath }
+          }
+        } else {
+          $chocolateyExecutable = 'C:\ProgramData\chocolatey\bin\choco.exe'
+          if (-not (Test-Path -LiteralPath $chocolateyExecutable -PathType Leaf)) {
+            $chocoCommand = Get-Command -Name choco.exe, choco -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($chocoCommand) { $chocolateyExecutable = [string]$chocoCommand.Source }
+          }
         }
         if (-not (Test-Path -LiteralPath $windowsPowerShell51 -PathType Leaf)) { throw 'Windows PowerShell 5.1 wurde nicht gefunden.' }
         if (-not (Test-Path -LiteralPath $pwshExecutable -PathType Leaf)) { throw "PowerShell-7-Executable wurde nicht gefunden: $pwshExecutable" }
-        if (-not (Test-Path -LiteralPath $wingetExecutable -PathType Leaf)) { throw 'winget.exe wurde auf dem Verwaltungsserver nicht gefunden.' }
+        if ($managementPowerShellManager -eq 'Winget' -and -not (Test-Path -LiteralPath $wingetExecutable -PathType Leaf)) { throw 'winget.exe wurde auf dem Verwaltungsserver nicht gefunden.' }
+        if ($managementPowerShellManager -eq 'Chocolatey' -and -not (Test-Path -LiteralPath $chocolateyExecutable -PathType Leaf)) { throw 'choco.exe wurde auf dem Verwaltungsserver nicht gefunden.' }
 
         $statePath = Join-Path ([IO.Path]::GetTempPath()) ("ServerUpdate-ManagementPowerShell-{0}.json" -f [guid]::NewGuid().ToString('N'))
         $runParameters = @{}
@@ -1646,7 +1689,9 @@ elseif ($shouldPreflightManagementPowerShell -and $wingetEnabledForManagement) {
         $workerConfiguration = [ordered]@{
           ScriptPath = $PSCommandPath
           PwshPath = $pwshExecutable
+          Manager = $managementPowerShellManager
           WingetPath = $wingetExecutable
+          ChocolateyPath = $chocolateyExecutable
           StatePath = $statePath
           LogPath = $LogFileName
           RunTimestamp = $TimeStamp
@@ -1692,15 +1737,20 @@ $exitCode = 1
 $updateOutput = @()
 $errorMessage = ''
 try {
-    Write-HandoffLog "Windows PowerShell 5.1 übernimmt PowerShell $($configuration.TargetVersion); WinGet wird aufgerufen."
-    $wingetArguments = @('upgrade','--id','Microsoft.PowerShell','--exact','--source','winget','--version',[string]$configuration.TargetVersion,'--silent','--accept-package-agreements','--accept-source-agreements','--disable-interactivity')
-    $updateOutput = @(& ([string]$configuration.WingetPath) @wingetArguments 2>&1)
+    Write-HandoffLog "Windows PowerShell 5.1 übernimmt PowerShell $($configuration.TargetVersion); $($configuration.Manager) wird aufgerufen."
+    if ([string]$configuration.Manager -eq 'Chocolatey') {
+        $chocolateyArguments = @('upgrade','powershell-core','--version',[string]$configuration.TargetVersion,'--yes','--limit-output')
+        $updateOutput = @(& ([string]$configuration.ChocolateyPath) @chocolateyArguments 2>&1)
+    } else {
+        $wingetArguments = @('upgrade','--id','Microsoft.PowerShell','--exact','--source','winget','--version',[string]$configuration.TargetVersion,'--silent','--accept-package-agreements','--accept-source-agreements','--disable-interactivity')
+        $updateOutput = @(& ([string]$configuration.WingetPath) @wingetArguments 2>&1)
+    }
     $exitCode = $LASTEXITCODE
     foreach ($line in $updateOutput) {
         $text = ([string]$line).TrimEnd()
         if ($text) { Write-HandoffLog $text }
     }
-    if ($exitCode -ne 0) { $errorMessage = "WinGet konnte PowerShell $($configuration.TargetVersion) nicht installieren (Exitcode $exitCode)." }
+    if ($exitCode -ne 0) { $errorMessage = "$($configuration.Manager) konnte PowerShell $($configuration.TargetVersion) nicht installieren (Exitcode $exitCode)." }
 } catch {
     $errorMessage = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
     $exitCode = 1
@@ -1714,10 +1764,11 @@ $state = [ordered]@{
     InstalledVersion = [string]$configuration.Package.InstalledVersion
     AvailableVersion = [string]$configuration.Package.AvailableVersion
     Source = [string]$configuration.Package.Source
+    Manager = [string]$configuration.Manager
     Error = $errorMessage
 }
 [IO.File]::WriteAllText([string]$configuration.StatePath, (ConvertTo-Json -InputObject $state -Depth 5), [Text.UTF8Encoding]::new($false))
-if ($exitCode -eq 0) { Write-HandoffLog "WinGet meldet PowerShell-Update erfolgreich; starte den Installationslauf in PowerShell 7 neu." 'SUCCESS' }
+if ($exitCode -eq 0) { Write-HandoffLog "$($configuration.Manager) meldet PowerShell-Update erfolgreich; starte den Installationslauf in PowerShell 7 neu." 'SUCCESS' }
 else { Write-HandoffLog 'Der Installationslauf wird in PowerShell 7 fortgesetzt; das PowerShell-Paket wird nicht erneut installiert.' 'WARNING' }
 try {
     Write-HandoffLog "Starte die Installationsfortsetzung sichtbar in PowerShell 7: $($configuration.PwshPath)"
@@ -1731,7 +1782,7 @@ try {
 }
 '@.Replace('__CONFIGURATION__',$workerConfigurationBase64)
         $workerEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($workerScript))
-        Write-ScriptLog 'Starte den PS5.1-Übergabeprozess unabhängig von der aktuellen Konsole. Nach dem WinGet-Update öffnet er die Installationsfortsetzung sichtbar in PowerShell 7.'
+        Write-ScriptLog "Starte den PS5.1-Übergabeprozess unabhängig von der aktuellen Konsole. Nach dem $managementPowerShellManager-Update öffnet er die Installationsfortsetzung sichtbar in PowerShell 7."
         $managementPowerShellHandoffStarted = $true
         $workerProcess = Start-Process -FilePath $windowsPowerShell51 -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$workerEncoded) -PassThru -Wait -WindowStyle Hidden
         if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { throw "PS5.1-Übergabeprozess lieferte keinen Fortsetzungsstatus (Exitcode $($workerProcess.ExitCode))." }
@@ -1743,11 +1794,11 @@ try {
         Write-ScriptLog "PS5.1-Übergabeprozess abgeschlossen (Exitcode $($workerProcess.ExitCode)); der fortgesetzte Installationslauf wurde übernommen."
         return
       }
-    }
   }
   catch {
     if ($managementPowerShellHandoffStarted -and $statePath) { Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue }
     $script:ManagementPowerShellUpdateExcludeId = @('Microsoft.PowerShell')
+    $script:ManagementPowerShellUpdateExcludeChocolateyId = @('powershell-core')
     $script:ManagementPowerShellPreflightFailure = "PowerShell-7-Vorabaktualisierung auf dem Verwaltungsserver fehlgeschlagen: $($_.Exception.Message)"
     Write-ScriptLog "WARNUNG: $script:ManagementPowerShellPreflightFailure Das PowerShell-Paket wird auf diesem Server in diesem Lauf nicht erneut gestartet."
     Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Verwaltungsserver-PowerShell-Update' -Target $env:COMPUTERNAME -ErrorRecord $_
@@ -2081,6 +2132,9 @@ $DeferredUpdatesPlanned = 0
 $ManualActions = @()
 if (-not [string]::IsNullOrWhiteSpace($script:ManagementPowerShellPreflightFailure)) {
   $manualPowerShellPackages = @()
+  $manualPowerShellManager = if ($script:ManagementPowerShellUpdateState -and $script:ManagementPowerShellUpdateState.PSObject.Properties['Manager']) {
+    [string]$script:ManagementPowerShellUpdateState.Manager
+  } else { 'Paketmanager' }
   if ($script:ManagementPowerShellUpdateState -and -not [string]::IsNullOrWhiteSpace([string]$script:ManagementPowerShellUpdateState.Id)) {
     $manualPowerShellPackages = @([PSCustomObject]@{
       Name = [string]$script:ManagementPowerShellUpdateState.Name
@@ -2092,7 +2146,7 @@ if (-not [string]::IsNullOrWhiteSpace($script:ManagementPowerShellPreflightFailu
   }
   $ManualActions += [PSCustomObject]@{
     Server = $env:COMPUTERNAME
-    Manager = 'Winget'
+    Manager = $manualPowerShellManager
     Packages = $manualPowerShellPackages
     Text = "$($script:ManagementPowerShellPreflightFailure) Das PowerShell-Paket wurde zur Vermeidung eines erneuten Abbruchs auf dem Verwaltungsserver nicht erneut automatisch gestartet. Bitte den Update-Status prüfen."
   }
@@ -2147,7 +2201,8 @@ if ($ServerADList -ne $null) {
         # Package-Manager-Updates
         $localManagementTargets = @($env:COMPUTERNAME, $ComputerFQDN, [System.Net.Dns]::GetHostName())
         $excludedWinGetIds = if ($localManagementTargets -contains $Servername) { @($script:ManagementPowerShellUpdateExcludeId) } else { @() }
-        $packageResults = @(Invoke-PackageManagerUpdates -Servername $Servername -AuthInfo $svcCredential -ExcludeWinGetIds $excludedWinGetIds)
+        $excludedChocolateyIds = if ($localManagementTargets -contains $Servername) { @($script:ManagementPowerShellUpdateExcludeChocolateyId) } else { @() }
+        $packageResults = @(Invoke-PackageManagerUpdates -Servername $Servername -AuthInfo $svcCredential -ExcludeWinGetIds $excludedWinGetIds -ExcludeChocolateyIds $excludedChocolateyIds)
         foreach ($packageResult in $packageResults) {
           $packages = @($packageResult.Packages)
           # Auch gefundene Pakete aus fehlgeschlagenen Installationen in den

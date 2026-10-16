@@ -2026,6 +2026,7 @@ function Invoke-WindowsUpdatePackageManagers {
         [bool]$EnableWinget = $true,
         [bool]$EnableChocolatey = $true,
         [string[]]$ExcludeWinGetIds = @(),
+        [string[]]$ExcludeChocolateyIds = @(),
         [scriptblock]$WriteLog
     )
 
@@ -2033,7 +2034,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '')
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '')
 
         # Winget ist eine benutzerbezogene App-Installer-Anwendung. Im
         # LocalSystem-Kontext ist es nicht zuverlässig verfügbar und darf dort
@@ -2747,6 +2748,18 @@ catch {
                         }
                     }
                 } | Sort-Object Id -Unique)
+                $excludedChocolateyIdList = @($ExcludedChocolateyIds -split ',' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($ExecutionMode -eq 'Install' -and $excludedChocolateyIdList.Count -gt 0 -and $packages.Count -gt 0) {
+                    $excludedPackages = @($packages | Where-Object { [string]$_.Id -in $excludedChocolateyIdList })
+                    foreach ($excludedPackage in $excludedPackages) {
+                        $result += [PSCustomObject]@{
+                            Manager='Chocolatey'; Available=$true; Success=$true; Skipped=$true
+                            SkipReason="Paket '$($excludedPackage.Id)' wurde bereits im PowerShell-7-Vorabpfad behandelt und wird in diesem Installationslauf nicht erneut gestartet."
+                            ExitCode=0; Packages=@($excludedPackage); AvailableOutput=$availableOutput; ActionOutput=''
+                        }
+                    }
+                    $packages = @($packages | Where-Object { [string]$_.Id -notin $excludedChocolateyIdList })
+                }
                 $chocoQuerySucceeded = $chocoQueryExitCode -in @(0, 2) -and $chocoSourceFailures.Count -eq 0
                 $actionOutput = if ($chocoQuerySucceeded) { '' } else { 'Chocolatey-Abfrage unvollständig; Paketupdates sind nicht verlässlich bestimmbar. Details im Log.' }
                 $exitCode = $chocoQueryExitCode
@@ -3156,14 +3169,14 @@ catch {
 
     if (-not $EnableWinget) {
         $packageResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ',')) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Paketmanager-Prüfung auf $ComputerName")
     }
     else {
         # Chocolatey und WinGet getrennt ausführen. So bleiben Chocolatey-
         # Ergebnisse erhalten, auch wenn WinGet hängen bleibt oder wiederholt wird.
         $baseResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ',')) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Chocolatey-Prüfung auf $ComputerName")
         $packageResults += @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
 
@@ -3183,7 +3196,7 @@ catch {
                 ComputerName = $ComputerName
                 AuthInfo = $AuthInfo
                 ScriptBlock = $packageScript
-                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','))
+                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','))
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
             }
@@ -3238,7 +3251,7 @@ catch {
                     ComputerName = $ComputerName
                     AuthInfo = $AuthInfo
                     ScriptBlock = $packageScript
-                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','))
+                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','))
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
                 }
