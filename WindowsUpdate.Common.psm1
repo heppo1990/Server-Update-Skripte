@@ -1860,9 +1860,27 @@ catch {
         if ($NoTimeout) {
             $process.WaitForExit()
         } elseif (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            try { $process.Kill() } catch { }
-            try { $null = $process.WaitForExit(10000) } catch { }
-            throw [System.TimeoutException]::new("$OperationName hat das Zeitlimit von $TimeoutSeconds Sekunden überschritten.")
+            $timeoutDetails = [System.Collections.Generic.List[string]]::new()
+            try { $process.Kill() }
+            catch { $timeoutDetails.Add("Prozess konnte nicht beendet werden: $($_.Exception.Message)") }
+            try {
+                if (-not $process.WaitForExit(10000)) { $timeoutDetails.Add('Prozess war auch 10 Sekunden nach dem Abbruch noch aktiv.') }
+            }
+            catch { $timeoutDetails.Add("Prozessende konnte nicht bestätigt werden: $($_.Exception.Message)") }
+            foreach ($streamPath in @($stdoutPath, $stderrPath)) {
+                if (-not (Test-Path -LiteralPath $streamPath -PathType Leaf)) { continue }
+                try {
+                    $streamText = (Get-Content -LiteralPath $streamPath -Raw -ErrorAction Stop).Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($streamText)) {
+                        if ($streamText.Length -gt 3000) { $streamText = $streamText.Substring(0, 3000) + ' … [gekürzt]' }
+                        $streamName = if ($streamPath -eq $stdoutPath) { 'Ausgabe' } else { 'Fehlerausgabe' }
+                        $timeoutDetails.Add("$streamName vor dem Zeitlimit: $streamText")
+                    }
+                }
+                catch { $timeoutDetails.Add("$streamPath konnte nach dem Zeitlimit nicht gelesen werden: $($_.Exception.Message)") }
+            }
+            $detailText = if ($timeoutDetails.Count -gt 0) { ' ' + ($timeoutDetails -join ' ') } else { '' }
+            throw [System.TimeoutException]::new("$OperationName hat das Zeitlimit von $TimeoutSeconds Sekunden überschritten.$detailText")
         }
 
         if (-not (Test-Path -LiteralPath $responsePath -PathType Leaf)) {
@@ -1871,7 +1889,11 @@ catch {
             throw "$OperationName lieferte keine strukturierte Rückgabe (Exitcode $($process.ExitCode)). $stdout $stderr"
         }
         $response = Get-Content -LiteralPath $responsePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-        if (-not $response.Success) { throw [string]$response.Error }
+        if (-not $response.Success) {
+            $stdout = if (Test-Path -LiteralPath $stdoutPath) { (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
+            $stderr = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
+            throw "$OperationName fehlgeschlagen. Ursache: $([string]$response.Error) Ausgabe: $stdout Fehlerausgabe: $stderr"
+        }
         return @($response.Results)
     }
     finally {
