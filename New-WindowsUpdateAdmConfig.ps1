@@ -103,7 +103,7 @@ catch {
 
 # Logging-Funktion (farbneutral für Remote-Ausführung)
 function Write-SetupLog {
-    param([string]$Message, [string]$Level = "INFO")
+    param([string]$Message, [string]$Level = "INFO", [switch]$LogOnly)
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $LogMessage = "[$Timestamp] [$Level] $Message"
     if ($script:SetupLogPath) {
@@ -111,6 +111,8 @@ function Write-SetupLog {
         catch { Write-Verbose "Setup-Protokoll konnte nicht geschrieben werden: $($_.Exception.Message)" }
     }
     
+    if ($LogOnly) { return }
+
     # Farben nur wenn Terminal tatsaechlich Farben unterstuetzt
     $SupportsColor = $false
     try {
@@ -948,14 +950,32 @@ $checkRoleDefinition}
     
     # Prüfe WinRM-Plugin direkt
     try {
-        $WinRMCheck = winrm get winrm/config/plugin?Name=WindowsUpdateAdm 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        $winrmCheckOutput = @(& winrm get 'winrm/config/plugin?Name=WindowsUpdateAdm' 2>&1)
+        $winrmCheckExitCode = $LASTEXITCODE
+        if ($winrmCheckExitCode -eq 0) {
             Write-SetupLog "Plugin in WinRM gefunden, entferne..." "INFO"
-            winrm delete winrm/config/plugin?Name=WindowsUpdateAdm 2>&1 | Out-Null
+            $winrmDeleteOutput = @(& winrm delete 'winrm/config/plugin?Name=WindowsUpdateAdm' 2>&1)
+            $winrmDeleteExitCode = $LASTEXITCODE
+            if ($winrmDeleteExitCode -ne 0) {
+                $deleteDetails = ($winrmDeleteOutput | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ' | '
+                Write-SetupLog "Altes WinRM-Plugin konnte nicht entfernt werden (Exit-Code $winrmDeleteExitCode); Setup wird abgebrochen." "ERROR"
+                if ($deleteDetails) { Write-SetupLog "winrm delete-Ausgabe: $deleteDetails" "INFO" -LogOnly }
+                throw "winrm delete für WindowsUpdateAdm ist mit Exit-Code $winrmDeleteExitCode fehlgeschlagen."
+            }
             Write-SetupLog "Plugin aus WinRM entfernt" "SUCCESS"
             $NeedWinRMRestart = $true
+        } else {
+            Write-SetupLog "winrm get für das alte Plugin lieferte Exit-Code $winrmCheckExitCode; Ausgabe wird zur Diagnose protokolliert." "INFO" -LogOnly
+            foreach ($line in $winrmCheckOutput) {
+                $lineText = ([string]$line).Trim()
+                if ($lineText) { Write-SetupLog "winrm get-Ausgabe: $lineText" "INFO" -LogOnly }
+            }
         }
-    } catch { }
+    } catch {
+        Write-SetupLog 'Prüfung oder Bereinigung des alten WinRM-Plugins ist fehlgeschlagen; Setup wird abgebrochen.' 'ERROR'
+        Write-SetupDiagnostic -Operation 'WinRM-Pluginprüfung und -bereinigung' -ErrorRecord $_
+        throw
+    }
     
     if ($NeedWinRMRestart) {
         if ($IsRemoteSetup) {
