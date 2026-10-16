@@ -104,10 +104,15 @@ $LinuxCheckAttempted = $false
 $HACheckAttempted = $false
 $UpdResultFull = $null
 $script:IsLocalSystemRun = $false
+$script:LocalSystemDetectionError = $null
 $script:CheckActionNotices = @()
 try {
   $script:IsLocalSystemRun = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18'
-} catch { }
+} catch {
+  # Bei unklarem Sicherheitskontext Paketmanager vorsorglich auslassen.
+  $script:IsLocalSystemRun = $true
+  $script:LocalSystemDetectionError = $_
+}
 $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
 $LogFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_${TimeStamp}.log"
@@ -118,6 +123,11 @@ $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${Script
 ############################################################################################################################################################################
 
 function Write-ScriptLog ($Message, [bool]$LogOnly = $false) { Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) -LogOnly:$LogOnly }
+
+if ($script:LocalSystemDetectionError) {
+  Write-ScriptLog 'WARNUNG: Ausführungskontext konnte nicht sicher ermittelt werden; Paketmanager-Prüfungen werden vorsorglich übersprungen.'
+  Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message $true } -Operation 'Ausführungskontext erkennen' -ErrorRecord $script:LocalSystemDetectionError -Context @('Fallback=Paketmanager-Prüfungen überspringen')
+}
 
 function Add-CheckRedistributionNotice {
   param(
