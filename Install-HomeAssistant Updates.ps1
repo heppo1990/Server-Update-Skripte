@@ -274,9 +274,16 @@ function Ensure-SSHKeyExists {
         [AllowEmptyString()][string]$LogFile
     )
 
-    if (-not (Test-Path $KeyPath)) {
+    $keygenCommand = Get-Command -Name 'ssh-keygen.exe', 'ssh-keygen' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $keygenCommand) { throw 'OpenSSH-Keygen (ssh-keygen) wurde nicht gefunden.' }
+    if (-not (Test-Path -LiteralPath $KeyPath)) {
         Write-HostLog -Message ("SSH-Key '{0}' existiert nicht - erstelle ED25519-Key..." -f $KeyPath) -RemoteHost $RemoteHost -LogFile $LogFile -Level Warning
-        ssh-keygen -t ed25519 -f $KeyPath -N "" | Out-Null
+        $keygenOutput = @(& $keygenCommand.Path -t ed25519 -f $KeyPath -N '' 2>&1)
+        $keygenExitCode = $LASTEXITCODE
+        if ($keygenExitCode -ne 0) {
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'Home-Assistant-SSH-Schlüssel erstellen' -Target $RemoteHost -DiagnosticText ($keygenOutput -join [Environment]::NewLine) -Context @("Executable=$($keygenCommand.Path)", "ExitCode=$keygenExitCode")
+            throw "SSH-Schlüssel konnte nicht erstellt werden (Exitcode $keygenExitCode)."
+        }
         Write-HostLog -Message ("Neuer ED25519-Key erstellt: {0}" -f $KeyPath) -RemoteHost $RemoteHost -LogFile $LogFile -Level Success
     } else {
         Write-HostLog -Message ("SSH-Key '{0}' bereits vorhanden." -f $KeyPath) -RemoteHost $RemoteHost -LogFile $LogFile -Level Info
@@ -285,7 +292,13 @@ function Ensure-SSHKeyExists {
     $pubPath = "$KeyPath.pub"
     if (-not (Test-Path $pubPath)) {
         Write-HostLog -Message ("Public Key '{0}' fehlt - generiere aus Private Key..." -f $pubPath) -RemoteHost $RemoteHost -LogFile $LogFile -Level Warning
-        ssh-keygen -y -f $KeyPath > $pubPath
+        $publicKeyOutput = @(& $keygenCommand.Path -y -f $KeyPath 2>&1)
+        $keygenExitCode = $LASTEXITCODE
+        if ($keygenExitCode -ne 0) {
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'Öffentlichen Home-Assistant-SSH-Schlüssel erzeugen' -Target $RemoteHost -DiagnosticText ($publicKeyOutput -join [Environment]::NewLine) -Context @("Executable=$($keygenCommand.Path)", "ExitCode=$keygenExitCode")
+            throw "Öffentlicher SSH-Schlüssel konnte nicht erzeugt werden (Exitcode $keygenExitCode)."
+        }
+        $publicKeyOutput | Set-Content -LiteralPath $pubPath -Encoding utf8
         Write-HostLog -Message ("Public Key erzeugt: {0}" -f $pubPath) -RemoteHost $RemoteHost -LogFile $LogFile -Level Success
     }
 }
@@ -310,12 +323,15 @@ function Ensure-SSHKeyOnHA {
     $target = "$User@$RemoteHost"
 
     Write-HostLog -Message ("Teste SSH-Key-Login zu {0} (BatchMode)..." -f $target) -RemoteHost $RemoteHost -LogFile $LogFile -Level Info
-    $test = & $SSHPath -i $KeyPath -p $Port -o BatchMode=yes $target "echo OK" 2>$null
+    $test = @(& $SSHPath -i $KeyPath -p $Port -o BatchMode=yes $target "echo OK" 2>&1)
+    $testExitCode = $LASTEXITCODE
 
-    if ($test -eq "OK") {
+    if ($testExitCode -eq 0 -and ($test -join "`n").Trim() -eq "OK") {
         Write-HostLog -Message "SSH-Key-Login funktioniert bereits - keine Passwortabfrage noetig." -RemoteHost $RemoteHost -LogFile $LogFile -Level Success
         return
     }
+
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'Home-Assistant-SSH-Schlüsselverbindung prüfen' -Target $RemoteHost -DiagnosticText ($test -join [Environment]::NewLine) -Context @("Target=$target", "ExitCode=$testExitCode", 'Fallback=Passwortgestützte Schlüsselinstallation')
 
     Write-HostLog -Message "SSH-Key-Login funktioniert noch nicht - einmalige Passwortabfrage folgt." -RemoteHost $RemoteHost -LogFile $LogFile -Level Warning
     Write-HostLog -Message ("Bitte Passwort fuer {0} in der folgenden SSH-Abfrage eingeben." -f $target) -RemoteHost $RemoteHost -LogFile $LogFile -Level Info
@@ -330,31 +346,43 @@ function Ensure-SSHKeyOnHA {
 
     # Den SSH-Prompt auf stderr am Terminal belassen; nur Remote-stdout verwerfen.
     & $SSHPath -p $Port -o StrictHostKeyChecking=accept-new $target $remoteCmd 1>$null
+    $installExitCode = $LASTEXITCODE
+    if ($installExitCode -ne 0) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'Home-Assistant-SSH-Schlüssel installieren' -Target $RemoteHost -Context @("Target=$target", "ExitCode=$installExitCode")
+        throw "SSH-Schlüsselinstallation auf $RemoteHost fehlgeschlagen (Exitcode $installExitCode)."
+    }
 
-    $test2 = & $SSHPath -i $KeyPath -p $Port -o BatchMode=yes $target "echo OK" 2>$null
+    $test2 = @(& $SSHPath -i $KeyPath -p $Port -o BatchMode=yes $target "echo OK" 2>&1)
+    $test2ExitCode = $LASTEXITCODE
 
-    if ($test2 -eq "OK") {
+    if ($test2ExitCode -eq 0 -and ($test2 -join "`n").Trim() -eq "OK") {
         Write-HostLog -Message "SSH-Key auf Host installiert und erfolgreich getestet - zukuenftige Logins sind passwortlos." -RemoteHost $RemoteHost -LogFile $LogFile -Level Success
     } else {
         Write-HostLog -Message "Fehler: SSH-Key wurde installiert, aber Login mit Key funktioniert trotzdem nicht." -RemoteHost $RemoteHost -LogFile $LogFile -Level Error
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'Home-Assistant-SSH-Schlüsselverbindung nach Einrichtung prüfen' -Target $RemoteHost -DiagnosticText ($test2 -join [Environment]::NewLine) -Context @("Target=$target", "ExitCode=$test2ExitCode")
         throw "SSH-Key-Login fehlgeschlagen."
     }
 }
 
 function Test-HAKeyLogin {
-    param([string]$RemoteHost, [string]$User, [int]$Port, [string]$KeyPath, [string]$SSHPath)
+    param([string]$RemoteHost, [string]$User, [int]$Port, [string]$KeyPath, [string]$SSHPath, [AllowEmptyString()][string]$LogFile = '')
     $target = "$User@$RemoteHost"
     $sshArguments = @(Get-WindowsUpdateSshArguments -KeyPath $KeyPath -Port $Port -BatchMode)
     $sshArguments += $target, 'echo OK'
-    $test = & $SSHPath @sshArguments 2>$null
-    return ($LASTEXITCODE -eq 0 -and ($test -join "`n").Trim() -eq 'OK')
+    $test = @(& $SSHPath @sshArguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    $success = ($exitCode -eq 0 -and ($test -join "`n").Trim() -eq 'OK')
+    if (-not $success -and $LogFile) {
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'Home-Assistant-SSH-Verbindung prüfen' -Target $RemoteHost -DiagnosticText ($test -join [Environment]::NewLine) -Context @("Target=$User@$RemoteHost", "ExitCode=$exitCode")
+    }
+    return $success
 }
 
 if ($CheckOnly) {
     $setupIssue = ''
     if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
         $setupIssue = 'Lokaler SSH-Privatschlüssel fehlt; Home-Assistant-Verteilung erforderlich.'
-    } elseif (-not (Test-HAKeyLogin -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath)) {
+    } elseif (-not (Test-HAKeyLogin -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile)) {
         $setupIssue = 'SSH-Schlüsselverbindung nicht bestätigt; Home-Assistant-Verteilung und Verbindung prüfen.'
     }
     if (-not [string]::IsNullOrWhiteSpace($setupIssue)) {
@@ -405,17 +433,27 @@ function Invoke-HA {
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $pinfo
-    $proc.Start() | Out-Null
-
-    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
-    if (-not $proc.WaitForExit($effectiveTimeoutSeconds * 1000)) {
-        try { $proc.Kill($true) } catch { }
-        throw "HA-Befehl '$Command' hat das Zeitlimit von $effectiveTimeoutSeconds Sekunden überschritten."
+    try {
+        $proc.Start() | Out-Null
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit($effectiveTimeoutSeconds * 1000)) {
+            $killFailure = ''
+            try { $proc.Kill($true) } catch { $killFailure = $_.Exception.ToString() }
+            $timeoutError = [System.TimeoutException]::new("HA-Befehl '$Command' hat das Zeitlimit von $effectiveTimeoutSeconds Sekunden überschritten.")
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'HomeAssistant-SSH-Befehl' -Target $RemoteHost -ErrorRecord $timeoutError -Context @("Command=$Command", "TimeoutSeconds=$effectiveTimeoutSeconds", $(if ($killFailure) { "Prozessbeendigung=$killFailure" }))
+            throw $timeoutError
+        }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        $exit = $proc.ExitCode
     }
-    $stdout = $stdoutTask.GetAwaiter().GetResult()
-    $stderr = $stderrTask.GetAwaiter().GetResult()
-    $exit = $proc.ExitCode
+    catch {
+        if (-not ($_.Exception -is [System.TimeoutException])) {
+            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'HomeAssistant-SSH-Prozess starten oder ausführen' -Target $RemoteHost -ErrorRecord $_ -Context @("Command=$Command", "Executable=$SSHPath")
+        }
+        throw
+    }
 
     $outText = ($stdout + "`n" + $stderr).Trim()
 
@@ -517,21 +555,27 @@ function Wait-HAAfterReboot {
     $deadline = (Get-Date).AddSeconds($script:HARebootWaitSeconds)
     $attempt = 0
     $lastExitCode = $null
+    $lastResponse = @()
     do {
         $attempt++
         $arguments = @(Get-WindowsUpdateSshArguments -KeyPath $KeyPath -Port $Port -BatchMode -AcceptNewHostKey)
         $arguments += ("{0}@{1}" -f $User, $HAHost), 'ha core info --raw-json'
-        $response = & $SSHPath @arguments 2>$null
+        $response = @(& $SSHPath @arguments 2>&1)
         $lastExitCode = $LASTEXITCODE
         if ($LASTEXITCODE -eq 0 -and (($response -join [Environment]::NewLine) -match '"version"')) {
             Write-HostLog -Message 'Home Assistant ist nach dem Neustart wieder erreichbar.' -RemoteHost $HAHost -LogFile $LogFile -Level Success
             return
         }
+        $lastResponse = $response
+        if ((Get-Date) -lt $deadline) {
+            Write-HostLog -Message "Wiederverbindungsversuch $attempt fehlgeschlagen (SSH-Exitcode $lastExitCode); neuer Versuch in 10 Sekunden." -RemoteHost $HAHost -LogFile $LogFile -Level Info -LogOnly
+        }
         Start-Sleep -Seconds 10
     } while ((Get-Date) -lt $deadline)
     Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } `
         -Operation 'HomeAssistant-Wiedererreichbarkeit nach Neustart' -Target $HAHost `
-        -Context @("TimeoutSeconds=$script:HARebootWaitSeconds", "Attempts=$attempt", "LastSSHExitCode=$lastExitCode")
+        -DiagnosticText ($lastResponse -join [Environment]::NewLine) `
+        -Context @("TimeoutSeconds=$script:HARebootWaitSeconds", "Attempts=$attempt", "LastSSHExitCode=$lastExitCode", "SSHPath=$SSHPath")
     throw "Home Assistant war nach $script:HARebootWaitSeconds Sekunden noch nicht wieder bereit."
 }
 
