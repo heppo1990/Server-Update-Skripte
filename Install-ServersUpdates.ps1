@@ -1348,9 +1348,53 @@ tr:nth-child(even) { background-color: #f9f9f9; }
       }
     } else {
       `$workerPhase = 'Verbleibende zurückgestellte Updates prüfen'
-      `$remainingUpdates = @()
-      foreach (`$kb in `$deferredKBs) { `$remainingUpdates += @(Get-WindowsUpdate -KBArticleID `$kb -ErrorAction Stop) }
-      foreach (`$category in `$categories) { `$remainingUpdates += @(Get-WindowsUpdate -Category `$category -ErrorAction Stop) }
+      function Add-DeferredUpdateCandidate {
+        param([object]`$Candidate, [System.Collections.Generic.List[object]]`$Target)
+        if (`$null -eq `$Candidate) { return }
+        if (`$Candidate -is [System.Collections.IEnumerable] -and
+            `$Candidate -isnot [string] -and
+            `$Candidate -isnot [System.Collections.IDictionary]) {
+          foreach (`$nestedCandidate in `$Candidate) {
+            Add-DeferredUpdateCandidate -Candidate `$nestedCandidate -Target `$Target
+          }
+          return
+        }
+        if (`$Candidate -is [string] -and [string]::IsNullOrWhiteSpace(`$Candidate)) { return }
+        `$identityFound = `$false
+        foreach (`$fieldName in @('KB', 'KBArticleID', 'KBArticleIDs', 'Title', 'UpdateTitle', 'Name', 'UpdateID', 'UpdateIdentity', 'Identity', 'Size', 'MaxDownloadSize')) {
+          `$field = `$Candidate.PSObject.Properties[`$fieldName]
+          if (`$field -and `$null -ne `$field.Value -and -not [string]::IsNullOrWhiteSpace([string]`$field.Value)) {
+            `$identityFound = `$true
+            break
+          }
+        }
+        if (-not `$identityFound) {
+          `$candidateType = `$Candidate.GetType().FullName
+          `$candidateProperties = @(`$Candidate.PSObject.Properties | ForEach-Object { `$_.Name }) -join ', '
+          throw "Die Restprüfung lieferte ein nicht identifizierbares Ergebnis (Typ=`$candidateType; Eigenschaften=[`$candidateProperties])."
+        }
+        `$Target.Add(`$Candidate)
+      }
+      `$remainingUpdateList = [System.Collections.Generic.List[object]]::new()
+      foreach (`$kb in `$deferredKBs) {
+        foreach (`$candidate in @(Get-WindowsUpdate -KBArticleID `$kb -ErrorAction Stop)) {
+          Add-DeferredUpdateCandidate -Candidate `$candidate -Target `$remainingUpdateList
+        }
+      }
+      foreach (`$category in `$categories) {
+        foreach (`$candidate in @(Get-WindowsUpdate -Category `$category -ErrorAction Stop)) {
+          Add-DeferredUpdateCandidate -Candidate `$candidate -Target `$remainingUpdateList
+        }
+      }
+      `$remainingUpdates = @(`$remainingUpdateList.ToArray())
+      # Ein Update kann mehreren zurückgestellten Kategorien angehören.
+      `$seenRemainingUpdates = @{}
+      `$remainingUpdates = @(`$remainingUpdates | Where-Object {
+        `$identity = Get-DeferredUpdateField -Update `$_ -Names @('KB', 'KBArticleID', 'KBArticleIDs', 'UpdateID', 'UpdateIdentity', 'Identity', 'Title', 'UpdateTitle', 'Name')
+        if ([string]::IsNullOrWhiteSpace([string]`$identity)) { throw 'Ein verbliebenes Update besitzt keine auswertbare Identität.' }
+        if (`$seenRemainingUpdates.ContainsKey([string]`$identity)) { `$false }
+        else { `$seenRemainingUpdates[[string]`$identity] = `$true; `$true }
+      })
       if (`$remainingUpdates.Count -gt 0) {
         `$waitForReboot = `$true
         `$remainingTitles = @(`$remainingUpdates | ForEach-Object { if (`$_.Title) { [string]`$_.Title } else { [string]`$_.KB } } | Where-Object { -not [string]::IsNullOrWhiteSpace(`$_) } | Select-Object -Unique)
