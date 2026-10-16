@@ -295,7 +295,7 @@ try {
                 # Nur alte Versionen entfernen, nicht gleiche
                 if (Test-Path $TargetBase) {
                     Get-ChildItem $TargetBase -Directory | Where-Object { $_.Name -ne "$SourceVersion" } | ForEach-Object {
-                        Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                        Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop
                         Write-SetupLog "Alte Version entfernt: $($_.Name)" "INFO"
                     }
                 }
@@ -412,7 +412,7 @@ try {
         } else {
             if ($existingCert) {
                 Write-SetupLog "Erneuere Zertifikat (ForceUpdate)..." "UPDATE"
-                Remove-Item -Path $existingCert.PSPath -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path $existingCert.PSPath -Force -ErrorAction Stop
             } else {
                 Write-SetupLog "Erstelle neues selbstsigniertes Zertifikat für $hostname..." "INFO"
             }
@@ -444,7 +444,7 @@ try {
         } else {
             if ($httpsListener) {
                 Write-SetupLog "Entferne alten HTTPS-Listener..." "INFO"
-                Remove-Item -Path $httpsListener.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path $httpsListener.PSPath -Recurse -Force -ErrorAction Stop
             }
             Write-SetupLog "Erstelle WinRM HTTPS-Listener..." "INFO"
             try {
@@ -794,7 +794,7 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
     
     # New-PSRoleCapabilityFile hat keinen -Force Parameter -> Datei vorher loeschen
     if (Test-Path $RoleCapabilityFile) {
-        Remove-Item -Path $RoleCapabilityFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $RoleCapabilityFile -Force -ErrorAction Stop
         Write-SetupLog "Alte Role Capability Datei entfernt" "INFO"
     }
     # ModuleVersion NICHT angeben - PowerShell findet das Modul sonst nicht wenn
@@ -817,7 +817,7 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
         }
     )
     if (Test-Path -LiteralPath $CheckRoleCapabilityFile) {
-        Remove-Item -LiteralPath $CheckRoleCapabilityFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $CheckRoleCapabilityFile -Force -ErrorAction Stop
     }
     New-PSRoleCapabilityFile -Path $CheckRoleCapabilityFile `
                              -ModulesToImport @('PSWindowsUpdate', $JeaModuleName) `
@@ -837,7 +837,7 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
     
     # New-PSSessionConfigurationFile hat keinen -Force Parameter -> Datei vorher loeschen
     if (Test-Path $PermanentPSSC) {
-        Remove-Item -Path $PermanentPSSC -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $PermanentPSSC -Force -ErrorAction Stop
         Write-SetupLog "Alte Session Configuration Datei entfernt" "INFO"
     }
     # Windows Server 2016 (Build 14393) verarbeitet JEA mit
