@@ -1205,17 +1205,44 @@ finally {
     # bestehen bleiben.
     if ($FinalizeJEA) {
         try {
-            if (Get-Command -Name Unregister-ScheduledTask -ErrorAction SilentlyContinue) {
-                Unregister-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -Confirm:$false -ErrorAction SilentlyContinue
+            $unregisterCommand = Get-Command -Name Unregister-ScheduledTask -ErrorAction SilentlyContinue
+            if ($unregisterCommand) {
+                $existingTask = $null
+                try { $existingTask = Get-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -ErrorAction Stop }
+                catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }
+                if ($existingTask) {
+                    Unregister-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -Confirm:$false -ErrorAction Stop
+                    $remainingTask = $null
+                    try { $remainingTask = Get-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -ErrorAction Stop }
+                    catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }
+                    if ($remainingTask) {
+                        throw 'Die temporäre JEA-Finalisierungsaufgabe ist nach dem Entfernen weiterhin registriert.'
+                    }
+                }
             }
             else {
                 # Windows 7 bereinigt die einmalige Finalisierungsaufgabe über schtasks.exe.
                 $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
                 if (Test-Path -LiteralPath $schtasks -PathType Leaf) {
-                    & $schtasks /Delete /TN 'WindowsUpdateAdm-Finalize' /F *> $null
+                    $queryOutput = @(& $schtasks /Query /TN 'WindowsUpdateAdm-Finalize' 2>&1)
+                    $queryExitCode = $LASTEXITCODE
+                    if ($queryExitCode -eq 0) {
+                        $deleteOutput = @(& $schtasks /Delete /TN 'WindowsUpdateAdm-Finalize' /F 2>&1)
+                        $deleteExitCode = $LASTEXITCODE
+                        if ($deleteExitCode -ne 0) {
+                            throw "schtasks.exe konnte die temporäre JEA-Finalisierungsaufgabe nicht löschen (Exitcode $deleteExitCode): $($deleteOutput -join ' ')"
+                        }
+                    }
+                    elseif (($queryOutput -join ' ') -notmatch '(?i)(cannot find|does not exist|nicht gefunden|existiert nicht)') {
+                        throw "Vorhandensein der temporären JEA-Finalisierungsaufgabe konnte nicht geprüft werden (Exitcode $queryExitCode): $($queryOutput -join ' ')"
+                    }
                 }
             }
-        } catch { }
+        }
+        catch {
+            Write-SetupLog 'WARN: Temporäre JEA-Finalisierungsaufgabe konnte nicht sicher entfernt werden; Details stehen im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'Temporäre JEA-Finalisierungsaufgabe entfernen' -ErrorRecord $_ -Context 'FinalizeJEA=true'
+        }
     }
     # Zertifikatsvalidierung in jedem Fall wiederherstellen
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $OriginalCertificateCallback
