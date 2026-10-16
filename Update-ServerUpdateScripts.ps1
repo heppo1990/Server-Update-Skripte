@@ -889,7 +889,13 @@ function Invoke-PowerShellWingetUpdateCheck {
 
 try {
     $serverCaption = ''
-    try { $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+    try {
+        $serverCaption = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption
+    }
+    catch {
+        Write-ServerUpdateUpdaterDiagnostic -Operation 'Betriebssystem vor WinGet-Reparatur ermitteln' -ErrorRecord $_ -Context 'Reparaturfreigabe nur für Windows Server 2019/2022; automatische Reparatur wird bei unbekannter Version ausgelassen.'
+        Write-Warning 'Betriebssystem konnte nicht erkannt werden; WinGet-Reparatur wird vorsorglich ausgelassen. Details stehen im Updater-Protokoll.'
+    }
     $wingetRepairSupported = $serverCaption -match 'Windows Server (2019|2022)'
     Write-Host 'Prüfe mit Microsoft.WinGet.Client unter Windows PowerShell 5.1 auf ein PowerShell-7-Update ...'
     $wingetCheck = Invoke-PowerShellWingetUpdateCheck
