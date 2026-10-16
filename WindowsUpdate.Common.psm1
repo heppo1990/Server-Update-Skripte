@@ -1765,18 +1765,49 @@ function Reset-WindowsUpdateRemoteWinGetSources {
 
     $resetScript = {
         $ErrorActionPreference = 'Stop'
-        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
         $knownDefaultSources = @('msstore', 'winget', 'winget-font')
-        $configuredSources = @(Get-WinGetSource -ErrorAction Stop)
-        if ($configuredSources.Count -eq 0) { throw 'WinGet-Quellenliste war leer; Quellenreset abgebrochen.' }
-        $customSources = @($configuredSources | Where-Object { [string]$_.Name -notin $knownDefaultSources } | ForEach-Object { [string]$_.Name } | Select-Object -Unique)
+        $appInstaller = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+            Where-Object { $_.Status -eq 'Ok' -and $_.InstallLocation } |
+            Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+        if ($appInstaller.Count -eq 0) { throw 'Microsoft Desktop App Installer ist für den Remoting-Benutzer nicht registriert.' }
+        $wingetPath = Join-Path ([string]$appInstaller[0].InstallLocation) 'winget.exe'
+        if (-not (Test-Path -LiteralPath $wingetPath -PathType Leaf)) { throw "winget.exe fehlt im App-Installer-Paketpfad: $wingetPath" }
+
+        $sourceList = (& $wingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+        $sourceListExitCode = $LASTEXITCODE
+        if ($sourceListExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($sourceList)) {
+            throw "WinGet-Quellenliste konnte vor dem Reset nicht zuverlässig gelesen werden (Exitcode $sourceListExitCode): $sourceList"
+        }
+        $configuredSourceNames = @(
+            foreach ($line in ($sourceList -split "`r?`n")) {
+                if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name }
+            }
+        )
+        if ($configuredSourceNames.Count -eq 0) { throw 'WinGet-Quellenliste enthielt keine auswertbaren Quellen; Reset abgebrochen.' }
+        $customSources = @($configuredSourceNames | Where-Object { $_ -notin $knownDefaultSources } | Select-Object -Unique)
         if ($customSources.Count -gt 0) {
             throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); Reset wurde ausgelassen, damit diese erhalten bleiben."
         }
 
-        Reset-WinGetSource -All -ErrorAction Stop | Out-Null
-        Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
-        $sourcesAfterReset = @(Get-WinGetSource -ErrorAction Stop | ForEach-Object { [string]$_.Name })
+        $resetOutput = (& $wingetPath source reset --force --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+        $resetExitCode = $LASTEXITCODE
+        if ($resetExitCode -ne 0) { throw "WinGet-CLI-Quellenreset fehlgeschlagen (Exitcode $resetExitCode): $resetOutput" }
+
+        # Den Katalog unmittelbar über dieselbe CLI aktualisieren, die der
+        # Benutzer remote erfolgreich getestet hat. Die folgende Paketabfrage
+        # läuft anschließend über eine neue WinRM-Verbindung.
+        $updateOutput = (& $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+        $updateExitCode = $LASTEXITCODE
+        if ($updateExitCode -ne 0) { throw "WinGet-Quelle 'winget' konnte nach dem Reset nicht aktualisiert werden (Exitcode $updateExitCode): $updateOutput" }
+
+        $sourcesAfterResetOutput = (& $wingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+        $sourcesAfterResetExitCode = $LASTEXITCODE
+        if ($sourcesAfterResetExitCode -ne 0) { throw "WinGet-Quellenliste konnte nach dem Reset nicht gelesen werden (Exitcode $sourcesAfterResetExitCode): $sourcesAfterResetOutput" }
+        $sourcesAfterReset = @(
+            foreach ($line in ($sourcesAfterResetOutput -split "`r?`n")) {
+                if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name }
+            }
+        )
         $missingDefaults = @($knownDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
         if ($missingDefaults.Count -gt 0) { throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')." }
 
@@ -1794,7 +1825,13 @@ function Reset-WindowsUpdateRemoteWinGetSources {
             }
             catch { $markerWarning = $_.Exception.ToString() }
         }
-        [pscustomobject]@{ Success = $true; Message = 'WinGet-Standardquellen wurden zurückgesetzt.'; MarkerWarning = $markerWarning }
+        [pscustomobject]@{
+            Success = $true
+            Message = "WinGet-Standardquellen wurden per CLI zurückgesetzt und 'winget' aktualisiert."
+            ResetOutput = $resetOutput
+            SourceUpdateOutput = $updateOutput
+            MarkerWarning = $markerWarning
+        }
     }
 
     $firstFailure = ''
@@ -1806,6 +1843,7 @@ function Reset-WindowsUpdateRemoteWinGetSources {
             $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
                 -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName "Quellenreset auf $ComputerName" -WriteLog $WriteLog)
             if ($result.Count -eq 0 -or -not $result[-1].Success) { throw "Quellenreset auf $ComputerName lieferte keine Erfolgsbestätigung." }
+            Write-CommonLog $WriteLog "WinGet-CLI-Quellenreset auf $ComputerName erfolgreich: $([string]$result[-1].Message) Reset-Ausgabe: $([string]$result[-1].ResetOutput) Quellenupdate-Ausgabe: $([string]$result[-1].SourceUpdateOutput)"
             if (-not [string]::IsNullOrWhiteSpace([string]$result[-1].MarkerWarning)) {
                 Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'WinGet-Quellenreset-Zeitmarker speichern' -Target $ComputerName -DiagnosticText ([string]$result[-1].MarkerWarning) -Context @('Reset selbst war erfolgreich; die 24-Stunden-Begrenzung kann nicht zuverlässig greifen.')
             }
@@ -2718,22 +2756,40 @@ catch {
         }
 
         function Reset-WingetDefaultSources {
-            Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+            param([Parameter(Mandatory)][string]$Path)
             $knownDefaultSources = @('msstore', 'winget', 'winget-font')
-            $configuredSources = @(Get-WinGetSource -ErrorAction Stop)
-            if ($configuredSources.Count -eq 0) {
-                throw 'WinGet-Quellenliste war leer; Quellenreset abgebrochen.'
+            $configuredOutput = (& $Path source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+            $configuredExitCode = $LASTEXITCODE
+            if ($configuredExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($configuredOutput)) {
+                throw "WinGet-Quellenliste konnte vor dem Reset nicht zuverlässig gelesen werden (Exitcode $configuredExitCode): $configuredOutput"
             }
-            $customSources = @($configuredSources | Where-Object { [string]$_.Name -notin $knownDefaultSources } | ForEach-Object { [string]$_.Name } | Select-Object -Unique)
+            $configuredNames = @(
+                foreach ($line in ($configuredOutput -split "`r?`n")) {
+                    if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name }
+                }
+            )
+            if ($configuredNames.Count -eq 0) { throw 'WinGet-Quellenliste enthielt keine auswertbaren Quellen; Reset abgebrochen.' }
+            $customSources = @($configuredNames | Where-Object { $_ -notin $knownDefaultSources } | Select-Object -Unique)
             if ($customSources.Count -gt 0) {
                 throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); Reset wurde ausgelassen, damit diese erhalten bleiben."
             }
 
-            # winget-font ist eine Standardquelle. Reset-WinGetSource -All
-            # entspricht dem bewährten manuellen source reset --force.
-            Reset-WinGetSource -All -ErrorAction Stop | Out-Null
-            Assert-WinGetPackageManager -ErrorAction Stop | Out-Null
-            $sourcesAfterReset = @(Get-WinGetSource -ErrorAction Stop | ForEach-Object { [string]$_.Name })
+            # Den explizit bewährten CLI-Reset verwenden. Anschließend wird die
+            # Paketquelle vor dem Retry aktualisiert.
+            $resetOutput = (& $Path source reset --force --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+            $resetExitCode = $LASTEXITCODE
+            if ($resetExitCode -ne 0) { throw "WinGet-CLI-Quellenreset fehlgeschlagen (Exitcode $resetExitCode): $resetOutput" }
+            $updateOutput = (& $Path source update --name winget --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+            $updateExitCode = $LASTEXITCODE
+            if ($updateExitCode -ne 0) { throw "WinGet-Quelle 'winget' konnte nach dem Reset nicht aktualisiert werden (Exitcode $updateExitCode): $updateOutput" }
+            $sourcesAfterOutput = (& $Path source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+            $sourcesAfterExitCode = $LASTEXITCODE
+            if ($sourcesAfterExitCode -ne 0) { throw "WinGet-Quellenliste konnte nach dem Reset nicht gelesen werden (Exitcode $sourcesAfterExitCode): $sourcesAfterOutput" }
+            $sourcesAfterReset = @(
+                foreach ($line in ($sourcesAfterOutput -split "`r?`n")) {
+                    if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name }
+                }
+            )
             $missingDefaults = @($knownDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
             if ($missingDefaults.Count -gt 0) {
                 throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')."
@@ -2965,6 +3021,25 @@ catch {
                         throw "WinGet-Modulabfrage fehlgeschlagen ($moduleQueryFailure); CLI-Fallback ebenfalls fehlgeschlagen: $($_.Exception.Message)"
                     }
                 }
+                # Ein erfolgreicher, aber leerer Modulaufruf gilt nicht allein
+                # als Beleg dafür, dass keine Updates existieren. WinGet kann
+                # über die CLI Treffer liefern, obwohl das Modul leer zurückkommt.
+                # In diesem Fall dieselbe Benutzerquelle zusätzlich per CLI prüfen.
+                $moduleSourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
+                    Test-WingetSourceFailureLine -Line ([string]$_)
+                })
+                if (-not $wingetCliFallback -and $moduleSourceFailureLines.Count -eq 0 -and
+                    @(Get-WingetUpgradeLines -Output $availableOutput).Count -eq 0) {
+                    $moduleEmptyOutput = [string]$availableOutput
+                    $cliQueryResult = Invoke-WingetCliUpgradeQuery -Path $wingetPath
+                    $availableOutput = [string]$cliQueryResult.Output
+                    $wingetCliFallback = $true
+                    $emptyVerificationSummary = "WinGet-Modul lieferte keine Treffer; CLI-Gegenprüfung über Quellen $(@($cliQueryResult.Sources) -join ', ')."
+                    if (@($cliQueryResult.FailedSources).Count -gt 0) {
+                        $emptyVerificationSummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
+                    }
+                    $wingetDiagnosticOutput = "$emptyVerificationSummary`r`nModulausgabe:`r`n$moduleEmptyOutput`r`nCLI-Gegenprüfung:`r`n$([string]$cliQueryResult.DiagnosticOutput)"
+                }
                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                     Test-WingetSourceFailureLine -Line ([string]$_)
                 })
@@ -3017,9 +3092,6 @@ catch {
                     if ($SourceResetPerformed) {
                         # Die äußere Wiederholungslogik protokolliert den Erfolg
                         # samt neuer Sitzung genau einmal.
-                    }
-                    elseif ($wingetCliFallback) {
-                        $wingetBootstrapMessage += ' WinGet-CLI-Abfrage war erfolgreich; keine Paketupdates verfügbar.'
                     }
                     else {
                         # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
@@ -3100,12 +3172,12 @@ catch {
                             $packageExitCode = [int]$moduleUpdate.ExitCode
                             # WinGet kann in seiner lokalen Quelle noch auf einen
                             # bereits entfernten Manifest-Hash zeigen. In diesem
-                            # Fall aktualisieren wir ausschließlich die winget-Quelle
-                            # (über das WinGet-Modul) und wiederholen das Paket einmal.
+                            # Fall aktualisieren wir die Standardquellen per CLI
+                            # und wiederholen das Paket einmal.
                             if ($packageActionOutput -match '(?i)(0x80190194|GetUpstreamFile failed on source: https://cdn\.winget\.microsoft\.com/cache)') {
                                 try {
-                                    Reset-WingetDefaultSources
-                                    $sourceUpdateOutput = 'WinGet-Quellen über Microsoft.WinGet.Client zurückgesetzt.'
+                                    Reset-WingetDefaultSources -Path $wingetPath
+                                    $sourceUpdateOutput = 'WinGet-Standardquellen per CLI zurückgesetzt und Quelle winget aktualisiert.'
                                     $sourceUpdateExitCode = 0
                                 }
                                 catch {
