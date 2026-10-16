@@ -2133,7 +2133,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '')
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false)
 
         # Winget ist eine benutzerbezogene App-Installer-Anwendung. Im
         # LocalSystem-Kontext ist es nicht zuverlässig verfügbar und darf dort
@@ -2203,20 +2203,27 @@ function Invoke-WindowsUpdatePackageManagers {
         }
 
         function Ensure-WinGetSourcePackageForCurrentUser {
+            param([switch]$Refresh)
             # Die WinGet-Communityquelle wird als benutzerbezogenes AppX-Paket
             # bereitgestellt. In nicht interaktiven WinRM-Sitzungen kann WinGet
             # den Index zwar herunterladen, aber nicht zuverlässig registrieren.
             # Deshalb fehlt er später trotz erreichbarer Quelle im Benutzerprofil.
+            # Ein Quellenreset kann den Fehler allein nicht beheben: Auch ein
+            # vorhandenes, als Ok markiertes Paket wird nach einem leeren Suchlauf
+            # einmal direkt per AppX erneuert.
             $bootstrapScript = @'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$refreshSource = __REFRESH_SOURCE__
 $sourcePath = $null
 $sourceChanged = $false
+$sourceRefreshed = $false
 try {
     $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
         Where-Object { $_.Status -eq 'Ok' })
-    if ($registered.Count -eq 0) {
+    if ($registered.Count -eq 0 -or $refreshSource) {
         $sourceChanged = $true
+        $sourceWasRegistered = $registered.Count -gt 0
         $sourcePath = Join-Path $env:TEMP ('winget-source-{0}.msix' -f [guid]::NewGuid().ToString('N'))
         Invoke-WebRequest -Uri 'https://cdn.winget.microsoft.com/cache/source2.msix' `
             -OutFile $sourcePath -UseBasicParsing -ErrorAction Stop
@@ -2226,8 +2233,9 @@ try {
         if ($registered.Count -eq 0) {
             throw 'Das WinGet-Quellenpaket wurde nach Add-AppxPackage im aktuellen Benutzerprofil nicht gefunden.'
         }
+        $sourceRefreshed = $sourceWasRegistered
     }
-    [Console]::Out.WriteLine('__WINGETSOURCE__SUCCESS|{0}|{1}', [string]$registered[-1].Version, $sourceChanged)
+    [Console]::Out.WriteLine('__WINGETSOURCE__SUCCESS|{0}|{1}|{2}', [string]$registered[-1].Version, $sourceChanged, $sourceRefreshed)
 }
 catch {
     [Console]::Error.WriteLine($_.Exception.ToString())
@@ -2239,6 +2247,7 @@ finally {
     }
 }
 '@
+            $bootstrapScript = $bootstrapScript.Replace('__REFRESH_SOURCE__', [string]([bool]$Refresh).ToString().ToLowerInvariant())
             $shellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if (-not (Test-Path -LiteralPath $shellPath -PathType Leaf)) {
                 throw 'Windows PowerShell 5.1 wurde für die WinGet-Quellenregistrierung nicht gefunden.'
@@ -2251,10 +2260,11 @@ finally {
             if ($exitCode -ne 0 -or $successLine.Count -eq 0) {
                 throw "Registrierung des WinGet-Quellenpakets fehlgeschlagen (Exitcode $exitCode): $output"
             }
-            $successFields = $successLine[0] -split '\|', 3
+            $successFields = $successLine[0] -split '\|', 4
             return [pscustomobject]@{
-                Changed = [bool]::Parse($successFields[2])
+                Changed = [bool]::Parse($successFields[2]) -and -not [bool]::Parse($successFields[3])
                 Version = $successFields[1]
+                Refreshed = [bool]::Parse($successFields[3])
                 Output = $output
             }
         }
@@ -2940,13 +2950,22 @@ catch {
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
                 try {
-                    $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser
+                    $refreshSourcePackage = $SourceResetPerformed -or $SourcePackageRefreshPerformed
+                    $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser -Refresh:$refreshSourcePackage
                     if ($sourcePackageRegistration.Output -match '__WINGETSOURCE__SUCCESS') {
-                        $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer verfügbar (Version $($sourcePackageRegistration.Version))."
+                        if ($sourcePackageRegistration.Refreshed) {
+                            $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer nach leerer Abfrage erneuert (Version $($sourcePackageRegistration.Version))."
+                        } else {
+                            $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer verfügbar (Version $($sourcePackageRegistration.Version))."
+                        }
                     }
                     if ($sourcePackageRegistration.Changed) {
-                        $wingetBootstrapMessage += ' WinGet-Quellenpaket wurde ergänzt; Abfrage wird in einer neuen Verbindung wiederholt.'
-                        $wingetReconnectRequired = $true
+                        if ($refreshSourcePackage) {
+                            $wingetBootstrapMessage += ' WinGet-Quellenpaket wurde im aktuellen Remoting-Kontext ergänzt.'
+                        } else {
+                            $wingetBootstrapMessage += ' WinGet-Quellenpaket wurde ergänzt; Abfrage wird in einer neuen Verbindung wiederholt.'
+                            $wingetReconnectRequired = $true
+                        }
                     }
                 }
                 catch {
@@ -3109,7 +3128,13 @@ catch {
                             return @($result)
                         }
                         else {
-                            $wingetBootstrapMessage += ' WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar. Quellenreset wegen des 24-Stunden-Limits übersprungen.'
+                            $result += [PSCustomObject]@{
+                                Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                                Packages=@(); AvailableOutput=$availableOutput
+                                ActionOutput='WinGet-Suche war leer und der Quellenreset ist noch durch das 24-Stunden-Limit gesperrt; das Quellenpaket muss erneuert und die Abfrage wiederholt werden.'
+                                RetryAfterSourcePackageRefresh=$true
+                            }
+                            return @($result)
                         }
                     }
                 }
@@ -3318,6 +3343,7 @@ catch {
         $firstWingetResult = $null
         $retryRequired = $false
         $retryRequiresSourceReset = $false
+        $retryRequiresSourcePackageRefresh = $false
         $retryReason = ''
         $firstDiagnostic = ''
         $retryDiagnostic = ''
@@ -3329,7 +3355,7 @@ catch {
                 ComputerName = $ComputerName
                 AuthInfo = $AuthInfo
                 ScriptBlock = $packageScript
-                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','))
+                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false)
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
                 WriteLog = $WriteLog
@@ -3342,11 +3368,17 @@ catch {
             $firstDiagnosticProperty = $firstWingetResult.PSObject.Properties['DiagnosticOutput']
             if ($firstDiagnosticProperty) { $firstDiagnostic = [string]$firstDiagnosticProperty.Value }
             $resetProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourceReset']
+            $sourcePackageRefreshProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourcePackageRefresh']
             $connectionProperty = $firstWingetResult.PSObject.Properties['RetryFreshConnection']
             if ($resetProperty -and [bool]$resetProperty.Value) {
                 $retryRequired = $true
                 $retryRequiresSourceReset = $true
                 $retryReason = 'Quellenreset erforderlich'
+            }
+            elseif ($sourcePackageRefreshProperty -and [bool]$sourcePackageRefreshProperty.Value) {
+                $retryRequired = $true
+                $retryRequiresSourcePackageRefresh = $true
+                $retryReason = 'WinGet-Quellenpaket muss im Remoting-Benutzerkontext erneuert werden'
             }
             elseif ($connectionProperty -and [bool]$connectionProperty.Value) {
                 $retryRequired = $true
@@ -3367,7 +3399,11 @@ catch {
         }
 
         if ($retryRequired) {
-            $retryDescription = if ($retryRequiresSourceReset) { 'Quellenreset und einmalige Wiederholung' } else { 'einmalige Wiederholung' }
+            $retryDescription = if ($retryRequiresSourceReset) {
+                'Quellenreset, Erneuerung des WinGet-Quellenpakets und einmalige Wiederholung'
+            } elseif ($retryRequiresSourcePackageRefresh) {
+                'Erneuerung des WinGet-Quellenpakets und einmalige Wiederholung'
+            } else { 'einmalige Wiederholung' }
             $sourceResetPerformed = $false
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
@@ -3380,12 +3416,13 @@ catch {
                     $sourceResetPerformed = $true
                     Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen Sitzung."
                 }
+                $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $sourceResetPerformed
 
                 $retryParameters = @{
                     ComputerName = $ComputerName
                     AuthInfo = $AuthInfo
                     ScriptBlock = $packageScript
-                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','))
+                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed)
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
                     WriteLog = $WriteLog
@@ -3410,10 +3447,12 @@ catch {
                     if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet meldete einen Abfragefehler.' }
                     throw "Wiederholungsprüfung fehlgeschlagen: $retryDetail"
                 }
-                $retryMessage = if ($retryRequiresSourceReset -and @($retryResult.Packages).Count -eq 0) {
-                    'WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar.'
+                $retryMessage = if ($sourcePackageRefreshPerformed -and @($retryResult.Packages).Count -eq 0) {
+                    'WinGet-Abfrage nach Erneuerung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar.'
                 } elseif ($retryRequiresSourceReset) {
-                    'WinGet-Wiederholungsprüfung nach Quellenreset in neuer Sitzung erfolgreich.'
+                    'WinGet-Wiederholungsprüfung nach Quellenreset und Erneuerung des Quellenpakets erfolgreich.'
+                } elseif ($retryRequiresSourcePackageRefresh) {
+                    'WinGet-Wiederholungsprüfung nach Erneuerung des Quellenpakets erfolgreich.'
                 } else {
                     'WinGet-Wiederholungsprüfung in neuer Sitzung erfolgreich.'
                 }
