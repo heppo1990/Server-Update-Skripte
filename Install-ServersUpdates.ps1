@@ -1269,6 +1269,67 @@ try {
       catch { throw "Gespeicherte Installationsresultate konnten nicht gelesen werden: `$(`$_.Exception.Message)" }
     }
     `$results = @(`$previousResults) + @(`$results)
+    # Ein Update kann vor dem Neustart installiert worden sein, bevor der
+    # Worker seine Installationsresultate dauerhaft speichern konnte. Ergänze
+    # deshalb erfolgreiche, passende Einträge aus dem Verlauf seit Aufgabenanlage.
+    try {
+      `$historyEntries = @(Get-WUHistory -ErrorAction Stop)
+      `$historyResults = foreach (`$entry in `$historyEntries) {
+        if (`$null -eq `$entry.PSObject.Properties['Date']) { continue }
+        try { `$historyDate = [DateTime]`$entry.Date } catch { continue }
+        if (`$historyDate -lt `$registeredAt.ToLocalTime()) { continue }
+
+        `$historyResult = [string]`$entry.Result
+        if ([string]::IsNullOrWhiteSpace(`$historyResult) -and `$entry.PSObject.Properties['ResultCode']) {
+          `$historyResult = switch ([int]`$entry.ResultCode) {
+            2 { 'Succeeded' }
+            3 { 'Succeeded With Errors' }
+            default { [string]`$entry.ResultCode }
+          }
+        }
+        if (`$historyResult -notmatch '^(Succeeded|Erfolgreich)$') { continue }
+
+        `$historyKB = [string]`$entry.KB
+        `$historyTitle = [string]`$entry.Title
+        `$historyCategoryText = @(`$entry.Categories | ForEach-Object { [string]`$_ }) -join '; '
+        `$matchesDeferredSelection = `$false
+        foreach (`$deferredKB in `$deferredKBs) {
+          if (-not [string]::IsNullOrWhiteSpace(`$historyKB) -and
+              (`$historyKB -split '[,;\s]+' | Where-Object { `$_.Trim() -eq `$deferredKB.Trim() })) {
+            `$matchesDeferredSelection = `$true
+            break
+          }
+        }
+        if (-not `$matchesDeferredSelection) {
+          foreach (`$deferredCategory in `$categories) {
+            if (-not [string]::IsNullOrWhiteSpace(`$deferredCategory) -and
+                (`$historyCategoryText -like "*`$deferredCategory*" -or `$historyTitle -like "*`$deferredCategory*")) {
+              `$matchesDeferredSelection = `$true
+              break
+            }
+          }
+        }
+        if (-not `$matchesDeferredSelection) { continue }
+
+        [pscustomobject]@{
+          ComputerName = if (`$entry.PSObject.Properties['ComputerName']) { [string]`$entry.ComputerName } else { [string]`$env:COMPUTERNAME }
+          Status = 'Succeeded'
+          Result = 'Succeeded'
+          KB = `$historyKB
+          Size = if (`$entry.PSObject.Properties['Size']) { [string]`$entry.Size } else { '' }
+          Title = `$historyTitle
+          UpdateID = if (`$entry.PSObject.Properties['UpdateID']) { [string]`$entry.UpdateID } else { '' }
+        }
+      }
+      if (`$historyResults) {
+        Write-DeferredLog "Ergänze `$(@(`$historyResults).Count) erfolgreiche zurückgestellte Installation(en) aus dem Updateverlauf seit Aufgabenanlage."
+        # Verlaufsresultate stehen vorn, damit bei Duplikaten der bestätigte
+        # Erfolgsstatus statt eines früheren Accepted-/Download-Status bleibt.
+        `$results = @(`$historyResults) + @(`$results)
+      }
+    } catch {
+      Write-DeferredLog "WARNUNG: Erfolgreiche Installationen konnten nicht aus dem Windows-Updateverlauf ergänzt werden: `$(`$_.Exception.Message)"
+    }
     `$seenUpdateKeys = @{}
     `$results = @(`$results | Where-Object {
       `$updateKB = [string]`$_.KB
