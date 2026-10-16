@@ -2041,30 +2041,63 @@ function Invoke-WindowsUpdatePackageManagers {
         $isSystemContext = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
 
         function Resolve-WingetExecutable {
-            # WinGet kann nach einer Installation in derselben Sitzung noch
-            # ohne App-Ausführungsalias im PATH liegen. Deshalb zusätzlich
-            # den tatsächlich installierten Paketpfad durchsuchen.
-            $command = Get-Command winget -ErrorAction SilentlyContinue
-            $patterns = @()
-            if ($command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) { $patterns += [string]$command.Source }
-            if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { $patterns += Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe' }
+            # Bevorzugt die EXE aus dem für diesen Benutzer registrierten
+            # App-Installer-Paket. Der WindowsApps-App-Ausführungsalias kann
+            # veraltet sein oder auf eine andere Paketversion zeigen.
+            $registeredPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
+                Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending)
+            foreach ($registeredPackage in $registeredPackages) {
+                $registeredExecutable = Join-Path ([string]$registeredPackage.InstallLocation) 'winget.exe'
+                if (Test-Path -LiteralPath $registeredExecutable -PathType Leaf -ErrorAction SilentlyContinue) {
+                    return $registeredExecutable
+                }
+            }
+
+            # Falls das Paket für den Benutzer nicht registriert ist, die
+            # installierten WindowsApps-Pfade nach Paketversion durchsuchen.
             $programFilesRoots = @('C:\Program Files', $env:ProgramFiles) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+            $installedCandidates = @()
             foreach ($programFilesRoot in $programFilesRoots) {
+                $patterns = @()
                 $patterns += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe'
                 # Neuere bzw. paketierte Layouts verwenden Unterordner für Version und Architektur.
                 $patterns += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller\*\winget.exe'
                 $patterns += Join-Path $programFilesRoot 'WindowsApps\Microsoft.DesktopAppInstaller\*\*\winget.exe'
-            }
-            $candidates = @()
-            foreach ($pattern in $patterns) {
-                if ($pattern -match '[*?]') {
-                    $candidates += Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-                } elseif (Test-Path -LiteralPath $pattern -PathType Leaf -ErrorAction SilentlyContinue) {
-                    $candidates += $pattern
+                foreach ($pattern in $patterns) {
+                    $paths = if ($pattern -match '[*?]') {
+                        @(Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+                    } elseif (Test-Path -LiteralPath $pattern -PathType Leaf -ErrorAction SilentlyContinue) {
+                        @($pattern)
+                    } else { @() }
+                    foreach ($candidatePath in $paths) {
+                        $candidateItem = Get-Item -LiteralPath $candidatePath -ErrorAction SilentlyContinue
+                        if (-not $candidateItem) { continue }
+                        $versionMatch = [regex]::Match($candidatePath, 'Microsoft\.DesktopAppInstaller_(?<Version>\d+(?:\.\d+){1,3})_')
+                        $candidateVersion = if ($versionMatch.Success) { try { [version]$versionMatch.Groups['Version'].Value } catch { [version]'0.0' } } else { [version]'0.0' }
+                        $installedCandidates += [pscustomobject]@{
+                            Path = $candidatePath
+                            Version = $candidateVersion
+                            LastWriteTime = $candidateItem.LastWriteTime
+                        }
+                    }
                 }
             }
-            foreach ($candidatePath in @($candidates | Select-Object -Unique)) {
-                if (Test-Path -LiteralPath $candidatePath -PathType Leaf -ErrorAction SilentlyContinue) { return $candidatePath }
+            $bestInstalledCandidate = @($installedCandidates | Sort-Object Version, LastWriteTime -Descending | Select-Object -First 1)
+            if ($bestInstalledCandidate.Count -gt 0 -and
+                (Test-Path -LiteralPath $bestInstalledCandidate[0].Path -PathType Leaf -ErrorAction SilentlyContinue)) {
+                return [string]$bestInstalledCandidate[0].Path
+            }
+
+            # Alias bzw. PATH nur als letzte Rückfalloption verwenden.
+            $command = Get-Command winget -ErrorAction SilentlyContinue
+            if ($command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source) -and
+                (Test-Path -LiteralPath ([string]$command.Source) -PathType Leaf -ErrorAction SilentlyContinue)) {
+                return [string]$command.Source
+            }
+            if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+                $aliasPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+                if (Test-Path -LiteralPath $aliasPath -PathType Leaf -ErrorAction SilentlyContinue) { return $aliasPath }
             }
             return $null
         }
@@ -2242,7 +2275,7 @@ catch {
         function Test-WingetNonPackageOutputLine {
             param([AllowNull()][string]$Line)
             if ([string]::IsNullOrWhiteSpace($Line)) { return $true }
-            return $Line -match '(?i)(Terms of Transaction|terms of use|Nutzungsbedingungen|Vereinbarungen der Quelle|Vereinbarungen vor der Verwendung|geographic region|geografische Region|two-letter region|zwei Buchstaben.*Region|accept.*agreement|Zustimmung.*Vereinbarung|no installed package found|es wurde kein installiertes Paket gefunden|no available upgrade|no upgrades available|keine Paketupdates verfügbar|keine Aktualisierungen verfügbar|failed when searching|Fehler beim Durchsuchen der Quelle|Ergebnisse werden nicht einbezogen|results? (?:are )?not included|Store terms|Store-Bedingungen)'
+            return $Line -match '(?i)([\u2580-\u259F]|\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)|\b\d{1,3}%\b|Terms of Transaction|terms of use|Nutzungsbedingungen|Vereinbarungen der Quelle|Vereinbarungen vor der Verwendung|geographic region|geografische Region|two-letter region|zwei Buchstaben.*Region|accept.*agreement|Zustimmung.*Vereinbarung|no installed package found|es wurde kein installiertes Paket gefunden|no available upgrade|no upgrades available|keine Paketupdates verfügbar|keine Aktualisierungen verfügbar|failed when searching|Fehler beim Durchsuchen der Quelle|Ergebnisse werden nicht einbezogen|results? (?:are )?not included|Store terms|Store-Bedingungen)'
         }
 
         function Get-WingetCompactOutput {
@@ -2307,8 +2340,24 @@ catch {
                     [Console]::OutputEncoding = $utf8
                     $OutputEncoding = $utf8
                 } catch { }
+                function Remove-WingetProgressOutput {
+                    param([AllowNull()][string]$Text)
+                    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+                    $clean = [regex]::Replace($Text, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+                    $clean = $clean -replace "`r`n", "`n" -replace "`r", "`n"
+                    $keptLines = foreach ($line in ($clean -split "`n")) {
+                        $trimmed = ([string]$line).Trim()
+                        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                        if ($trimmed -match '[\u2580-\u259F]' -or
+                            $trimmed -match '(?i)\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)' -or
+                            $trimmed -match '^\s*(?:[-\\|/]\s*){1,3}$' -or
+                            $trimmed -match '^\s*\d{1,3}%\s*$') { continue }
+                        $trimmed
+                    }
+                    return (@($keptLines) -join [Environment]::NewLine)
+                }
                 try {
-                    $sourceListOutput = (& $WingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+                    $sourceListOutput = Remove-WingetProgressOutput -Text ((& $WingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim())
                     $sourceListExitCode = $LASTEXITCODE
                     $sourceListError = ''
                 }
@@ -2363,7 +2412,7 @@ catch {
                     )
                     if ($queryDefinition.Explicit) { $arguments += @('--source', $sourceName) }
                     try {
-                        $output = (& $WingetPath @arguments 2>&1 | Out-String -Width 1200).Trim()
+                        $output = Remove-WingetProgressOutput -Text ((& $WingetPath @arguments 2>&1 | Out-String -Width 1200).Trim())
                         $sourceResults += [pscustomobject]@{
                             Source = $sourceName; Output = $output; ExitCode = $LASTEXITCODE; Error = ''
                         }
