@@ -768,7 +768,11 @@ function Invoke-ServerUpdateScripts {
         $isSystemRun = $false
         try {
             $isSystemRun = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18'
-        } catch { }
+        }
+        catch {
+            Write-ServerUpdateUpdaterDiagnostic -Operation 'SYSTEM-Ausführungskontext nach Skriptupdate ermitteln' -ErrorRecord $_ -Context 'Der aktualisierte Check wird im aktuellen Prozess fortgesetzt, da der Ausführungskontext nicht sicher bestimmt werden konnte.'
+            Write-Warning 'Ausführungskontext konnte nicht bestimmt werden; der aktualisierte Check wird im aktuellen Prozess fortgesetzt. Details stehen im Updater-Protokoll.'
+        }
         if ($isSystemRun -and $scriptName -ieq 'Check-ServersUpdates.ps1') {
             try {
                 $powerShellExecutable = (Get-Process -Id $PID -ErrorAction Stop).Path
@@ -882,7 +886,12 @@ function Invoke-PowerShellWingetUpdateCheck {
     $jsonLine = @($rawOutput | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^\s*\{.*"State"\s*:' } | Select-Object -Last 1)
     if ($jsonLine.Count -eq 0) { return [PSCustomObject]@{ ExitCode = 1; Output = (($rawOutput -join ' ') -replace '\s+', ' ').Trim(); State = 'Error' } }
     try { $result = $jsonLine[0] | ConvertFrom-Json -ErrorAction Stop }
-    catch { return [PSCustomObject]@{ ExitCode = 1; Output = 'Ungültige Rückgabe von Microsoft.WinGet.Client.'; State = 'Error' } }
+    catch {
+        $rawResponse = (($rawOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)
+        if ($rawResponse.Length -gt 4000) { $rawResponse = $rawResponse.Substring(0, 4000) + ' … [gekürzt]' }
+        Write-ServerUpdateUpdaterDiagnostic -Operation 'WinGet-Ergebnis der PowerShell-Vorabprüfung auswerten' -ErrorRecord $_ -Context "Ungültige JSON-Rückgabe aus Windows PowerShell 5.1. Ausgabe: $rawResponse"
+        return [PSCustomObject]@{ ExitCode = 1; Output = 'Ungültige Rückgabe von Microsoft.WinGet.Client; Details stehen im Updater-Protokoll.'; State = 'Error' }
+    }
     $exitCode = if ($result.State -eq 'NoUpdate') { -1978335189 } elseif ($result.State -eq 'Updated') { 0 } else { 1 }
     return [PSCustomObject]@{ ExitCode = $exitCode; Output = [string]$result.Output; State = [string]$result.State }
 }
