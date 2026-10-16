@@ -304,7 +304,8 @@ function Clear-WindowsUpdateCache {
   try {
     try {
       $result = Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $Servername -AuthInfo $AuthInfo `
-        -ScriptBlock $clearCacheScript -ArgumentList @($detectWait) -TimeoutSeconds 300 -OperationName "Cache-Bereinigung auf $Servername"
+        -ScriptBlock $clearCacheScript -ArgumentList @($detectWait) -TimeoutSeconds 300 -OperationName "Cache-Bereinigung auf $Servername" `
+        -WriteLog { param($message) Write-ScriptLog $message $true }
     }
     catch {
       Write-ScriptLog "WARNUNG: Cache-Bereinigung via WinRM auf $Servername fehlgeschlagen; Details im Log."
@@ -750,7 +751,8 @@ if ($ServerADList -ne $null) {
         $skipWingetReason = ''
         if ($targetEnableWinget) {
           try {
-            $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $svcCredential -TimeoutSeconds 30
+            $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $svcCredential -TimeoutSeconds 30 `
+              -WriteLog { param($message) Write-ScriptLog $message $true }
             if ([string]$targetOsInfo.Caption -match '(?i)Windows Server 2016') {
               $targetEnableWinget = $false
               $skipWingetReason = "WinGet wird auf $($targetOsInfo.Caption) (Build $($targetOsInfo.BuildNumber)) nicht geprüft; Chocolatey und Windows Update laufen weiter."
