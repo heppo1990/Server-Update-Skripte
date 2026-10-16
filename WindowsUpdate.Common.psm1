@@ -1781,6 +1781,8 @@ function Reset-WindowsUpdateRemoteWinGetSources {
         if ($missingDefaults.Count -gt 0) { throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')." }
 
         $stateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $env:ProgramData } else { $env:LOCALAPPDATA }
+        $markerWarning = ''
+        if ([string]::IsNullOrWhiteSpace($stateRoot)) { $markerWarning = 'Weder ProgramData noch LOCALAPPDATA stehen für den 24-Stunden-Marker zur Verfügung.' }
         if (-not [string]::IsNullOrWhiteSpace($stateRoot)) {
             $stateDirectory = Join-Path $stateRoot 'ServerUpdateSkripte'
             $markerPath = Join-Path $stateDirectory 'WingetAllSourcesResetUtc.txt'
@@ -1790,9 +1792,9 @@ function Reset-WindowsUpdateRemoteWinGetSources {
                 }
                 [IO.File]::WriteAllText($markerPath, [DateTime]::UtcNow.ToString('o'), [Text.UTF8Encoding]::new($false))
             }
-            catch { Write-Warning "24-Stunden-Marker für WinGet-Quellenreset konnte nicht gespeichert werden: $($_.Exception.Message)" }
+            catch { $markerWarning = $_.Exception.ToString() }
         }
-        [pscustomobject]@{ Success = $true; Message = 'WinGet-Standardquellen wurden zurückgesetzt.' }
+        [pscustomobject]@{ Success = $true; Message = 'WinGet-Standardquellen wurden zurückgesetzt.'; MarkerWarning = $markerWarning }
     }
 
     $firstFailure = ''
@@ -1804,7 +1806,10 @@ function Reset-WindowsUpdateRemoteWinGetSources {
             $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo `
                 -ScriptBlock $resetScript -TimeoutSeconds $TimeoutSeconds -OperationName "Quellenreset auf $ComputerName" -WriteLog $WriteLog)
             if ($result.Count -eq 0 -or -not $result[-1].Success) { throw "Quellenreset auf $ComputerName lieferte keine Erfolgsbestätigung." }
-            if ($attempt -gt 1) { Write-CommonLog $WriteLog "WinGet-Quellenreset auf $ComputerName nach einmaliger Wiederholung erfolgreich." }
+            if (-not [string]::IsNullOrWhiteSpace([string]$result[-1].MarkerWarning)) {
+                Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'WinGet-Quellenreset-Zeitmarker speichern' -Target $ComputerName -DiagnosticText ([string]$result[-1].MarkerWarning) -Context @('Reset selbst war erfolgreich; die 24-Stunden-Begrenzung kann nicht zuverlässig greifen.')
+            }
+            if ($attempt -gt 1) { Write-CommonLog $WriteLog "WinGet-Quellenreset auf $ComputerName nach einmaliger Wiederholung erfolgreich; erster Fehler: $firstFailure" }
             return $result[-1]
         }
         catch {
@@ -1816,6 +1821,7 @@ function Reset-WindowsUpdateRemoteWinGetSources {
             }
 
             $firstFailure = $resetFailure
+            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'WinGet-Quellenreset wiederholen' -Target $ComputerName -DiagnosticText $resetFailure -Context @('Transienter AppX-Fehler; Wiederholung=1/1; Wartezeit=10s; danach frische WinRM-Verbindung')
             Write-CommonLog $WriteLog "WinGet-Quellenreset auf $ComputerName traf auf einen vorübergehenden AppX-Fehler; neuer Versuch in 10 Sekunden über eine frische Verbindung."
             Start-Sleep -Seconds 10
         }
