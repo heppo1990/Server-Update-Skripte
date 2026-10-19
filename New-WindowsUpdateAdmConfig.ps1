@@ -60,6 +60,11 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$FinalizeJEA,
 
+    # Interne Übergabe: Der SYSTEM-Finalisierungslauf schreibt in dasselbe
+    # Protokoll wie das vorausgehende Remote-Setup.
+    [Parameter(Mandatory=$false)]
+    [string]$ResumeLogPath,
+
     # Wird von der zentralen Verteilung gesetzt, wenn WinGet-Updates aktiviert sind.
     [Parameter(Mandatory=$false)]
     [switch]$InstallWinGetClientModule,
@@ -104,9 +109,30 @@ $script:SetupSucceeded = $false
 try {
     $setupLogDirectory = Join-Path $env:ProgramData 'WindowsUpdateAdm\Logs'
     New-Item -Path $setupLogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
-    $script:SetupLogPath = Join-Path $setupLogDirectory ('Setup_{0}_{1}.log' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd_HHmmss'))
-    $retention = Invoke-WindowsUpdateFileRetention -Directory $setupLogDirectory -Filter ("Setup_{0}_*.log" -f $env:COMPUTERNAME) -KeepFiles 9
-    if (@($retention.FailedFiles).Count -gt 0) { Write-Verbose 'Ältere Setup-Protokolle konnten nicht vollständig bereinigt werden.' }
+    $resumeLogIsValid = $false
+    if ($FinalizeJEA -and -not [string]::IsNullOrWhiteSpace($ResumeLogPath)) {
+        try {
+            $expectedLogDirectory = [IO.Path]::GetFullPath($setupLogDirectory).TrimEnd('\')
+            $candidateLogPath = [IO.Path]::GetFullPath($ResumeLogPath)
+            $candidateDirectory = [IO.Path]::GetDirectoryName($candidateLogPath).TrimEnd('\')
+            $candidateNamePattern = '^{0}_\d{{8}}_\d{{6}}\.log$' -f [regex]::Escape("Setup_$env:COMPUTERNAME")
+            $resumeLogIsValid =
+                $candidateDirectory -ieq $expectedLogDirectory -and
+                [IO.Path]::GetFileName($candidateLogPath) -match $candidateNamePattern -and
+                (Test-Path -LiteralPath $candidateLogPath -PathType Leaf)
+            if ($resumeLogIsValid) { $script:SetupLogPath = $candidateLogPath }
+        }
+        catch {
+            $resumeLogIsValid = $false
+        }
+    }
+    if (-not $resumeLogIsValid) {
+        $script:SetupLogPath = Join-Path $setupLogDirectory ('Setup_{0}_{1}.log' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    }
+    if (-not $FinalizeJEA) {
+        $retention = Invoke-WindowsUpdateFileRetention -Directory $setupLogDirectory -Filter ("Setup_{0}_*.log" -f $env:COMPUTERNAME) -KeepFiles 9
+        if (@($retention.FailedFiles).Count -gt 0) { Write-Verbose 'Ältere Setup-Protokolle konnten nicht vollständig bereinigt werden.' }
+    }
 }
 catch {
     Write-Verbose "Setup-Protokoll konnte nicht vorbereitet werden: $($_.Exception.Message)"
@@ -751,7 +777,7 @@ try {
         if (-not (Test-Path -LiteralPath $localPowerShell)) {
             throw "Windows PowerShell 5.1 wurde nicht gefunden: $localPowerShell"
         }
-        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA' -f $PSCommandPath
+        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA -ResumeLogPath "{1}"' -f $PSCommandPath, $script:SetupLogPath
         if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
             # Die SYSTEM-Finalisierung muss dieselbe eingeschränkte JEA-Rolle
             # für den Verwaltungsserver registrieren wie der ursprüngliche Lauf.
