@@ -1,5 +1,6 @@
 # Offene Checkliste
 
+- [ ] Modulumstellung praktisch prüfen: Hauptskripte laden alle Fachmodule, die Verteilung überträgt die nötigen WindowsUpdate-Module, und Linux-/Home-Assistant-Startdateien rufen ihre Module mit Parametern und Selbstupdate korrekt auf.
 - [ ] Nachinstallationsaufgabe nach Neustart und Wartungsfenster praktisch prüfen: wiederholte Ausführung bis zum Abschluss (spätestens nach fünf Tagen Ende), Neustartbedarf korrekt erkennen und beachten, Updates nur im Wartungsfenster installieren sowie genau eine Abschlussmail senden (Erfolg oder endgültiger Fehler).
 - [ ] WinGet-Kompatibilität praktisch prüfen: Auf einem Windows-Server vor Server 2019 (einschließlich SBS) muss WinGet übersprungen werden, während Windows Update und Chocolatey weiterlaufen; auf Server 2019 oder neuer muss WinGet wie konfiguriert funktionieren.
 - [ ] HTTP.sys-Clientzertifikataushandlung praktisch über die Verteilung prüfen: Auf einem Nicht-AD-Ziel mit WinRM HTTPS muss Port 5986 nach der Einrichtung `Clientzertifikat aushandeln: Enabled` zeigen und die Zertifikatsverbindung erfolgreich sein.

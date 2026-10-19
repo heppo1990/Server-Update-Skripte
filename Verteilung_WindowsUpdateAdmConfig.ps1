@@ -67,6 +67,8 @@ $PSSCfgSkriptFile = "New-WindowsUpdateAdmConfig.ps1"
 $CommonModuleFile = 'WindowsUpdate.Common.psm1'
 $PSSCfgSkriptPath = Join-Path $PSScriptRoot 'Komponenten'
 $CommonModulePath = Join-Path $PSScriptRoot 'Module'
+$CommonModuleComponents = @(Get-ChildItem -LiteralPath $CommonModulePath -Filter 'WindowsUpdate.*.psm1' -File -ErrorAction SilentlyContinue |
+    Where-Object Name -ne $CommonModuleFile)
 $ScriptName = [IO.Path]::GetFileNameWithoutExtension($PSCommandPath)
 $script:DeployLogEnabled = $true
 $script:DeployLogFile = $null
@@ -127,7 +129,7 @@ if ([string]::IsNullOrWhiteSpace($TargetComputers)) {
 Write-DeployLog 'WindowsUpdateAdm-Verteilung'
 
 # Voraussetzungen pruefen
-foreach ($requiredSetupFile in @((Join-Path $PSSCfgSkriptPath $PSSCfgSkriptFile), (Join-Path $CommonModulePath $CommonModuleFile))) {
+foreach ($requiredSetupFile in @((Join-Path $PSSCfgSkriptPath $PSSCfgSkriptFile), (Join-Path $CommonModulePath $CommonModuleFile)) + @($CommonModuleComponents.FullName)) {
     if (-not (Test-Path -LiteralPath $requiredSetupFile -PathType Leaf)) {
         Write-DeployLog "FEHLER: Für das Setup benötigte Datei nicht gefunden: $requiredSetupFile" -Level Error
         exit 1
@@ -531,6 +533,11 @@ function Invoke-WinRMDeployment {
         Copy-Item -Path (Join-Path (Join-Path $RootDirectory 'Module') $CommonModuleFile) `
                   -Destination (Join-Path $remoteTemp $CommonModuleFile) `
                   -ToSession $session -Force -ErrorAction Stop
+        foreach ($componentModule in @(Get-ChildItem -LiteralPath (Join-Path $RootDirectory 'Module') -Filter 'WindowsUpdate.*.psm1' -File -ErrorAction Stop |
+                Where-Object Name -ne $CommonModuleFile)) {
+            Copy-Item -LiteralPath $componentModule.FullName -Destination (Join-Path $remoteTemp $componentModule.Name) `
+                      -ToSession $session -Force -ErrorAction Stop
+        }
         if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
             foreach ($moduleDirectory in @(Get-ChildItem -LiteralPath $OfflineModulePayloadRoot -Directory -ErrorAction Stop)) {
                 Copy-Item -LiteralPath $moduleDirectory.FullName -Destination $remoteTemp `

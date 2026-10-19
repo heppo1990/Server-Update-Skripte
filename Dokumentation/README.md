@@ -6,6 +6,8 @@ Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen 
 
 Die direkt ausführbaren Hauptskripte sowie `settings.json` und `default_settings.json` liegen im Stammordner. Fachmodule stehen unter `Module`, Hilfs- und Verteilungsskripte sowie der öffentliche WinRM-Clientschlüssel unter `Komponenten`, diese Dokumentation unter `Dokumentation`. `Logs` und `Sicherungen` werden nur bei Bedarf angelegt, sind in Git ignoriert und gehören nicht als leere Ordner ins Repository. Der öffentliche Schlüssel liegt lokal unter `Komponenten\WinRM-ClientCert.cer`; der private Schlüssel verbleibt im Zertifikatsspeicher des Verwaltungsrechners.
 
+Die Hauptskripte laden gemeinsame Funktionen über `Module\WindowsUpdate.Common.psm1`. Dieses Kompatibilitätsmodul bindet die nach Aufgaben gegliederten `WindowsUpdate.*.psm1`-Module ein. Die Linux- und Home-Assistant-Logik liegt in `Module\Linux.Updates.psm1` und `Module\HomeAssistant.Updates.psm1`; die bisherigen Skriptpfade unter `Komponenten` bleiben als schlanke, rückwärtskompatible Startdateien erhalten.
+
 ## Schnellstart
 
 1. Skripte gemeinsam in einem Verzeichnis ablegen.
