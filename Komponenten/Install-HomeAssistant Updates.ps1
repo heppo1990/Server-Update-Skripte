@@ -13,11 +13,12 @@
     [int]$VMRebootIndexStart = 0
 )
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
-$scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$scriptUpdatePath = Join-Path $repositoryRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
     try {
         $scriptUpdateTemporaryPath = $scriptUpdatePath + '.download'
-        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
+        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Komponenten/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
         Move-Item -LiteralPath $scriptUpdateTemporaryPath -Destination $scriptUpdatePath -Force -ErrorAction Stop
     }
     catch {
@@ -45,10 +46,10 @@ Set-StrictMode -Version Latest
 
 # Home-Assistant-Verbindung aus der Skript- oder allgemeinen settings.json laden.
 # Explizit übergebene Parameter haben immer Vorrang.
-$commonModulePath = Join-Path -Path $PSScriptRoot -ChildPath 'WindowsUpdate.Common.psm1'
+$commonModulePath = Join-Path $repositoryRoot 'Module\WindowsUpdate.Common.psm1'
 Import-Module -Name $commonModulePath -Force -ErrorAction Stop
 
-$settings = Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName ([System.IO.Path]::GetFileNameWithoutExtension($PSCommandPath))
+$settings = Get-WindowsUpdateSettings -ScriptRoot $repositoryRoot -ScriptName ([System.IO.Path]::GetFileNameWithoutExtension($PSCommandPath))
 $haSettings = if ($settings.PSObject.Properties['HomeAssistantSettings']) { $settings.HomeAssistantSettings } else { $null }
 if ($null -eq $haSettings -or -not $haSettings.PSObject.Properties['Host'] -or [string]::IsNullOrWhiteSpace([string]$haSettings.Host)) {
     return
@@ -84,8 +85,8 @@ $script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
     $settings.UpdateSettings.PSObject.Properties['WriteLogFile'] -and
     [bool]$settings.UpdateSettings.WriteLogFile
 $script:QuietMode = $Quiet
-$LogDir = Join-Path $PSScriptRoot "Logs"
-if ($script:WriteExecutionLog -and -not (Test-Path $LogDir)) {
+$LogDir = Join-Path $repositoryRoot "Logs"
+if (-not (Test-Path $LogDir)) {
     New-Item -Path $LogDir -ItemType Directory | Out-Null
 }
 
@@ -388,7 +389,7 @@ if ($CheckOnly) {
     if (-not [string]::IsNullOrWhiteSpace($setupIssue)) {
         Write-HostLog -Message $setupIssue -RemoteHost $HAHost -LogFile $LogFile -Level Warning
         $connectionStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; SetupReady=$false; SetupIssue=$setupIssue; AvailableUpdates=0; UpdateDetails=@(); Error='Einrichtung/SSH nicht bestätigt'; LogFile=$LogFile }
-        $connectionStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
+        $connectionStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $LogDir 'ha_update_check_stats.json') -Encoding utf8
         exit 1
     }
     Write-HostLog -Message 'Home-Assistant-SSH-Einrichtung ist aktuell; es ist keine erneute Verteilung nötig.' -RemoteHost $HAHost -LogFile $LogFile -Level Success
@@ -398,7 +399,7 @@ if ($CheckOnly) {
 
 if ($ConnectionOnly) {
     $connectionStats = [PSCustomObject]@{ Host=$HAHost; Success=$true; SetupReady=$true; SetupIssue=''; AvailableUpdates=0; UpdateDetails=@(); Error=''; LogFile=$LogFile }
-    $connectionStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
+    $connectionStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $LogDir 'ha_update_check_stats.json') -Encoding utf8
     Write-HostLog -Message "SSH-Schlüssel und Verbindung zu $HAHost funktionieren." -RemoteHost $HAHost -LogFile $LogFile -Level Success
     exit 0
 }
@@ -636,7 +637,7 @@ if ($CheckOnly) {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $HAHost -LogFile $LogFile } -Operation 'HomeAssistant-Check' -Target $HAHost -ErrorRecord $_
         $checkStats = [PSCustomObject]@{ Host=$HAHost; Success=$false; SetupReady=$true; SetupIssue=''; AvailableUpdates=0; UpdateDetails=@(); Error='Details im Laufprotokoll'; LogFile=$LogFile }
     }
-    $checkStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ha_update_check_stats.json') -Encoding utf8
+    $checkStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $LogDir 'ha_update_check_stats.json') -Encoding utf8
     if (-not $script:QuietMode) { Write-Host "Home-Assistant-Check: $($checkStats.AvailableUpdates) Update(s) verfügbar." -ForegroundColor Cyan }
     exit $(if ($checkStats.Success) { 0 } else { 1 })
 }
@@ -901,7 +902,7 @@ $HAStats = @{
     HostStatus = @($HostStatus)  # Array für Konsistenz mit Linux-Skript
 }
 
-$StatsFile = Join-Path $PSScriptRoot "ha_update_stats.json"
+$StatsFile = Join-Path $LogDir "ha_update_stats.json"
 $HAStats | ConvertTo-Json -Depth 5 | Set-Content $StatsFile
 
 if ($TotalUpdates -gt 0 -or $Script:UpdateStats.ErrorCount -gt 0) {

@@ -1352,7 +1352,10 @@ function Protect-WindowsUpdateSettingsFilePassword {
         # Ein direkter Settings-Aufruf ohne Updater erhält ebenfalls eine
         # geschützte Sicherung; im regulären Update erledigt dies der gemeinsame
         # Migrationsschritt, sodass nur eine Sicherung pro Änderung entsteht.
-        $backupPath = '{0}.bak.{1}_{2}' -f $Path, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        $directory = Split-Path -Parent $Path
+        $backupDirectory = Join-Path $directory 'Sicherungen'
+        New-Item -Path $backupDirectory -ItemType Directory -Force | Out-Null
+        $backupPath = Join-Path $backupDirectory ('{0}.bak.{1}_{2}' -f (Split-Path -Leaf $Path), (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8)))
         Write-WindowsUpdateJsonAtomically -Path $backupPath -Value $document
         Write-WindowsUpdateJsonAtomically -Path $Path -Value $document
         Write-CommonLog $WriteLog "Mailpasswort in '$([IO.Path]::GetFileName($Path))' automatisch mit DPAPI geschützt."
@@ -1362,7 +1365,12 @@ function Protect-WindowsUpdateSettingsFilePassword {
     # Sicherung erstellen.
     $directory = Split-Path -Parent $Path
     $leaf = Split-Path -Leaf $Path
-    foreach ($oldBackup in @(Get-ChildItem -LiteralPath $directory -Filter ($leaf + '.bak.*') -File -ErrorAction SilentlyContinue)) {
+    $backupDirectory = Join-Path $directory 'Sicherungen'
+    $oldBackups = @(
+        Get-ChildItem -LiteralPath $directory -Filter ($leaf + '.bak.*') -File -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath $backupDirectory -Filter ($leaf + '.bak.*') -File -ErrorAction SilentlyContinue
+    )
+    foreach ($oldBackup in $oldBackups) {
         try {
             $oldDocument = Get-Content -LiteralPath $oldBackup.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
             if (Protect-WindowsUpdateSettingsObjectPassword -Document $oldDocument) {

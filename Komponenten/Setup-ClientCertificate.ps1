@@ -41,11 +41,12 @@ param(
     [switch]$NonInteractive
 )
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
-$scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$scriptUpdatePath = Join-Path $repositoryRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
     try {
         $scriptUpdateTemporaryPath = $scriptUpdatePath + '.download'
-        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
+        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Komponenten/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
         Move-Item -LiteralPath $scriptUpdateTemporaryPath -Destination $scriptUpdatePath -Force -ErrorAction Stop
     }
     catch {
@@ -71,7 +72,7 @@ if ($scriptUpdateLoaded) {
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $repositoryRoot 'Module\WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
 
 $clientCertificateLogPath = Join-Path (Join-Path $env:ProgramData 'ServerUpdateSkripte\Logs') ("Setup-ClientCertificate_{0}_{1}.log" -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd'))
 try {
@@ -116,7 +117,7 @@ Write-Host "`n=== Client-Zertifikat Setup für WinRM ===" -ForegroundColor Cyan
 Write-Host "Verwaltungsserver: $env:COMPUTERNAME" -ForegroundColor Gray
 
 $ScriptName = [IO.Path]::GetFileNameWithoutExtension($PSCommandPath)
-$Settings = Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName $ScriptName -WriteLog {
+$Settings = Get-WindowsUpdateSettings -ScriptRoot $repositoryRoot -ScriptName $ScriptName -WriteLog {
     param($message)
     Write-Host $message -ForegroundColor Gray
 }
@@ -128,17 +129,17 @@ if ([string]::IsNullOrWhiteSpace($currentThumbprint)) {
 }
 
 $certStorePath = "Cert:\CurrentUser\My"
-$exportPath    = Join-Path $PSScriptRoot "WinRM-ClientCert.cer"
+$exportPath    = Join-Path $repositoryRoot "WinRM-ClientCert.cer"
 $certUpn       = "$CertName@localhost"
 $settingsFiles = @()
-$genericSettings = Join-Path $PSScriptRoot 'settings.json'
+$genericSettings = Join-Path $repositoryRoot 'settings.json'
 if (Test-Path $genericSettings) {
     $settingsFiles += $genericSettings
 }
 
 # Alle vorhandenen skriptspezifischen Laufzeit-Konfigurationen ergänzen.
 # Vorlagen und bewusst angelegte Kopien sind nicht aktiv und bleiben unverändert.
-$settingsFiles += Get-ChildItem -Path $PSScriptRoot -File -Filter '*.settings.json' |
+$settingsFiles += Get-ChildItem -Path $repositoryRoot -File -Filter '*.settings.json' |
     Where-Object { $_.Name -notmatch ' - Kopie\.json$' } |
     Select-Object -ExpandProperty FullName
 $settingsFiles = @($settingsFiles | Select-Object -Unique)

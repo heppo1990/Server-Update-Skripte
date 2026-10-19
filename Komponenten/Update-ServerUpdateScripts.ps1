@@ -96,7 +96,7 @@ function Get-ServerUpdateRequiredFiles {
         if ($leafName -ieq 'settings.json' -or $leafName -like '*.settings.json') { continue }
         if ($leafName -match '\.(cer|pfx|p12|key)$') { continue }
         if ($leafName -match '^\.env($|\.)|(^|[._-])(secret|secrets|credential|credentials)([._-]|$)') { continue }
-        if ($relativePath -match '(^|/)(Logs|Reports|Certificates|Secrets|RuntimeData)(/|$)') { continue }
+        if ($relativePath -match '(^|/)(Logs|Sicherungen|Reports|Certificates|Secrets|RuntimeData)(/|$)') { continue }
 
         $isLinuxFile = $leafName -match '^(Install-Linux|Linux[._-])' -or $relativePath -match '(^|/)(Linux|linux)/'
         $isHomeAssistantFile = $leafName -match '^(Install-HomeAssistant|HomeAssistant[._-]|HA[._-])' -or $relativePath -match '(^|/)(HomeAssistant|HA)/'
@@ -391,7 +391,7 @@ function Update-ServerUpdateSettingsDefaults {
         return
     }
 
-    $modulePath = Join-Path $ScriptRoot 'WindowsUpdate.Common.psm1'
+    $modulePath = Join-Path $ScriptRoot 'Module\WindowsUpdate.Common.psm1'
     if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
         Write-Warning 'WindowsUpdate.Common.psm1 fehlt; Settings werden zur Sicherheit nicht migriert.'
         return
@@ -461,7 +461,9 @@ function Update-ServerUpdateSettingsDefaults {
             if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected -and -not $formatChanged) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
-            $backupPath = '{0}.bak.{1}_{2}' -f $settingsPath, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+            $backupDirectory = Join-Path $ScriptRoot 'Sicherungen'
+            New-Item -Path $backupDirectory -ItemType Directory -Force | Out-Null
+            $backupPath = Join-Path $backupDirectory ('{0}.bak.{1}_{2}' -f [IO.Path]::GetFileName($settingsPath), (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), ([guid]::NewGuid().ToString('N').Substring(0, 8)))
             $temporaryPath = '{0}.{1}.tmp' -f $settingsPath, [guid]::NewGuid().ToString('N')
             [System.IO.File]::WriteAllText($backupPath, $backupJson, ([System.Text.UTF8Encoding]::new($false)))
             [System.IO.File]::WriteAllText($temporaryPath, $updatedJson, ([System.Text.UTF8Encoding]::new($false)))
@@ -528,9 +530,24 @@ function Update-ServerUpdateSettingsDefaults {
         }
     }
 
-    # Es bleiben höchstens drei automatisch erzeugte Sicherungen im Skriptordner liegen.
+    # Ältere Sicherungen aus der bisherigen Ablage werden nach der Migration
+    # in den separaten Ordner verschoben. Er entsteht nur, wenn Dateien existieren.
     try {
-        $backupFiles = @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.json.bak.*' -File -ErrorAction SilentlyContinue |
+        $backupDirectory = Join-Path $ScriptRoot 'Sicherungen'
+        $legacyBackupFiles = @(Get-ChildItem -LiteralPath $ScriptRoot -Filter '*.json.bak.*' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(?:settings|.+\.settings)\.json\.bak\.' })
+        if ($legacyBackupFiles.Count -gt 0) {
+            New-Item -Path $backupDirectory -ItemType Directory -Force | Out-Null
+            foreach ($legacyBackupFile in $legacyBackupFiles) {
+                $destination = Join-Path $backupDirectory $legacyBackupFile.Name
+                if (Test-Path -LiteralPath $destination -PathType Leaf) {
+                    $destination = Join-Path $backupDirectory ('{0}.{1}' -f $legacyBackupFile.Name, [guid]::NewGuid().ToString('N'))
+                }
+                Move-Item -LiteralPath $legacyBackupFile.FullName -Destination $destination -ErrorAction Stop
+            }
+        }
+        # Es bleiben höchstens drei automatisch erzeugte Sicherungen liegen.
+        $backupFiles = @(Get-ChildItem -LiteralPath $backupDirectory -Filter '*.json.bak.*' -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^(?:settings|.+\.settings)\.json\.bak\.\d{8}_\d{6}_\d{3}(?:_[a-f0-9]{8})?$' } |
             Sort-Object -Property LastWriteTimeUtc, Name -Descending)
         foreach ($oldBackup in @($backupFiles | Select-Object -Skip 3)) {
@@ -540,6 +557,31 @@ function Update-ServerUpdateSettingsDefaults {
     catch {
         Write-ServerUpdateUpdaterDiagnostic -Operation 'Settings-Sicherungen bereinigen' -ErrorRecord $_ -Context 'Retention'
         Write-Warning "Alte Sicherungen der Einstellungen konnten nicht vollständig bereinigt werden. Ursache: $($_.Exception.Message)"
+    }
+}
+
+function Remove-ServerUpdateLegacyRootFiles {
+    param([Parameter(Mandatory)][string]$ScriptRoot)
+
+    $legacyFiles = @{
+        'WindowsUpdate.Common.psm1' = 'Module/WindowsUpdate.Common.psm1'
+        'Update-ServerUpdateScripts.ps1' = 'Komponenten/Update-ServerUpdateScripts.ps1'
+        'New-WindowsUpdateAdmConfig.ps1' = 'Komponenten/New-WindowsUpdateAdmConfig.ps1'
+        'Setup-ClientCertificate.ps1' = 'Komponenten/Setup-ClientCertificate.ps1'
+        'Install-Linux Updates.ps1' = 'Komponenten/Install-Linux Updates.ps1'
+        'Install-HomeAssistant Updates.ps1' = 'Komponenten/Install-HomeAssistant Updates.ps1'
+    }
+
+    foreach ($legacyName in $legacyFiles.Keys) {
+        $legacyPath = Join-Path $ScriptRoot $legacyName
+        $currentPath = Join-Path $ScriptRoot ($legacyFiles[$legacyName] -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $legacyPath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $currentPath -PathType Leaf)) { continue }
+        try { Remove-Item -LiteralPath $legacyPath -Force -ErrorAction Stop }
+        catch {
+            Write-ServerUpdateUpdaterDiagnostic -Operation 'Alte Skriptdatei nach Ordnerumstellung entfernen' -ErrorRecord $_ -Context $legacyPath
+            Write-Warning "Veraltete Datei '$legacyName' konnte nicht entfernt werden; verwendet wird weiterhin '$($legacyFiles[$legacyName])'."
+        }
     }
 }
 
@@ -570,6 +612,7 @@ function Invoke-ServerUpdateScripts {
     )
 
     $scriptRoot = Split-Path -Parent $ScriptPath
+    if ([IO.Path]::GetFileName($scriptRoot) -ieq 'Komponenten') { $scriptRoot = Split-Path -Parent $scriptRoot }
     $scriptName = [IO.Path]::GetFileName($ScriptPath)
     $script:ServerUpdateUpdaterScriptName = $scriptName
     $updaterLogDirectory = Join-Path $env:ProgramData 'ServerUpdateSkripte\Logs'
@@ -644,6 +687,7 @@ function Invoke-ServerUpdateScripts {
             (Get-ServerUpdateGitBlobSha1 -Path $localPath) -ne $_.Sha
         })
         if ($filesToFetch.Count -eq 0) {
+            Remove-ServerUpdateLegacyRootFiles -ScriptRoot $scriptRoot
             Remove-ServerUpdateObsoleteScripts -ScriptRoot $scriptRoot
             if (-not $isConnectionOnlyRun) { Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot }
             try {
@@ -716,6 +760,7 @@ function Invoke-ServerUpdateScripts {
                     Copy-Item -LiteralPath (Join-Path $stageDirectory $relativePath) -Destination $localPath -Force -ErrorAction Stop
                 }
                 if (-not $isConnectionOnlyRun) { Update-ServerUpdateSettingsDefaults -ScriptRoot $scriptRoot }
+                Remove-ServerUpdateLegacyRootFiles -ScriptRoot $scriptRoot
                 Remove-ServerUpdateObsoleteScripts -ScriptRoot $scriptRoot
             }
             catch {
@@ -858,7 +903,7 @@ function Invoke-WingetRepair {
     if ($ServerCaption -notmatch 'Windows Server (2019|2022)') {
         throw "Die WinGet-Reparatur ist nur für Windows Server 2019 und 2022 vorgesehen (erkannt: $ServerCaption)."
     }
-    $commonModule = Join-Path (Split-Path -Parent $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH) 'WindowsUpdate.Common.psm1'
+    $commonModule = Join-Path (Join-Path (Split-Path -Parent $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH) 'Module') 'WindowsUpdate.Common.psm1'
     if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw 'WindowsUpdate.Common.psm1 für die WinGet-Reparatur fehlt.' }
     Import-Module -Name $commonModule -Force -ErrorAction Stop
     if (-not (Update-WinGetClientModule)) { throw 'Microsoft.WinGet.Client konnte nicht installiert oder aktualisiert werden.' }
@@ -868,7 +913,7 @@ function Invoke-WingetRepair {
 
 function Invoke-PowerShellWingetUpdateCheck {
     $scriptRoot = Split-Path -Parent $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH
-    $commonModulePath = Join-Path $scriptRoot 'WindowsUpdate.Common.psm1'
+    $commonModulePath = Join-Path $scriptRoot 'Module\WindowsUpdate.Common.psm1'
     if (-not (Test-Path -LiteralPath $commonModulePath -PathType Leaf)) { throw 'WindowsUpdate.Common.psm1 fehlt; das WinGet-Modul kann nicht verwendet werden.' }
     $commonModuleLiteral = "'" + $commonModulePath.Replace("'", "''") + "'"
     $checkSource = @(

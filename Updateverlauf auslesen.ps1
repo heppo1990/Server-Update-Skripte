@@ -5,11 +5,11 @@ param(
 )
 
 # Die gemeinsamen Skripte werden beim Start aktualisiert.
-$scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
+$scriptUpdatePath = Join-Path $PSScriptRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
     try {
         $temporaryPath = $scriptUpdatePath + '.download'
-        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $temporaryPath -ErrorAction Stop
+        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Komponenten/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $temporaryPath -ErrorAction Stop
         Move-Item -LiteralPath $temporaryPath -Destination $scriptUpdatePath -Force -ErrorAction Stop
     }
     catch {
@@ -38,7 +38,7 @@ $writeLogFile = $true
 $settings = $null
 $updateSettings = $null
 
-Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Module\WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
 
 function Write-HistoryLog {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [switch]$LogOnly)

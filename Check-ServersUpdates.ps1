@@ -47,11 +47,11 @@
 param([switch]$TestMail)
 
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
-$scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
+$scriptUpdatePath = Join-Path $PSScriptRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
     try {
         $scriptUpdateTemporaryPath = $scriptUpdatePath + '.download'
-        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
+        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Komponenten/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
         Move-Item -LiteralPath $scriptUpdateTemporaryPath -Destination $scriptUpdatePath -Force -ErrorAction Stop
     }
     catch {
@@ -75,7 +75,7 @@ if ($scriptUpdateLoaded) {
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Module\WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
 
 function Get-CheckSettingsFromCommon {
   Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName $ScriptName -WriteLog { param($message) Write-ScriptLog $message }
@@ -1173,15 +1173,15 @@ if ($ServerADList -ne $null) {
 # Linux- und Home-Assistant-Checks laufen ausschließlich lesend in ihren
 # jeweiligen Skripten. Ihre Ergebnisdateien werden in den gemeinsamen Bericht
 # übernommen, ohne Paketinstallation, Backup oder Neustart auszulösen.
-$linuxCheckStatsPath = Join-Path $PSScriptRoot 'linux_update_check_stats.json'
-$haCheckStatsPath = Join-Path $PSScriptRoot 'ha_update_check_stats.json'
+$linuxCheckStatsPath = Join-Path (Join-Path $PSScriptRoot 'Logs') 'linux_update_check_stats.json'
+$haCheckStatsPath = Join-Path (Join-Path $PSScriptRoot 'Logs') 'ha_update_check_stats.json'
 # Reste eines abgebrochenen vorherigen Laufs dürfen nicht in den neuen Bericht
 # einfließen. Die Dateien sind nur ein temporärer Übergabekanal.
 foreach ($staleStatsPath in @($linuxCheckStatsPath, $haCheckStatsPath)) {
   Remove-Item -LiteralPath $staleStatsPath -Force -ErrorAction SilentlyContinue
 }
 
-$linuxCheckScript = Join-Path $PSScriptRoot 'Install-Linux Updates.ps1'
+$linuxCheckScript = Join-Path $PSScriptRoot 'Komponenten\Install-Linux Updates.ps1'
 if (-not $script:IsLocalSystemRun -and $LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
   $LinuxCheckAttempted = $true
   try {
@@ -1234,7 +1234,7 @@ if (-not $script:IsLocalSystemRun -and $LinuxConfigured -and (Test-Path -Literal
   }
 }
 
-$haCheckScript = Join-Path $PSScriptRoot 'Install-HomeAssistant Updates.ps1'
+$haCheckScript = Join-Path $PSScriptRoot 'Komponenten\Install-HomeAssistant Updates.ps1'
 if (-not $script:IsLocalSystemRun -and $HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   $HACheckAttempted = $true
   try {

@@ -92,7 +92,11 @@ param(
 # Dieses Setup wird auf Zielservern nur vorübergehend in %TEMP% ausgeführt.
 # Es lädt dort keine weiteren Repository-Skripte aus GitHub nach.
 Set-StrictMode -Version Latest
-Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
+$commonModulePath = Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1'
+if (-not (Test-Path -LiteralPath $commonModulePath -PathType Leaf)) {
+    $commonModulePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'Module\WindowsUpdate.Common.psm1'
+}
+Import-Module $commonModulePath -Force -ErrorAction Stop
 
 # === TLS-KONFIGURATION GANZ AM ANFANG ===
 try {
@@ -751,7 +755,7 @@ try {
             }
         } else {
             Write-SetupLog "Kein Client-Zertifikat gefunden ($clientCertPath)." "INFO"
-            Write-SetupLog "Zuerst Setup-ClientCertificate.ps1 auf dem Verwaltungsserver ausführen," "INFO"
+            Write-SetupLog "Zuerst Komponenten\Setup-ClientCertificate.ps1 auf dem Verwaltungsserver ausführen," "INFO"
             Write-SetupLog "dann WinRM-ClientCert.cer in den Skriptordner legen und dieses Skript erneut ausführen." "INFO"
             Write-SetupLog "Passwort-Authentifizierung bleibt aktiv." "INFO"
         }

@@ -1,6 +1,10 @@
 # Server Updates
 
-Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen und Home Assistant.
+Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen und Home Assistant. Die Ordnerstruktur muss beim Kopieren vollständig erhalten bleiben.
+
+## Ordnerstruktur
+
+Die direkt ausführbaren Hauptskripte sowie `settings.json` und `default_settings.json` liegen im Stammordner. Fachmodule stehen unter `Module`, Hilfs- und Verteilungsskripte unter `Komponenten`, diese Dokumentation unter `Dokumentation`. `Logs` und `Sicherungen` werden erst bei Bedarf angelegt und gehören nicht als leere Ordner ins Repository.
 
 ## Schnellstart
 
@@ -20,7 +24,7 @@ Bei der WindowsUpdateAdm-Verteilung lädt der Verwaltungsserver PSWindowsUpdate 
 
 ## Wichtig
 
-- Die Skripte aktualisieren beim Start automatisch geänderte Programmdateien aus dem öffentlichen Branch `main` (`UpdateSettings.AutoUpdateScripts`, Standard: `true`). Bei `false` bleiben automatische Updates aus; `Update-ServerUpdateScripts.ps1` lässt sich weiterhin manuell starten. Git muss auf den Zielsystemen nicht installiert sein.
+- Die Skripte aktualisieren beim Start automatisch geänderte Programmdateien aus dem öffentlichen Branch `main` (`UpdateSettings.AutoUpdateScripts`, Standard: `true`). Bei `false` bleiben automatische Updates aus; `Komponenten\Update-ServerUpdateScripts.ps1` lässt sich weiterhin manuell starten. Git muss auf den Zielsystemen nicht installiert sein.
 - Kundeneinstellungen, Zertifikate und Laufzeitdaten werden nicht aus GitHub überschrieben. Fehlende Standardwerte werden in bestehende Settings ergänzt und vorher gesichert.
 - Linux- und Home-Assistant-Skripte werden nur geladen, wenn sie in den Settings konfiguriert sind.
 - Mailversand lässt sich mit `Check-ServersUpdates.ps1 -TestMail` separat prüfen.

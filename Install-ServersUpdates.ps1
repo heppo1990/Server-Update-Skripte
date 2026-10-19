@@ -54,11 +54,11 @@ param(
     [string]$ManagementPowerShellRunTimestamp
 )
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
-$scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
+$scriptUpdatePath = Join-Path $PSScriptRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
     try {
         $scriptUpdateTemporaryPath = $scriptUpdatePath + '.download'
-        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
+        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Komponenten/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
         Move-Item -LiteralPath $scriptUpdateTemporaryPath -Destination $scriptUpdatePath -Force -ErrorAction Stop
     }
     catch {
@@ -84,7 +84,7 @@ if ($scriptUpdateLoaded) {
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Module\WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
 
 function Get-InstallSettingsFromCommon {
   Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName $ScriptName -WriteLog { param($message) Write-ScriptLog $message }
@@ -1976,8 +1976,8 @@ $LinuxScriptExecuted = $false
 $HAScriptExecuted = $false
 
 # Linux-Updates Skript
-$LinuxUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Install-Linux Updates.ps1"
-$LinuxStatsFile = Join-Path $PSScriptRoot "linux_update_stats.json"
+$LinuxUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Komponenten\Install-Linux Updates.ps1"
+$LinuxStatsFile = Join-Path (Join-Path $PSScriptRoot 'Logs') "linux_update_stats.json"
 $IsWindowsOnlyRun = $TargetComputer -and $TargetComputer.Count -gt 0
 if (-not $IsWindowsOnlyRun) {
   # Im Gesamtlauf zählen konfigurierte Linux- und HA-Ziele auch bei fehlender Statistikdatei.
@@ -2044,8 +2044,8 @@ if ($IsWindowsOnlyRun) {
 }
 
 # Home Assistant-Updates Skript
-$HAUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Install-HomeAssistant Updates.ps1"
-$HAStatsFile = Join-Path $PSScriptRoot "ha_update_stats.json"
+$HAUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Komponenten\Install-HomeAssistant Updates.ps1"
+$HAStatsFile = Join-Path (Join-Path $PSScriptRoot 'Logs') "ha_update_stats.json"
 
 if ($IsWindowsOnlyRun) {
   if ($HAConfigured) { Write-ScriptLog "Eingeschränkter Windows-Testlauf: Home-Assistant-Updates werden übersprungen." }

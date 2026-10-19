@@ -29,11 +29,11 @@ param(
     [switch]$CleanupLegacyTempOnly
 )
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
-$scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
+$scriptUpdatePath = Join-Path $PSScriptRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
     try {
         $scriptUpdateTemporaryPath = $scriptUpdatePath + '.download'
-        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
+        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Komponenten/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
         Move-Item -LiteralPath $scriptUpdateTemporaryPath -Destination $scriptUpdatePath -Force -ErrorAction Stop
     }
     catch {
@@ -59,12 +59,14 @@ if ($scriptUpdateLoaded) {
 
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Module\WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
 $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
 
 # Konfiguration
 $PSSCfgSkriptFile = "New-WindowsUpdateAdmConfig.ps1"
 $CommonModuleFile = 'WindowsUpdate.Common.psm1'
+$PSSCfgSkriptPath = Join-Path $PSScriptRoot 'Komponenten'
+$CommonModulePath = Join-Path $PSScriptRoot 'Module'
 $ScriptName = [IO.Path]::GetFileNameWithoutExtension($PSCommandPath)
 $script:DeployLogEnabled = $true
 $script:DeployLogFile = $null
@@ -125,9 +127,9 @@ if ([string]::IsNullOrWhiteSpace($TargetComputers)) {
 Write-DeployLog 'WindowsUpdateAdm-Verteilung'
 
 # Voraussetzungen pruefen
-foreach ($requiredSetupFile in @($PSSCfgSkriptFile, $CommonModuleFile)) {
-    if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $requiredSetupFile) -PathType Leaf)) {
-        Write-DeployLog "FEHLER: Für das Setup benötigte Datei nicht gefunden: $(Join-Path $PSScriptRoot $requiredSetupFile)" -Level Error
+foreach ($requiredSetupFile in @((Join-Path $PSSCfgSkriptPath $PSSCfgSkriptFile), (Join-Path $CommonModulePath $CommonModuleFile))) {
+    if (-not (Test-Path -LiteralPath $requiredSetupFile -PathType Leaf)) {
+        Write-DeployLog "FEHLER: Für das Setup benötigte Datei nicht gefunden: $requiredSetupFile" -Level Error
         exit 1
     }
 }
@@ -192,7 +194,7 @@ if ($includeOptionalSystems) {
 $nonAdTargets = @($Serverlist | Where-Object { $_.DeployType -and $_.DeployType -ne 'AD' })
 if ($nonAdTargets.Count -gt 0) {
     $clientCertificate = Join-Path $PSScriptRoot 'WinRM-ClientCert.cer'
-    $certificateSetup = Join-Path $PSScriptRoot 'Setup-ClientCertificate.ps1'
+    $certificateSetup = Join-Path $PSScriptRoot 'Komponenten\Setup-ClientCertificate.ps1'
     if (-not (Test-Path $certificateSetup)) {
         throw "Das Zertifikat-Setup-Skript wurde nicht gefunden: $certificateSetup"
     }
@@ -523,10 +525,10 @@ function Invoke-WinRMDeployment {
         } -ArgumentList $remoteTemp -ErrorAction Stop
 
         Write-DeployLog "[$Servername] Übertrage Setup."
-        Copy-Item -Path (Join-Path $RootDirectory $PSSCfgSkriptFile) `
+        Copy-Item -Path (Join-Path (Join-Path $RootDirectory 'Komponenten') $PSSCfgSkriptFile) `
                   -Destination (Join-Path $remoteTemp $PSSCfgSkriptFile) `
                   -ToSession $session -Force -ErrorAction Stop
-        Copy-Item -Path (Join-Path $RootDirectory $CommonModuleFile) `
+        Copy-Item -Path (Join-Path (Join-Path $RootDirectory 'Module') $CommonModuleFile) `
                   -Destination (Join-Path $remoteTemp $CommonModuleFile) `
                   -ToSession $session -Force -ErrorAction Stop
         if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
@@ -858,7 +860,7 @@ function Invoke-ServerDeployment {
         }
         # Alle Details protokollieren; wichtige Setup-Phasen live anzeigen,
         # damit längere lokale Einrichtungsschritte erkennbar bleiben.
-        & (Join-Path $RootDirectory $PSSCfgSkriptFile) @localParameters *>&1 | ForEach-Object {
+        & (Join-Path (Join-Path $RootDirectory 'Komponenten') $PSSCfgSkriptFile) @localParameters *>&1 | ForEach-Object {
             $entry = $_
             $entryText = if ($entry -is [System.Management.Automation.InformationRecord]) { [string]$entry.MessageData } else { [string]$entry }
             Write-DeployLog $entryText -LogOnly
@@ -973,9 +975,9 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
     if ($linuxConfigured) { $connectionSetups += [PSCustomObject]@{ Name = 'Linux'; Script = 'Install-Linux Updates.ps1' } }
     if ($haConfigured) { $connectionSetups += [PSCustomObject]@{ Name = 'Home Assistant'; Script = 'Install-HomeAssistant Updates.ps1' } }
     foreach ($connectionSetup in $connectionSetups) {
-        $connectionScript = Join-Path $PSScriptRoot $connectionSetup.Script
+        $connectionScript = Join-Path (Join-Path $PSScriptRoot 'Komponenten') $connectionSetup.Script
         $statsFileName = if ($connectionSetup.Name -eq 'Linux') { 'linux_update_check_stats.json' } else { 'ha_update_check_stats.json' }
-        $statsPath = Join-Path $PSScriptRoot $statsFileName
+        $statsPath = Join-Path (Join-Path $PSScriptRoot 'Logs') $statsFileName
         Remove-Item -LiteralPath $statsPath -Force -ErrorAction SilentlyContinue
         if (-not (Test-Path -LiteralPath $connectionScript)) {
             if ($connectionSetup.Name -eq 'Linux') { $LinuxConnectionErrors = [Math]::Max(1, $LinuxSystemCount) } else { $HAConnectionErrors = 1 }

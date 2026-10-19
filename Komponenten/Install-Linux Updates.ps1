@@ -11,11 +11,12 @@ param(
     [int]$VMRebootIndexStart = 0
 )
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
-$scriptUpdatePath = Join-Path $PSScriptRoot 'Update-ServerUpdateScripts.ps1'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$scriptUpdatePath = Join-Path $repositoryRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
     try {
         $scriptUpdateTemporaryPath = $scriptUpdatePath + '.download'
-        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
+        Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/heppo1990/Server-Update-Skripte/main/Komponenten/Update-ServerUpdateScripts.ps1' -UseBasicParsing -TimeoutSec 20 -OutFile $scriptUpdateTemporaryPath -ErrorAction Stop
         Move-Item -LiteralPath $scriptUpdateTemporaryPath -Destination $scriptUpdatePath -Force -ErrorAction Stop
     }
     catch {
@@ -41,10 +42,10 @@ if ($scriptUpdateLoaded) {
 
 Set-StrictMode -Version Latest
 
-$commonModulePath = Join-Path -Path $PSScriptRoot -ChildPath 'WindowsUpdate.Common.psm1'
+$commonModulePath = Join-Path $repositoryRoot 'Module\WindowsUpdate.Common.psm1'
 Import-Module -Name $commonModulePath -Force -ErrorAction Stop
 
-$settings = Get-WindowsUpdateSettings -ScriptRoot $PSScriptRoot -ScriptName ([IO.Path]::GetFileNameWithoutExtension($PSCommandPath))
+$settings = Get-WindowsUpdateSettings -ScriptRoot $repositoryRoot -ScriptName ([IO.Path]::GetFileNameWithoutExtension($PSCommandPath))
 $linuxSettings = if ($settings.PSObject.Properties['LinuxSettings']) { $settings.LinuxSettings } else { $null }
 if ($null -eq $linuxSettings -or -not $linuxSettings.PSObject.Properties['Hosts'] -or @($linuxSettings.Hosts | Where-Object { $_ }).Count -eq 0) {
     return
@@ -69,7 +70,7 @@ $script:SCPPath = if ($scpCommand) { $scpCommand.Path } else { Join-Path (Split-
 $script:ConnectTimeoutSeconds = if ([int]$linuxSettings.ConnectTimeoutSeconds -gt 0) { [int]$linuxSettings.ConnectTimeoutSeconds } else { 15 }
 $script:LinuxSudoSetupVersion = '1'
 $script:LockWaitIntervals = if ([int]$linuxSettings.LockWaitMinutes -gt 0) { [int]$linuxSettings.LockWaitMinutes * 2 } else { 10 }
-$script:LogDirectory = Join-Path $PSScriptRoot 'Logs'
+$script:LogDirectory = Join-Path $repositoryRoot 'Logs'
 $script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
     $settings.UpdateSettings.PSObject.Properties['WriteLogFile'] -and
     [bool]$settings.UpdateSettings.WriteLogFile
@@ -510,7 +511,7 @@ if (-not (Test-Path -LiteralPath $script:SCPPath)) { throw "OpenSSH-Kopierprogra
 if ($CheckOnly) { $DryRun = $true }
 # Der Check ermittelt den Einrichtungsstatus nur lesend. Schlüssel und sudo-Regeln
 # werden ausschließlich durch Download/Installation bzw. die Verteilung eingerichtet.
-if ($script:WriteExecutionLog -and -not (Test-Path -LiteralPath $script:LogDirectory)) { New-Item -Path $script:LogDirectory -ItemType Directory -Force | Out-Null }
+if (-not (Test-Path -LiteralPath $script:LogDirectory)) { New-Item -Path $script:LogDirectory -ItemType Directory -Force | Out-Null }
 $hostEntries = @(
     foreach ($entry in @($linuxSettings.Hosts)) {
         if ($null -eq $entry) { continue }
@@ -600,7 +601,7 @@ foreach ($entry in $hostEntries) {
     }
 }
 $linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; RebootScheduleFailedHosts=$rebootScheduleFailures; VMRebootsScheduled=$vmRebootsScheduled; PendingPhysicalReboots=@($script:PendingPhysicalReboots); UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
-$statsFile = Join-Path $PSScriptRoot $(if ($CheckOnly -or $ConnectionOnly) { 'linux_update_check_stats.json' } else { 'linux_update_stats.json' })
+$statsFile = Join-Path $script:LogDirectory $(if ($CheckOnly -or $ConnectionOnly) { 'linux_update_check_stats.json' } else { 'linux_update_stats.json' })
 $linuxStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statsFile -Encoding utf8
 $summaryVerb = if ($DryRun) { 'verfügbar' } else { 'installiert' }
 $summaryLabel = if ($CheckOnly) { 'Linux-Check' } else { 'Linux-Zusammenfassung' }
