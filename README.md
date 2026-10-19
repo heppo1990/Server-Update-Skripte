@@ -13,6 +13,7 @@ Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen 
 7. `Updateverlauf auslesen.ps1` erstellt den zentralen Verlaufsbericht und versendet ihn per Mail.
 
 Beim PSWindowsUpdate-Check werden NuGet und PSWindowsUpdate auf dem Verwaltungsrechner und den Windows-Zielen geprüft und bei Bedarf aktualisiert.
+Ist NuGet oder PSGallery auf einem Ziel nicht verfügbar, bleiben vorhandene PSWindowsUpdate- und Microsoft.WinGet.Client-Versionen aktiv und optionale Onlineaktualisierungen werden übersprungen.
 PowerShell 7 prüft zusätzlich PackageManagement auf Updates; auf Remotezielen erfolgt das nur, wenn PowerShell 7 installiert ist.
 Bei der WindowsUpdateAdm-Verteilung lädt der Verwaltungsserver PSWindowsUpdate und – sofern WinGet-Updates aktiviert sind – Microsoft.WinGet.Client vorab als Offline-Pakete. Die Ziele benötigen dafür keinen Zugriff auf NuGet oder PSGallery; temporäre Paketablagen werden nach der Verteilung entfernt.
 `Save-Module` lädt Modulabhängigkeiten selbstständig. Das Verteilungsskript verwendet dafür keinen separaten `-IncludeDependencies`-Parameter und protokolliert bei einem fehlgeschlagenen Paketabruf die konkrete Ursache.

@@ -342,7 +342,7 @@ $updaterDefinition
 
 function Update-NuGetProvider {
     <# Aktualisiert den NuGet-Provider im gemeinsamen Rechnerpfad auf die neueste Bootstrap-Version. #>
-    param([switch]$Force, [scriptblock]$WriteLog)
+    param([switch]$Force, [switch]$Optional, [scriptblock]$WriteLog)
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -370,12 +370,16 @@ function Update-NuGetProvider {
     try {
         # Die Suche prüft Bootstrap-Feed und PSGallery. Ein "No match" aus PSGallery
         # darf die gefundenen Bootstrap-Versionen nicht durch ErrorAction Stop verwerfen.
-        $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction SilentlyContinue |
+        $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction SilentlyContinue -WarningAction SilentlyContinue |
             Where-Object { $_.Source -like 'https://cdn.oneget.org/providers/nuget-*.package.swidtag' } |
             Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
     }
     catch {
         $message = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        if ($Optional) {
+            if ($WriteLog) { & $WriteLog "NuGet-/PSGallery-Onlineprüfung für den optionalen Modulabruf nicht verfügbar; vorhandene PSWindowsUpdate-Version bleibt aktiv: $message" 'INFO' }
+            return $false
+        }
         if ($installedProvider -and $installedProvider.Version -ge $minimumVersion) {
             if ($WriteLog) { & $WriteLog "NuGet-Versionsprüfung nicht verfügbar; vorhandene Version $($installedProvider.Version) bleibt aktiv: $message" 'WARN' }
             return $true
@@ -385,6 +389,10 @@ function Update-NuGetProvider {
     }
 
     if (-not $latestProvider) {
+        if ($Optional) {
+            if ($WriteLog) { & $WriteLog 'NuGet-/PSGallery-Onlineprüfung für den optionalen Modulabruf nicht verfügbar; vorhandene PSWindowsUpdate-Version bleibt aktiv.' 'INFO' }
+            return $false
+        }
         if ($installedProvider -and $installedProvider.Version -ge $minimumVersion) {
             if ($WriteLog) { & $WriteLog "Keine neuere NuGet-Version gefunden; vorhandene Version $($installedProvider.Version) bleibt aktiv." 'INFO' }
             return $true
@@ -403,7 +411,7 @@ function Update-NuGetProvider {
     if ($WriteLog) { & $WriteLog "Aktualisiere NuGet: $oldVersion -> $targetVersion." 'UPDATE' }
     try {
         Install-PackageProvider -Name NuGet -RequiredVersion ([string]$targetVersion) -Scope AllUsers `
-            -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
+            -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
         $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
             Where-Object { $_.ProviderPath -like "$providerRoot\*" -and $_.Version -ge $targetVersion } |
             Sort-Object Version -Descending | Select-Object -First 1
@@ -499,12 +507,6 @@ function Update-PSWindowsUpdateModule {
                     if ($processPolicyAdjusted) {
                         [pscustomobject]@{ Type = 'ModuleLog'; Message = 'PackageManagement wurde mit einer nur für diesen Remoting-Prozess geltenden Ausführungsrichtlinie geladen.'; Level = 'INFO' }
                     }
-                    $null = Update-NuGetProvider -WriteLog $remoteLogger -Force:$forceEnabled
-                    foreach ($entry in @(Update-PS7PackageManagementModule -WriteLog $remoteLogger -Force:$forceEnabled)) {
-                        if ($entry -and $entry.PSObject.Properties['Type'] -and $entry.Type -eq 'ModuleLog') {
-                            [pscustomobject]@{ Type = 'ModuleLog'; Message = [string]$entry.Message; Level = [string]$entry.Level }
-                        }
-                    }
                     if ($ForceUpdate -isnot [bool] -and $null -ne $ForceUpdate) {
                         [pscustomobject]@{ Type = 'ModuleLog'; Message = "Force-Argument remote als $($ForceUpdate.GetType().FullName) empfangen; sicher normalisiert."; Level = 'INFO' }
                     }
@@ -555,6 +557,7 @@ function Update-PSWindowsUpdateModule {
             Sort-Object { [version]$_.Name } -Descending)
     }
     $offlineHandled = $false
+    $onlineUpdateSkipped = $false
     if ($offlineVersions.Count -gt 0) {
         $offlineVersion = [version]$offlineVersions[0].Name
         if (-not $installedModule -or $offlineVersion -gt $installedModule.Version -or $Force) {
@@ -584,11 +587,22 @@ function Update-PSWindowsUpdateModule {
     }
 
     if (-not $offlineHandled) {
+        # Auf abgeriegelten Systemen kann der Provider-Bootstrap nicht online
+        # erfolgen. Ist PSWindowsUpdate bereits vorhanden, bleibt es aktiv und
+        # die optionale Gallery-Versionsprüfung wird ohne Folge-Warnungen
+        # ausgelassen.
+        $nugetReady = Update-NuGetProvider -WriteLog $WriteLog -Force:$Force -Optional:($null -ne $installedModule)
+        if (-not $nugetReady -and $installedModule) {
+            Write-PSWindowsUpdateModuleLog $WriteLog "NuGet/PSGallery für den Onlineabruf nicht verfügbar; vorhandenes PSWindowsUpdate $($installedModule.Version) bleibt aktiv." 'INFO'
+            $onlineUpdateSkipped = $true
+        }
+    }
+
+    if (-not $offlineHandled -and -not $onlineUpdateSkipped) {
     try {
-        $null = Update-NuGetProvider -WriteLog $WriteLog -Force:$Force
         $null = Update-PS7PackageManagementModule -WriteLog $WriteLog -Force:$Force
 
-        $galleryModule = Find-Module -Name PSWindowsUpdate -Repository PSGallery -ErrorAction Stop
+        $galleryModule = Find-Module -Name PSWindowsUpdate -Repository PSGallery -ErrorAction Stop -WarningAction SilentlyContinue
         $galleryVersion = [version]$galleryModule.Version
         if (-not $installedModule -or $installedModule.Version -lt $galleryVersion -or $Force) {
             $oldVersion = if ($installedModule) { [string]$installedModule.Version } else { 'nicht installiert' }
@@ -602,7 +616,7 @@ function Update-PSWindowsUpdateModule {
                         Write-PSWindowsUpdateModuleLog $WriteLog 'PSWindowsUpdate-Installation wird erneut versucht.' 'WARN'
                     }
                     Install-Module -Name PSWindowsUpdate -Repository PSGallery -Scope AllUsers `
-                        -Force -AllowClobber -SkipPublisherCheck -Confirm:$false -ErrorAction Stop
+                        -Force -AllowClobber -SkipPublisherCheck -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue
                     $installSucceeded = $true
                 }
                 catch {
@@ -617,7 +631,12 @@ function Update-PSWindowsUpdateModule {
         }
     }
     catch {
-        Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Onlineprüfung fehlgeschlagen: $($_.Exception.Message)" 'WARN'
+        if ($installedModule) {
+            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Onlineprüfung nicht verfügbar; vorhandene Version $($installedModule.Version) bleibt aktiv: $($_.Exception.Message)" 'INFO'
+        }
+        else {
+            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Onlineprüfung fehlgeschlagen und kein vorhandenes Modul verfügbar: $($_.Exception.Message)" 'WARN'
+        }
     }
     }
 
@@ -758,23 +777,62 @@ try {
     Import-Module PackageManagement -ErrorAction Stop
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $minimumNuGetVersion = [version]'2.8.5.201'
+    $installed = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending | Select-Object -First 1
     $nuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
         Where-Object { $_.Version -ge $minimumNuGetVersion } |
         Sort-Object Version -Descending | Select-Object -First 1
     if (-not $nuget) {
-        Install-PackageProvider -Name NuGet -MinimumVersion $minimumNuGetVersion -Scope AllUsers -Force -Confirm:$false -ErrorAction Stop | Out-Null
+        try {
+            Install-PackageProvider -Name NuGet -MinimumVersion $minimumNuGetVersion -Scope AllUsers `
+                -Force -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+        }
+        catch {
+            if ($installed) {
+                "__WINGETCLIENT__SUCCESS`t$($installed.Version)`tvorhandene Version beibehalten; NuGet-/PSGallery-Onlineabruf nicht verfügbar"
+                exit 0
+            }
+            throw "NuGet ist nicht verfügbar und Microsoft.WinGet.Client ist nicht installiert: $($_.Exception.Message)"
+        }
+        $nuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+            Where-Object { $_.Version -ge $minimumNuGetVersion } |
+            Sort-Object Version -Descending | Select-Object -First 1
+        if (-not $nuget) {
+            if ($installed) {
+                "__WINGETCLIENT__SUCCESS`t$($installed.Version)`tvorhandene Version beibehalten; NuGet-Provider konnte nicht bereitgestellt werden"
+                exit 0
+            }
+            throw 'NuGet-Provider konnte nicht bereitgestellt werden und Microsoft.WinGet.Client ist nicht installiert.'
+        }
     }
-    $installed = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
-        Sort-Object Version -Descending | Select-Object -First 1
-    $latest = Find-Module -Name Microsoft.WinGet.Client -Repository PSGallery -ErrorAction Stop
+    try {
+        $latest = Find-Module -Name Microsoft.WinGet.Client -Repository PSGallery `
+            -ErrorAction Stop -WarningAction SilentlyContinue
+    }
+    catch {
+        if ($installed) {
+            "__WINGETCLIENT__SUCCESS`t$($installed.Version)`tvorhandene Version beibehalten; PSGallery-Onlineabruf nicht verfügbar"
+            exit 0
+        }
+        throw
+    }
     $latestVersion = [version]$latest.Version
     if ($installed -and $installed.Version -ge $latestVersion) {
         "__WINGETCLIENT__SUCCESS`t$($installed.Version)`taktuell"
         exit 0
     }
     $oldVersion = if ($installed) { [string]$installed.Version } else { 'nicht installiert' }
-    Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -RequiredVersion ([string]$latestVersion) `
-        -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop | Out-Null
+    try {
+        Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -RequiredVersion ([string]$latestVersion) `
+            -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+    }
+    catch {
+        if ($installed) {
+            "__WINGETCLIENT__SUCCESS`t$($installed.Version)`tvorhandene Version beibehalten; PSGallery-Download nicht verfügbar"
+            exit 0
+        }
+        throw
+    }
     $verified = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
         Where-Object { $_.Version -ge $latestVersion } | Sort-Object Version -Descending | Select-Object -First 1
     if (-not $verified) { throw "Microsoft.WinGet.Client $latestVersion ist im maschinenweiten Modulpfad nicht auffindbar." }
