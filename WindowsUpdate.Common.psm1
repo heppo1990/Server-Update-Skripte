@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function Write-CommonLog {
     param(
@@ -350,7 +350,10 @@ function New-WindowsUpdateNuGetProviderPayload {
     $providerVersion = $null
 
     try {
+        # Nur den klassischen OneGet-Bootstrap-Provider verwenden. Der integrierte
+        # NuGet-Provider 3.0.0.1 aus PowerShell 7 ist kein Paket dieses Feeds.
         $provider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction Stop -WarningAction SilentlyContinue |
+            Where-Object { $_.Source -match '(?i)(cdn\.oneget\.org|onegetcdn\.azureedge\.net)/providers/nuget-\d+(\.\d+){1,3}\.package\.swidtag$' } |
             Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
         if ($provider) { $providerVersion = [string]$provider.Version }
     } catch { }
@@ -363,7 +366,7 @@ function New-WindowsUpdateNuGetProviderPayload {
     $targetVersionPath = Join-Path $providerRoot $providerVersion
     New-Item -ItemType Directory -Path $targetVersionPath -Force -ErrorAction Stop | Out-Null
     $providerFile = Join-Path $targetVersionPath 'Microsoft.PackageManagement.NuGetProvider.dll'
-    $providerUri = "https://onegetcdn.azureedge.net/providers/Microsoft.PackageManagement.NuGetProvider-$providerVersion.dll"
+    $providerUri = "https://cdn.oneget.org/providers/Microsoft.PackageManagement.NuGetProvider-$providerVersion.dll"
     try {
         Invoke-WebRequest -Uri $providerUri -OutFile $providerFile -UseBasicParsing `
             -ErrorAction Stop -WarningAction SilentlyContinue
@@ -376,6 +379,7 @@ function New-WindowsUpdateNuGetProviderPayload {
     catch {
         Remove-Item -LiteralPath $targetVersionPath -Recurse -Force -ErrorAction SilentlyContinue
         $localProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProviderPath -match '(?i)[\\/]PackageManagement[\\/]ProviderAssemblies[\\/]nuget[\\/]' } |
             Sort-Object Version -Descending | Select-Object -First 1
         if (-not $localProvider -or -not $localProvider.ProviderPath -or
             -not (Test-Path -LiteralPath $localProvider.ProviderPath -PathType Leaf)) {
@@ -454,7 +458,7 @@ function Update-NuGetProvider {
         # Die Suche prüft Bootstrap-Feed und PSGallery. Ein "No match" aus PSGallery
         # darf die gefundenen Bootstrap-Versionen nicht durch ErrorAction Stop verwerfen.
         $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction SilentlyContinue -WarningAction SilentlyContinue |
-            Where-Object { $_.Source -like 'https://cdn.oneget.org/providers/nuget-*.package.swidtag' } |
+            Where-Object { $_.Source -match '(?i)(cdn\.oneget\.org|onegetcdn\.azureedge\.net)/providers/nuget-\d+(\.\d+){1,3}\.package\.swidtag$' } |
             Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
     }
     catch {
