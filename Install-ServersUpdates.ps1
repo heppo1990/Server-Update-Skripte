@@ -156,10 +156,33 @@ function Invoke-PackageManagerUpdates {
   try {
     $enableWinget = if ($UpdateSettings.PSObject.Properties['EnableWingetUpdates']) { [bool]$UpdateSettings.EnableWingetUpdates } else { $true }
     $enableChocolatey = if ($UpdateSettings.PSObject.Properties['EnableChocolateyUpdates']) { [bool]$UpdateSettings.EnableChocolateyUpdates } else { $true }
+    $wingetSkipReason = ''
+    if ($enableWinget) {
+      try {
+        $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $AuthInfo -TimeoutSeconds 30 `
+          -WriteLog { param($message) Write-ScriptLog $message -LogOnly }
+        if ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
+          $enableWinget = $false
+          $wingetSkipReason = "Windows-Server-Build $($targetOsInfo.BuildNumber) liegt vor Server 2019"
+          Write-ScriptLog "WinGet auf $Servername übersprungen: $wingetSkipReason; Chocolatey und Windows Update laufen weiter."
+        }
+      }
+      catch {
+        $enableWinget = $false
+        $wingetSkipReason = 'Betriebssystem nicht ermittelbar; WinGet wird vorsorglich übersprungen'
+        Write-ScriptLog "WARNUNG: Betriebssystem von $Servername nicht ermittelbar; WinGet wird vorsorglich übersprungen."
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Betriebssystem vor Paketinstallation ermitteln' -Target $Servername -ErrorRecord $_ -Context @('Fallback=WinGet übersprungen')
+      }
+    }
     if ($enableWinget) {
       $null = Update-WinGetClientModule -ComputerName $Servername -AuthInfo $AuthInfo -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
     }
     $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -ExcludeWinGetIds $ExcludeWinGetIds -ExcludeChocolateyIds $ExcludeChocolateyIds -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:([bool]$logOnly) })
+    if ($wingetSkipReason) {
+      foreach ($wingetResult in @($results | Where-Object { $_.Manager -eq 'Winget' -and $_.Skipped })) {
+        $wingetResult.SkipReason = $wingetSkipReason
+      }
+    }
     # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
     $successfulPackagesByManager = @{}
     $manualPackageCount = 0
@@ -1639,6 +1662,20 @@ if ($TargetComputer -and $TargetComputer.Count -gt 0) {
 }
 $wingetEnabledForManagement = -not $UpdateSettings.PSObject.Properties['EnableWingetUpdates'] -or [bool]$UpdateSettings.EnableWingetUpdates
 $chocolateyEnabledForManagement = -not $UpdateSettings.PSObject.Properties['EnableChocolateyUpdates'] -or [bool]$UpdateSettings.EnableChocolateyUpdates
+if ($wingetEnabledForManagement) {
+  try {
+    $localOsInfo = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    if ([int]$localOsInfo.ProductType -in @(2, 3) -and [int]$localOsInfo.BuildNumber -lt 17763) {
+      $wingetEnabledForManagement = $false
+      Write-ScriptLog "WinGet auf Verwaltungsserver $env:COMPUTERNAME übersprungen: Windows-Server-Build $($localOsInfo.BuildNumber) liegt vor Server 2019."
+    }
+  }
+  catch {
+    $wingetEnabledForManagement = $false
+    Write-ScriptLog 'WARNUNG: Betriebssystem des Verwaltungsservers nicht ermittelbar; WinGet-Vorabprüfung wird vorsorglich übersprungen.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Betriebssystem des Verwaltungsservers ermitteln' -Target $env:COMPUTERNAME -ErrorRecord $_ -Context @('Fallback=WinGet-Vorabprüfung übersprungen')
+  }
+}
 
 if ($ManagementPowerShellResume) {
   if ([string]::IsNullOrWhiteSpace($ManagementPowerShellStatePath) -or -not (Test-Path -LiteralPath $ManagementPowerShellStatePath -PathType Leaf)) {

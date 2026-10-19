@@ -1815,7 +1815,7 @@ function Get-WindowsUpdateTargetOperatingSystem {
     if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
     $probe = {
         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-        [pscustomobject]@{ Caption = [string]$os.Caption; Version = [string]$os.Version; BuildNumber = [int]$os.BuildNumber }
+        [pscustomobject]@{ Caption = [string]$os.Caption; Version = [string]$os.Version; BuildNumber = [int]$os.BuildNumber; ProductType = [int]$os.ProductType }
     }
 
     if ($localNames -contains $ComputerName) {

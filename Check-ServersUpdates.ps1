@@ -753,9 +753,9 @@ if ($ServerADList -ne $null) {
           try {
             $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $svcCredential -TimeoutSeconds 30 `
               -WriteLog { param($message) Write-ScriptLog $message $true }
-            if ([string]$targetOsInfo.Caption -match '(?i)Windows Server 2016') {
+            if ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
               $targetEnableWinget = $false
-              $skipWingetReason = "WinGet wird auf $($targetOsInfo.Caption) (Build $($targetOsInfo.BuildNumber)) nicht geprüft; Chocolatey und Windows Update laufen weiter."
+              $skipWingetReason = "WinGet wird auf diesem Windows-Server (Build $($targetOsInfo.BuildNumber), älter als Server 2019) nicht geprüft; Chocolatey und Windows Update laufen weiter."
             }
           }
           catch {
