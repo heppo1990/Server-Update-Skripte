@@ -18,7 +18,7 @@ param(
 Set-StrictMode -Version Latest
 
 $commonModulePath = Join-Path $repositoryRoot 'Module\WindowsUpdate.Common.psm1'
-Import-Module -Name $commonModulePath -Force -ErrorAction Stop
+Import-Module -Name $commonModulePath -ErrorAction Stop
 
 $settings = Get-WindowsUpdateSettings -ScriptRoot $repositoryRoot -ScriptName ([IO.Path]::GetFileNameWithoutExtension('Install-Linux Updates.ps1'))
 $linuxSettings = if ($settings.PSObject.Properties['LinuxSettings']) { $settings.LinuxSettings } else { $null }

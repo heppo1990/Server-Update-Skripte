@@ -22,7 +22,7 @@ Set-StrictMode -Version Latest
 # Home-Assistant-Verbindung aus der Skript- oder allgemeinen settings.json laden.
 # Explizit übergebene Parameter haben immer Vorrang.
 $commonModulePath = Join-Path $repositoryRoot 'Module\WindowsUpdate.Common.psm1'
-Import-Module -Name $commonModulePath -Force -ErrorAction Stop
+Import-Module -Name $commonModulePath -ErrorAction Stop
 
 $settings = Get-WindowsUpdateSettings -ScriptRoot $repositoryRoot -ScriptName ([System.IO.Path]::GetFileNameWithoutExtension('Install-HomeAssistant Updates.ps1'))
 $haSettings = if ($settings.PSObject.Properties['HomeAssistantSettings']) { $settings.HomeAssistantSettings } else { $null }
