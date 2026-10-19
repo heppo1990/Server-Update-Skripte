@@ -670,13 +670,17 @@ function Invoke-WinRMDeployment {
         }
 
         Write-DeployLog "[$Servername] Teste WindowsUpdateAdm-Endpunkt."
+        # GetNewClosure erfasst lokale Variablen zuverlässig. Die zentrale
+        # Version liegt auf Skriptebene; zuerst in eine Funktionsvariable
+        # kopieren, damit die Endpunktprüfung nicht mit leerem Sollwert läuft.
+        $expectedVersionForValidation = [string]$expectedDeploymentVersion
         $validateEndpoint = {
             $status = Invoke-Command @testParams
             if ($status.UpdateCommand -ne 'Get-WindowsUpdate') {
                 throw "WindowsUpdateAdm-Endpunkt auf $Servername stellt Get-WindowsUpdate nicht bereit."
             }
-            if ($status.DeploymentVersion -ne $expectedDeploymentVersion) {
-                throw "WindowsUpdateAdm-Statusfunktion auf $Servername fehlt oder ist veraltet (gefunden: '$($status.DeploymentVersion)', erwartet: '$expectedDeploymentVersion')."
+            if ($status.DeploymentVersion -ne $expectedVersionForValidation) {
+                throw "WindowsUpdateAdm-Statusfunktion auf $Servername fehlt oder ist veraltet (gefunden: '$($status.DeploymentVersion)', erwartet: '$expectedVersionForValidation')."
             }
             return $status
         }.GetNewClosure()
@@ -860,7 +864,7 @@ function Invoke-ServerDeployment {
             Write-DeployLog $entryText -LogOnly
             if ($entryText -match '^\[[^]]+\]\s+\[(?<Level>INFO|UPDATE|WARN|SUCCESS|ERROR)\]\s+(?<Status>.*)$') {
                 $setupStatus = $Matches.Status
-                $showSetupStatus = $setupStatus -match '^(=== (NuGet Provider Check|PSWindowsUpdate Installation/Update|Dual PowerShell Support \(PS5 \+ PS7\)|PS-Remoting Konfiguration|JEA Role Capability Setup|WinRM Endpunkt Registrierung|Finaler Verbindungstest) ===|NuGet (ist aktuell|erfolgreich aktualisiert|Provider installiert|vom lokalen Server installiert)|PSWindowsUpdate (ist aktuell|erfolgreich aktualisiert|erfolgreich installiert|bereit;)|PowerShell-7-Remoting aktiviert|WinRM neu gestartet|Configuration über Windows PowerShell 5\.1 registriert|Loopback-Verbindungstest erfolgreich|Setup erfolgreich abgeschlossen!)'
+                $showSetupStatus = $setupStatus -match '^(=== (NuGet Provider Check|PSWindowsUpdate Installation/Update|Dual PowerShell Support \(PS5 \+ PS7\)|PS-Remoting Konfiguration|JEA Role Capability Setup|WinRM Endpunkt Registrierung|Finaler Verbindungstest) ===|NuGet (ist aktuell|erfolgreich aktualisiert|Provider installiert|vom lokalen Server installiert)|PSWindowsUpdate (ist aktuell|erfolgreich aktualisiert|erfolgreich installiert|bereit;)|PowerShell-7-Remoting aktiviert|WinRM neu gestartet|Configuration über Windows PowerShell 5\.1 registriert|Loopback-Verbindungstest erfolgreich|Setup erfolgreich abgeschlossen!|Lokales Setup abgeschlossen; zentrale Endpunktprüfung folgt)'
                 if ($setupStatus -match '^NuGet-Online-Installation fehlgeschlagen:') {
                     $nugetFailureText = $setupStatus
                     if ($nugetFailureText.Length -gt 280) { $nugetFailureText = $nugetFailureText.Substring(0, 277) + '...' }

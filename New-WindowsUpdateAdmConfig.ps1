@@ -1247,7 +1247,11 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
     # =========================================================
     Write-SetupLog "" "INFO"
     Write-SetupLog "============================================================" "SUCCESS"
-    Write-SetupLog "        Setup erfolgreich abgeschlossen! (V5.0)             " "SUCCESS"
+    if ($FinalizeJEA) {
+        Write-SetupLog "Lokales Setup abgeschlossen; zentrale Endpunktprüfung folgt (WindowsUpdateAdm-Bereitstellungsversion $deploymentVersion)." "INFO"
+    } else {
+        Write-SetupLog "Setup erfolgreich abgeschlossen! (WindowsUpdateAdm-Bereitstellungsversion $deploymentVersion)." "SUCCESS"
+    }
     Write-SetupLog "============================================================" "SUCCESS"
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== Installierte Versionen ===" "INFO"
