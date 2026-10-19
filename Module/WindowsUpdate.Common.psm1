@@ -422,9 +422,9 @@ function Update-NuGetProvider {
         }
     }
 
-    # Die Verteilung hat das aktuelle Paket bereits online auf dem
-    # Verwaltungsrechner beschafft. Dieses Paket zuerst verwenden und den
-    # Zielserver nicht erneut vom Bootstrap-Feed abhängig machen.
+    # Das zentrale Paket wird zunächst nur gesucht. Die installierte Version
+    # muss mit dem aktuellen Online-Stand verglichen werden, bevor eine Datei
+    # kopiert oder der Provider importiert wird.
     $stagedProvider = $null
     if ($OfflineProviderPath -and (Test-Path -LiteralPath $OfflineProviderPath -PathType Container)) {
         $stagedProvider = Get-ChildItem -LiteralPath $OfflineProviderPath -Directory -ErrorAction SilentlyContinue |
@@ -432,26 +432,6 @@ function Update-NuGetProvider {
                 (Test-Path -LiteralPath (Join-Path $_.FullName 'Microsoft.PackageManagement.NuGetProvider.dll') -PathType Leaf) } |
             Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
     }
-    if ($stagedProvider) {
-        try {
-            $stagedVersion = [version]$stagedProvider.Name
-            $stagedDll = Join-Path $stagedProvider.FullName 'Microsoft.PackageManagement.NuGetProvider.dll'
-            $stagedTarget = Join-Path (Join-Path $providerRoot ([string]$stagedVersion)) 'Microsoft.PackageManagement.NuGetProvider.dll'
-            New-Item -ItemType Directory -Path (Split-Path -Parent $stagedTarget) -Force -ErrorAction Stop | Out-Null
-            Copy-Item -LiteralPath $stagedDll -Destination $stagedTarget -Force -ErrorAction Stop
-            $null = Import-PackageProvider -Name NuGet -RequiredVersion ([string]$stagedVersion) -Force -ErrorAction Stop -WarningAction SilentlyContinue
-            $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction Stop |
-                Where-Object { $_.ProviderPath -like "$providerRoot\*" -and $_.Version -ge $stagedVersion } |
-                Sort-Object Version -Descending | Select-Object -First 1
-            if (-not $installedProvider) { throw "NuGet $stagedVersion wurde nach der Offlinebereitstellung nicht erkannt." }
-            if ($WriteLog) { & $WriteLog "NuGet-Provider $($installedProvider.Version) aus dem zentral vorbereiteten Paket bereitgestellt; der Zielserver benötigte keinen Onlinezugriff." 'SUCCESS' }
-            return $true
-        } catch {
-            $stagedProviderError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-            if ($WriteLog) { & $WriteLog "Zentrales NuGet-Offlinepaket konnte nicht installiert werden; versuche den Onlineweg. Ursache: $stagedProviderError" 'WARN' }
-        }
-    }
-
     $onlineInstallError = $null
     $fallbackError = $null
     try {
@@ -476,6 +456,34 @@ function Update-NuGetProvider {
     if ($targetVersion -and $installedProvider -and $installedProvider.Version -ge $targetVersion -and -not $Force) {
         if ($WriteLog) { & $WriteLog "NuGet ist aktuell (Version $($installedProvider.Version))." 'SUCCESS' }
         return $true
+    }
+
+    # Erst wenn der Onlinevergleich eine Aktualisierung nötig macht oder der
+    # Feed nicht erreichbar ist, das zentral vorbereitete Paket bereitstellen.
+    $stagedVersion = if ($stagedProvider) { [version]$stagedProvider.Name } else { $null }
+    if ($stagedProvider -and ($Force -or -not $installedProvider -or
+            $installedProvider.Version -lt $stagedVersion) -and
+        (-not $targetVersion -or $stagedVersion -ge $targetVersion)) {
+        try {
+            if (-not $targetVersion -or $stagedVersion -ge $targetVersion) {
+                $stagedDll = Join-Path $stagedProvider.FullName 'Microsoft.PackageManagement.NuGetProvider.dll'
+                $stagedTarget = Join-Path (Join-Path $providerRoot ([string]$stagedVersion)) 'Microsoft.PackageManagement.NuGetProvider.dll'
+                if (-not (Test-Path -LiteralPath $stagedTarget -PathType Leaf)) {
+                    New-Item -ItemType Directory -Path (Split-Path -Parent $stagedTarget) -Force -ErrorAction Stop | Out-Null
+                    Copy-Item -LiteralPath $stagedDll -Destination $stagedTarget -Force -ErrorAction Stop
+                }
+                $null = Import-PackageProvider -Name NuGet -RequiredVersion ([string]$stagedVersion) -Force -ErrorAction Stop -WarningAction SilentlyContinue
+                $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction Stop |
+                    Where-Object { $_.ProviderPath -like "$providerRoot\*" -and $_.Version -ge $stagedVersion } |
+                    Sort-Object Version -Descending | Select-Object -First 1
+                if (-not $installedProvider) { throw "NuGet $stagedVersion wurde nach der Offlinebereitstellung nicht erkannt." }
+                if ($WriteLog) { & $WriteLog "NuGet-Provider $($installedProvider.Version) aus dem zentral vorbereiteten Paket bereitgestellt; der Zielserver benötigte keinen Onlinezugriff." 'SUCCESS' }
+                return $true
+            }
+        } catch {
+            $stagedProviderError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+            if ($WriteLog) { & $WriteLog "Zentrales NuGet-Offlinepaket konnte nicht installiert werden; versuche den Onlineweg. Ursache: $stagedProviderError" 'WARN' }
+        }
     }
 
     if ($targetVersion) {
@@ -720,6 +728,17 @@ function New-WindowsUpdateModulePayload {
     }
 }
 
+function Get-WindowsUpdateGalleryModuleVersion {
+    param([Parameter(Mandatory)][string]$Name)
+
+    try {
+        $module = Find-Module -Name $Name -Repository PSGallery -ErrorAction Stop -WarningAction SilentlyContinue |
+            Sort-Object Version -Descending | Select-Object -First 1
+        if ($module) { return [version]$module.Version }
+    } catch { }
+    return $null
+}
+
 function Update-PSWindowsUpdateModule {
     <#
     .SYNOPSIS
@@ -743,6 +762,39 @@ function Update-PSWindowsUpdateModule {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
     if (-not [string]::IsNullOrWhiteSpace($ComputerName) -and $ComputerName -ine $env:COMPUTERNAME) {
+        if (-not $Force) {
+            $galleryVersion = Get-WindowsUpdateGalleryModuleVersion -Name 'PSWindowsUpdate'
+            if ($galleryVersion) {
+                $versionSession = $null
+                try {
+                    $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
+                    $versionSession = New-PSSession @sessionParameters
+                    $targetVersions = Invoke-Command -Session $versionSession -ScriptBlock {
+                        $roots = @(
+                            (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\PSWindowsUpdate'),
+                            (Join-Path $env:ProgramFiles 'PowerShell\Modules\PSWindowsUpdate')
+                        )
+                        $versions = foreach ($root in $roots) {
+                            $version = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                                Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' } |
+                                Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty Name
+                            [string]$version
+                        }
+                        [pscustomobject]@{ WindowsPowerShell = $versions[0]; PowerShell7 = $versions[1] }
+                    } -ErrorAction Stop
+                    if ($targetVersions -and $targetVersions.WindowsPowerShell -and $targetVersions.PowerShell7 -and
+                        [version]$targetVersions.WindowsPowerShell -ge $galleryVersion -and
+                        [version]$targetVersions.PowerShell7 -ge $galleryVersion) {
+                        Write-PSWindowsUpdateModuleLog $WriteLog "[$ComputerName] PSWindowsUpdate ist aktuell (Version $galleryVersion); kein Pakettransfer erforderlich." 'SUCCESS'
+                        return $true
+                    }
+                } catch {
+                    Write-PSWindowsUpdateModuleLog $WriteLog "[$ComputerName] Versionsprüfung vor dem Pakettransfer nicht möglich; führe vollständige Modulprüfung aus. Ursache: $($_.Exception.Message)" 'INFO'
+                } finally {
+                    if ($versionSession) { Remove-PSSession -Session $versionSession -ErrorAction SilentlyContinue }
+                }
+            }
+        }
         $session = $null
         $modulePayload = $null
         $remotePayloadPath = $null
@@ -832,6 +884,28 @@ function Update-PSWindowsUpdateModule {
             if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
             if ($modulePayload -and $modulePayload.Root) {
                 Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    if (-not $Force) {
+        $galleryVersion = Get-WindowsUpdateGalleryModuleVersion -Name 'PSWindowsUpdate'
+        if ($galleryVersion) {
+            $targetRoots = @(
+                (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\PSWindowsUpdate'),
+                (Join-Path $env:ProgramFiles 'PowerShell\Modules\PSWindowsUpdate')
+            )
+            $targetVersions = @(
+                foreach ($root in $targetRoots) {
+                    Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' } |
+                        Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty Name
+                }
+            )
+            if ($targetVersions.Count -eq 2 -and
+                @($targetVersions | Where-Object { [version]$_ -lt $galleryVersion }).Count -eq 0) {
+                Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate ist aktuell (Version $galleryVersion); kein Paketdownload erforderlich." 'SUCCESS'
+                return $true
             }
         }
     }
@@ -982,6 +1056,43 @@ function Update-WinGetClientModule {
         [string]$ComputerName,
         $AuthInfo
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($ComputerName) -and $ComputerName -ine $env:COMPUTERNAME) {
+        $galleryVersion = Get-WindowsUpdateGalleryModuleVersion -Name 'Microsoft.WinGet.Client'
+        if ($galleryVersion) {
+            $versionSession = $null
+            try {
+                $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
+                $versionSession = New-PSSession @sessionParameters
+                $installedVersion = Invoke-Command -Session $versionSession -ScriptBlock {
+                    $root = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\Microsoft.WinGet.Client'
+                    Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' } |
+                        Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty Name
+                } -ErrorAction Stop
+                if ($installedVersion -and [version]$installedVersion -ge $galleryVersion) {
+                    Write-PSWindowsUpdateModuleLog $WriteLog "[$ComputerName] Microsoft.WinGet.Client ist aktuell (Version $installedVersion); kein Pakettransfer erforderlich." 'SUCCESS'
+                    return $true
+                }
+            } catch {
+                Write-PSWindowsUpdateModuleLog $WriteLog "[$ComputerName] Versionsprüfung vor dem Pakettransfer nicht möglich; führe vollständige Modulprüfung aus. Ursache: $($_.Exception.Message)" 'INFO'
+            } finally {
+                if ($versionSession) { Remove-PSSession -Session $versionSession -ErrorAction SilentlyContinue }
+            }
+        }
+    } else {
+        $galleryVersion = Get-WindowsUpdateGalleryModuleVersion -Name 'Microsoft.WinGet.Client'
+        if ($galleryVersion) {
+            $moduleRoot = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\Microsoft.WinGet.Client'
+            $installedVersion = Get-ChildItem -LiteralPath $moduleRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' } |
+                Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 -ExpandProperty Name
+            if ($installedVersion -and [version]$installedVersion -ge $galleryVersion) {
+                Write-PSWindowsUpdateModuleLog $WriteLog "Microsoft.WinGet.Client ist aktuell (Version $installedVersion); kein Paketdownload erforderlich." 'SUCCESS'
+                return $true
+            }
+        }
+    }
 
     $modulePayload = $null
     try {
