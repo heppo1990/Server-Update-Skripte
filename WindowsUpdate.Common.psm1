@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 
 function Write-CommonLog {
     param(
@@ -340,9 +340,60 @@ $updaterDefinition
     return $true
 }
 
+function New-WindowsUpdateNuGetProviderPayload {
+    <# Beschafft den NuGet-Provider zentral online und erstellt ein temporäres Offlinepaket. #>
+    param([Parameter(Mandatory)][string]$DestinationPath, [scriptblock]$WriteLog)
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $providerRoot = Join-Path $DestinationPath 'NuGetProvider'
+    New-Item -ItemType Directory -Path $providerRoot -Force -ErrorAction Stop | Out-Null
+    $providerVersion = $null
+
+    try {
+        $provider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction Stop -WarningAction SilentlyContinue |
+            Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+        if ($provider) { $providerVersion = [string]$provider.Version }
+    } catch { }
+
+    if ($providerVersion -notmatch '^\d+(\.\d+){1,3}$') {
+        # 2.8.5.208 ist die letzte von Microsoft dokumentierte Provider-Version.
+        $providerVersion = '2.8.5.208'
+    }
+
+    $targetVersionPath = Join-Path $providerRoot $providerVersion
+    New-Item -ItemType Directory -Path $targetVersionPath -Force -ErrorAction Stop | Out-Null
+    $providerFile = Join-Path $targetVersionPath 'Microsoft.PackageManagement.NuGetProvider.dll'
+    $providerUri = "https://onegetcdn.azureedge.net/providers/Microsoft.PackageManagement.NuGetProvider-$providerVersion.dll"
+    try {
+        Invoke-WebRequest -Uri $providerUri -OutFile $providerFile -UseBasicParsing `
+            -ErrorAction Stop -WarningAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $providerFile -PathType Leaf) -or (Get-Item -LiteralPath $providerFile).Length -lt 1024) {
+            throw 'Der heruntergeladene NuGet-Provider ist leer oder unvollständig.'
+        }
+        if ($WriteLog) { & $WriteLog "NuGet-Provider $providerVersion zentral online geladen und für Offline-Übertragung vorbereitet." 'SUCCESS' }
+        return [pscustomobject]@{ Root = $providerRoot; Version = $providerVersion; Source = 'Online' }
+    }
+    catch {
+        Remove-Item -LiteralPath $targetVersionPath -Recurse -Force -ErrorAction SilentlyContinue
+        $localProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+            Sort-Object Version -Descending | Select-Object -First 1
+        if (-not $localProvider -or -not $localProvider.ProviderPath -or
+            -not (Test-Path -LiteralPath $localProvider.ProviderPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $providerRoot -Recurse -Force -ErrorAction SilentlyContinue
+            throw "NuGet-Provider konnte online nicht geladen werden und es ist kein lokales Fallback vorhanden: $($_.Exception.Message)"
+        }
+        $fallbackVersion = [string]$localProvider.Version
+        $fallbackPath = Join-Path $providerRoot $fallbackVersion
+        New-Item -ItemType Directory -Path $fallbackPath -Force -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $localProvider.ProviderPath -Destination (Join-Path $fallbackPath 'Microsoft.PackageManagement.NuGetProvider.dll') -Force -ErrorAction Stop
+        if ($WriteLog) { & $WriteLog "NuGet-Provider online nicht erreichbar; lokale Version $fallbackVersion als Offline-Fallback vorbereitet. Ursache: $($_.Exception.Message)" 'WARN' }
+        return [pscustomobject]@{ Root = $providerRoot; Version = $fallbackVersion; Source = 'Fallback' }
+    }
+}
+
 function Update-NuGetProvider {
     <# Aktualisiert den NuGet-Provider im gemeinsamen Rechnerpfad auf die neueste Bootstrap-Version. #>
-    param([switch]$Force, [switch]$Optional, [scriptblock]$WriteLog)
+    param([switch]$Force, [string]$OfflineProviderPath, [scriptblock]$WriteLog)
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -367,6 +418,38 @@ function Update-NuGetProvider {
         }
     }
 
+    # Die Verteilung hat das aktuelle Paket bereits online auf dem
+    # Verwaltungsrechner beschafft. Dieses Paket zuerst verwenden und den
+    # Zielserver nicht erneut vom Bootstrap-Feed abhängig machen.
+    $stagedProvider = $null
+    if ($OfflineProviderPath -and (Test-Path -LiteralPath $OfflineProviderPath -PathType Container)) {
+        $stagedProvider = Get-ChildItem -LiteralPath $OfflineProviderPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' -and
+                (Test-Path -LiteralPath (Join-Path $_.FullName 'Microsoft.PackageManagement.NuGetProvider.dll') -PathType Leaf) } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+    }
+    if ($stagedProvider) {
+        try {
+            $stagedVersion = [version]$stagedProvider.Name
+            $stagedDll = Join-Path $stagedProvider.FullName 'Microsoft.PackageManagement.NuGetProvider.dll'
+            $stagedTarget = Join-Path (Join-Path $providerRoot ([string]$stagedVersion)) 'Microsoft.PackageManagement.NuGetProvider.dll'
+            New-Item -ItemType Directory -Path (Split-Path -Parent $stagedTarget) -Force -ErrorAction Stop | Out-Null
+            Copy-Item -LiteralPath $stagedDll -Destination $stagedTarget -Force -ErrorAction Stop
+            $null = Import-PackageProvider -Name NuGet -RequiredVersion ([string]$stagedVersion) -Force -ErrorAction Stop -WarningAction SilentlyContinue
+            $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction Stop |
+                Where-Object { $_.ProviderPath -like "$providerRoot\*" -and $_.Version -ge $stagedVersion } |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if (-not $installedProvider) { throw "NuGet $stagedVersion wurde nach der Offlinebereitstellung nicht erkannt." }
+            if ($WriteLog) { & $WriteLog "NuGet-Provider $($installedProvider.Version) aus dem zentral vorbereiteten Paket bereitgestellt; der Zielserver benötigte keinen Onlinezugriff." 'SUCCESS' }
+            return $true
+        } catch {
+            $stagedProviderError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+            if ($WriteLog) { & $WriteLog "Zentrales NuGet-Offlinepaket konnte nicht installiert werden; versuche den Onlineweg. Ursache: $stagedProviderError" 'WARN' }
+        }
+    }
+
+    $onlineInstallError = $null
+    $fallbackError = $null
     try {
         # Die Suche prüft Bootstrap-Feed und PSGallery. Ein "No match" aus PSGallery
         # darf die gefundenen Bootstrap-Versionen nicht durch ErrorAction Stop verwerfen.
@@ -376,57 +459,260 @@ function Update-NuGetProvider {
     }
     catch {
         $message = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-        if ($Optional) {
-            if ($WriteLog) { & $WriteLog "NuGet-/PSGallery-Onlineprüfung für den optionalen Modulabruf nicht verfügbar; vorhandene PSWindowsUpdate-Version bleibt aktiv: $message" 'INFO' }
-            return $false
-        }
-        if ($installedProvider -and $installedProvider.Version -ge $minimumVersion) {
-            if ($WriteLog) { & $WriteLog "NuGet-Versionsprüfung nicht verfügbar; vorhandene Version $($installedProvider.Version) bleibt aktiv: $message" 'WARN' }
-            return $true
-        }
-        if ($WriteLog) { & $WriteLog "Neueste NuGet-Version konnte nicht ermittelt werden: $message" 'WARN' }
-        return $false
+        $onlineInstallError = $message
     }
 
     if (-not $latestProvider) {
-        if ($Optional) {
-            if ($WriteLog) { & $WriteLog 'NuGet-/PSGallery-Onlineprüfung für den optionalen Modulabruf nicht verfügbar; vorhandene PSWindowsUpdate-Version bleibt aktiv.' 'INFO' }
-            return $false
-        }
-        if ($installedProvider -and $installedProvider.Version -ge $minimumVersion) {
-            if ($WriteLog) { & $WriteLog "Keine neuere NuGet-Version gefunden; vorhandene Version $($installedProvider.Version) bleibt aktiv." 'INFO' }
-            return $true
-        }
-        if ($WriteLog) { & $WriteLog 'Keine NuGet-Version aus dem Bootstrap-Feed gefunden.' 'WARN' }
-        return $false
+        if (-not $onlineInstallError) { $onlineInstallError = 'Die aktuelle Version konnte nicht aus dem Bootstrap-Feed ermittelt werden.' }
+        $targetVersion = $null
+    } else {
+        $targetVersion = [version]$latestProvider.Version
     }
 
-    $targetVersion = [version]$latestProvider.Version
-    if ($installedProvider -and $installedProvider.Version -ge $targetVersion -and -not $Force) {
+    if ($targetVersion -and $installedProvider -and $installedProvider.Version -ge $targetVersion -and -not $Force) {
         if ($WriteLog) { & $WriteLog "NuGet ist aktuell (Version $($installedProvider.Version))." 'SUCCESS' }
         return $true
     }
 
-    $oldVersion = if ($installedProvider) { [string]$installedProvider.Version } else { 'nicht installiert' }
-    if ($WriteLog) { & $WriteLog "Aktualisiere NuGet: $oldVersion -> $targetVersion." 'UPDATE' }
+    if ($targetVersion) {
+        $oldVersion = if ($installedProvider) { [string]$installedProvider.Version } else { 'nicht installiert' }
+        if ($WriteLog) { & $WriteLog "Aktualisiere NuGet: $oldVersion -> $targetVersion." 'UPDATE' }
+        try {
+            Install-PackageProvider -Name NuGet -RequiredVersion ([string]$targetVersion) -Scope AllUsers `
+                -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+            $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+                Where-Object { $_.ProviderPath -like "$providerRoot\*" -and $_.Version -ge $targetVersion } |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if (-not $installedProvider) { throw "NuGet $targetVersion wurde nicht im Rechnerpfad gefunden." }
+            if ($WriteLog) { & $WriteLog "NuGet erfolgreich aktualisiert (Version $($installedProvider.Version))." 'SUCCESS' }
+            return $true
+        } catch {
+            $onlineInstallError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        }
+    }
+
+    # Der Feed/Bootstrap ist ausgefallen: bevorzugt das zentral übertragene Paket,
+    # erst danach den bereits auf diesem Rechner vorhandenen Provider.
+    $fallbackVersionDirectory = $null
+    if ($OfflineProviderPath -and (Test-Path -LiteralPath $OfflineProviderPath -PathType Container)) {
+        $fallbackVersionDirectory = Get-ChildItem -LiteralPath $OfflineProviderPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'Microsoft.PackageManagement.NuGetProvider.dll') -PathType Leaf } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+    }
+    $fallbackDll = if ($fallbackVersionDirectory) { Join-Path $fallbackVersionDirectory.FullName 'Microsoft.PackageManagement.NuGetProvider.dll' } else { $null }
+    $fallbackVersion = if ($fallbackVersionDirectory) { [version]$fallbackVersionDirectory.Name } else { $null }
+    if (-not $fallbackDll -and $installedProvider -and $installedProvider.ProviderPath -and (Test-Path -LiteralPath $installedProvider.ProviderPath -PathType Leaf)) {
+        $fallbackDll = $installedProvider.ProviderPath
+        $fallbackVersion = [version]$installedProvider.Version
+    }
+    if ($fallbackDll -and $fallbackVersion -ge $minimumVersion) {
+        try {
+            $fallbackTarget = Join-Path (Join-Path $providerRoot ([string]$fallbackVersion)) 'Microsoft.PackageManagement.NuGetProvider.dll'
+            New-Item -ItemType Directory -Path (Split-Path -Parent $fallbackTarget) -Force -ErrorAction Stop | Out-Null
+            if ([IO.Path]::GetFullPath($fallbackDll) -ne [IO.Path]::GetFullPath($fallbackTarget)) {
+                Copy-Item -LiteralPath $fallbackDll -Destination $fallbackTarget -Force -ErrorAction Stop
+            }
+            $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction Stop |
+                Where-Object { $_.ProviderPath -like "$providerRoot\*" -and $_.Version -ge $fallbackVersion } |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if (-not $installedProvider) { throw "NuGet $fallbackVersion wurde aus dem Offlinepaket nicht geladen." }
+            if ($WriteLog) { & $WriteLog "NuGet aus Offlinepaket bereitgestellt (Version $($installedProvider.Version)); Onlineabruf war nicht verfügbar." 'SUCCESS' }
+            return $true
+        } catch {
+            $fallbackError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        }
+    }
+
+    $reason = if ($onlineInstallError) { " Onlinefehler: $onlineInstallError" } else { '' }
+    if ($fallbackError) { $reason += " Offlinefehler: $fallbackError" }
+    if ($WriteLog) { & $WriteLog "NuGet-Provider konnte weder online aktualisiert noch offline bereitgestellt werden.$reason" 'WARN' }
+    return [bool]($installedProvider -and $installedProvider.Version -ge $minimumVersion)
+}
+
+function New-WindowsUpdateModulePayload {
+    <# Beschafft aktuelle PowerShell-Module zentral und bereitet sie zur Offline-Übertragung vor. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$ModuleName,
+        [string]$OfflineModulePath,
+        [scriptblock]$WriteLog
+    )
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdate-ModulePayload-{0}' -f [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $payloadRoot -Force -ErrorAction Stop | Out-Null
+    $previousProgressPreference = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    $fallbackNames = @()
+    $downloadedPackages = @{}
+
+    function Save-DirectGalleryModulePackage {
+        param([Parameter(Mandatory)][string]$PackageName, [string]$RequiredVersion)
+
+        if ($PackageName -notmatch '^[A-Za-z0-9_.-]+$') { throw "Ungültiger Modulname in Paketmetadaten: $PackageName" }
+        if ($downloadedPackages.ContainsKey($PackageName)) { return }
+
+        $packageUri = 'https://www.powershellgallery.com/api/v2/package/' + [Uri]::EscapeDataString($PackageName)
+        if ($RequiredVersion -match '^(\d+(?:\.\d+){1,3})') {
+            $packageUri += '/' + $Matches[1]
+        }
+        $downloadPath = Join-Path $payloadRoot ('{0}.nupkg' -f $PackageName)
+        $extractPath = Join-Path $payloadRoot ('_extract_{0}_{1}' -f $PackageName, [guid]::NewGuid().ToString('N'))
+
+        try {
+            Invoke-WebRequest -Uri $packageUri -OutFile $downloadPath -UseBasicParsing `
+                -ErrorAction Stop -WarningAction SilentlyContinue
+            New-Item -ItemType Directory -Path $extractPath -Force -ErrorAction Stop | Out-Null
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            [IO.Compression.ZipFile]::ExtractToDirectory($downloadPath, $extractPath)
+
+            $manifest = Get-ChildItem -LiteralPath $extractPath -Filter "$PackageName.psd1" -File -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if (-not $manifest) { throw "Das heruntergeladene Gallery-Paket $PackageName enthält kein Modulmanifest." }
+
+            $nuspec = Get-ChildItem -LiteralPath $extractPath -Filter '*.nuspec' -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            $packageVersion = $null
+            $dependencies = @()
+            if ($nuspec) {
+                [xml]$nuspecXml = Get-Content -LiteralPath $nuspec.FullName -Raw -ErrorAction Stop
+                $versionNode = $nuspecXml.SelectSingleNode("//*[local-name()='metadata']/*[local-name()='version']")
+                if ($versionNode) { $packageVersion = [string]$versionNode.InnerText }
+                $dependencies = @($nuspecXml.SelectNodes("//*[local-name()='dependency']"))
+            }
+            if ($packageVersion -notmatch '^\d+(\.\d+){1,3}$') {
+                $moduleData = Import-PowerShellDataFile -LiteralPath $manifest.FullName -ErrorAction Stop
+                $packageVersion = [string]$moduleData.ModuleVersion
+            }
+            if ($packageVersion -notmatch '^\d+(\.\d+){1,3}$') { throw "Die Paketversion für $PackageName konnte nicht verifiziert werden." }
+
+            $targetVersionPath = Join-Path (Join-Path $payloadRoot $PackageName) $packageVersion
+            New-Item -ItemType Directory -Path $targetVersionPath -Force -ErrorAction Stop | Out-Null
+            Copy-Item -Path (Join-Path $manifest.DirectoryName '*') -Destination $targetVersionPath `
+                -Recurse -Force -ErrorAction Stop
+            $downloadedPackages[$PackageName] = $packageVersion
+
+            foreach ($dependency in $dependencies) {
+                $dependencyName = [string]$dependency.GetAttribute('id')
+                if ([string]::IsNullOrWhiteSpace($dependencyName) -or $downloadedPackages.ContainsKey($dependencyName)) { continue }
+                $null = Save-DirectGalleryModulePackage -PackageName $dependencyName -RequiredVersion ([string]$dependency.GetAttribute('version'))
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $extractPath) {
+                Remove-Item -LiteralPath $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
     try {
-        Install-PackageProvider -Name NuGet -RequiredVersion ([string]$targetVersion) -Scope AllUsers `
-            -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
-        $installedProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-            Where-Object { $_.ProviderPath -like "$providerRoot\*" -and $_.Version -ge $targetVersion } |
-            Sort-Object Version -Descending | Select-Object -First 1
-        if (-not $installedProvider) { throw "NuGet $targetVersion wurde nicht im Rechnerpfad gefunden." }
-        if ($WriteLog) { & $WriteLog "NuGet erfolgreich aktualisiert (Version $($installedProvider.Version))." 'SUCCESS' }
-        return $true
+        foreach ($name in $ModuleName) {
+            $modulePayload = Join-Path $payloadRoot $name
+            try {
+                # Save-Module holt aktuelle Gallery-Pakete samt deklarierter Abhängigkeiten.
+                # Das läuft auf dem Verwaltungsrechner; Zielserver benötigen keinen NuGet-Zugang.
+                Save-Module -Name $name -Repository PSGallery -Path $payloadRoot -Force `
+                    -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+                $moduleManifest = Get-ChildItem -LiteralPath $modulePayload -Filter "$name.psd1" -File -Recurse -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                if (-not $moduleManifest) { throw "Save-Module hat kein gültiges Modulmanifest für $name abgelegt." }
+                if ($WriteLog) { & $WriteLog "$name wurde aktuell aus PSGallery bezogen und für die Offline-Übertragung vorbereitet." 'SUCCESS' }
+            }
+            catch {
+                $onlineError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                if (Test-Path -LiteralPath $modulePayload) {
+                    Remove-Item -LiteralPath $modulePayload -Recurse -Force -ErrorAction SilentlyContinue
+                }
+
+                try {
+                    Save-DirectGalleryModulePackage -PackageName $name
+                    $moduleManifest = Get-ChildItem -LiteralPath $modulePayload -Filter "$name.psd1" -File -Recurse -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+                    if (-not $moduleManifest) { throw "Das direkte Gallery-Paket für $name wurde nicht korrekt bereitgestellt." }
+                    if ($WriteLog) { & $WriteLog "$name samt Abhängigkeiten direkt aus PSGallery geladen; der NuGet-Provider-Bootstrap war nicht nötig." 'SUCCESS' }
+                    continue
+                }
+                catch {
+                    $directDownloadError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                    if (Test-Path -LiteralPath $modulePayload) {
+                        Remove-Item -LiteralPath $modulePayload -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                    $onlineError = "$onlineError; direkter PSGallery-Abruf: $directDownloadError"
+                }
+
+                $fallbackPath = $null
+                if ($OfflineModulePath) {
+                    $namedFallback = Join-Path $OfflineModulePath $name
+                    if (Test-Path -LiteralPath $namedFallback -PathType Container) {
+                        $fallbackPath = $namedFallback
+                    } elseif (Test-Path -LiteralPath (Join-Path $OfflineModulePath "$name.psd1") -PathType Leaf) {
+                        $fallbackPath = $OfflineModulePath
+                    }
+                }
+
+                $fallbackVersionDirectories = @()
+                if ($fallbackPath) {
+                    $fallbackVersionDirectories = @(Get-ChildItem -LiteralPath $fallbackPath -Directory -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -match '^\d+(\.\d+)*$' })
+                }
+
+                if ($fallbackVersionDirectories.Count -gt 0) {
+                    New-Item -ItemType Directory -Path $modulePayload -Force -ErrorAction Stop | Out-Null
+                    foreach ($versionDirectory in $fallbackVersionDirectories) {
+                        Copy-Item -LiteralPath $versionDirectory.FullName -Destination $modulePayload -Recurse -Force -ErrorAction Stop
+                    }
+                    # Ein verteiltes Modulpaket kann weitere benötigte Module enthalten.
+                    # Die Abhängigkeiten werden zusammen mit dem Paket an das Ziel kopiert.
+                    if ($OfflineModulePath -and $fallbackPath -ine $OfflineModulePath) {
+                        foreach ($dependencyDirectory in @(Get-ChildItem -LiteralPath $OfflineModulePath -Directory -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -ne $name })) {
+                            Copy-Item -LiteralPath $dependencyDirectory.FullName -Destination $payloadRoot -Recurse -Force -ErrorAction Stop
+                        }
+                    }
+                    $fallbackNames += "$name (Offlinepaket)"
+                } else {
+                    $localModule = Get-Module -ListAvailable -Name $name -ErrorAction SilentlyContinue |
+                        Sort-Object Version -Descending | Select-Object -First 1
+                    if (-not $localModule) {
+                        throw "$name konnte online nicht bezogen werden und es ist kein Offlinepaket oder lokales Modul vorhanden. Ursache: $onlineError"
+                    }
+                    $moduleVersionPath = Join-Path $modulePayload ([string]$localModule.Version)
+                    New-Item -ItemType Directory -Path $moduleVersionPath -Force -ErrorAction Stop | Out-Null
+                    Copy-Item -Path (Join-Path $localModule.ModuleBase '*') -Destination $moduleVersionPath -Recurse -Force -ErrorAction Stop
+                    foreach ($requiredModule in @($localModule.RequiredModules)) {
+                        if (-not $requiredModule -or [string]::IsNullOrWhiteSpace([string]$requiredModule.Name)) { continue }
+                        $dependency = Get-Module -ListAvailable -Name $requiredModule.Name -ErrorAction SilentlyContinue |
+                            Where-Object { -not $requiredModule.Version -or $_.Version -ge $requiredModule.Version } |
+                            Sort-Object Version -Descending | Select-Object -First 1
+                        if (-not $dependency) { continue }
+                        $dependencyVersionPath = Join-Path (Join-Path $payloadRoot $dependency.Name) ([string]$dependency.Version)
+                        New-Item -ItemType Directory -Path $dependencyVersionPath -Force -ErrorAction Stop | Out-Null
+                        Copy-Item -Path (Join-Path $dependency.ModuleBase '*') -Destination $dependencyVersionPath -Recurse -Force -ErrorAction Stop
+                    }
+                    $fallbackNames += "$name $($localModule.Version)"
+                }
+
+                if ($WriteLog) { & $WriteLog "$name konnte nicht aktuell online bezogen werden; Offline-Fallback wird verwendet. Ursache: $onlineError" 'WARN' }
+            }
+        }
+
+        $stagedModules = @(Get-ChildItem -LiteralPath $payloadRoot -Directory -ErrorAction SilentlyContinue)
+        if ($stagedModules.Count -eq 0) { throw 'Es wurden keine PowerShell-Modulpakete bereitgestellt.' }
+        if ($fallbackNames.Count -gt 0 -and $WriteLog) {
+            & $WriteLog "Offline-Fallback für: $($fallbackNames -join ', ')." 'WARN'
+        }
+        return [pscustomobject]@{
+            Root = $payloadRoot
+            FallbackModules = @($fallbackNames)
+        }
     }
     catch {
-        $message = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-        if ($installedProvider -and $installedProvider.Version -ge $minimumVersion) {
-            if ($WriteLog) { & $WriteLog "NuGet-Aktualisierung fehlgeschlagen; vorhandene Version $($installedProvider.Version) bleibt aktiv: $message" 'WARN' }
-            return $true
-        }
-        if ($WriteLog) { & $WriteLog "NuGet konnte nicht installiert oder aktualisiert werden: $message" 'WARN' }
-        return $false
+        Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    finally {
+        if ($null -ne $previousProgressPreference) { $ProgressPreference = $previousProgressPreference }
     }
 }
 
@@ -454,15 +740,24 @@ function Update-PSWindowsUpdateModule {
 
     if (-not [string]::IsNullOrWhiteSpace($ComputerName) -and $ComputerName -ine $env:COMPUTERNAME) {
         $session = $null
+        $modulePayload = $null
+        $remotePayloadPath = $null
         try {
+            $modulePayload = New-WindowsUpdateModulePayload -ModuleName 'PSWindowsUpdate' `
+                -OfflineModulePath $OfflineModulePath -WriteLog $WriteLog
             $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
             $session = New-PSSession @sessionParameters
+            $remotePayloadPath = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdate-ModulePayload-{0}' -f [guid]::NewGuid().ToString('N'))
+            Invoke-Command -Session $session -ScriptBlock {
+                param($Path)
+                New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+            } -ArgumentList $remotePayloadPath -ErrorAction Stop
+            Copy-Item -Path (Join-Path $modulePayload.Root '*') `
+                -Destination $remotePayloadPath -ToSession $session -Recurse -Force -ErrorAction Stop
             $updateDefinition = (Get-Command -Name Update-PSWindowsUpdateModule -CommandType Function).Definition
-            $nugetUpdaterDefinition = (Get-Command -Name Update-NuGetProvider -CommandType Function).Definition
-            $packageManagementUpdaterDefinition = (Get-Command -Name Update-PS7PackageManagementModule -CommandType Function).Definition
             $logDefinition = (Get-Command -Name Write-PSWindowsUpdateModuleLog -CommandType Function).Definition
             $remoteWorker = {
-                param($UpdaterText, $NuGetUpdaterText, $PackageManagementUpdaterText, $LoggerText, $ForceUpdate)
+                param($UpdaterText, $LoggerText, $ForceUpdate, $OfflineModulePath)
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                 $windowsPowerShellModulePaths = @(
                     (Join-Path $HOME 'Documents\WindowsPowerShell\Modules'),
@@ -473,23 +768,8 @@ function Update-PSWindowsUpdateModule {
                     $windowsPowerShellModulePaths += Join-Path ${env:ProgramFiles(x86)} 'WindowsPowerShell\Modules'
                 }
                 $env:PSModulePath = ($windowsPowerShellModulePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Container }) -join ';'
-                $originalExecutionPolicyPreference = $env:PSExecutionPolicyPreference
-                $processPolicyAdjusted = $false
                 try {
-                    try {
-                        Import-Module PackageManagement -ErrorAction Stop
-                    }
-                    catch {
-                        if ($_.Exception.Message -notmatch '(?i)(execution policy|Ausführung von Skripts|Ausführung von Skripten)') { throw }
-                        # Nur für diesen kurzlebigen Remoting-Prozess lockern. Keine
-                        # LocalMachine-/CurrentUser-Richtlinie dauerhaft verändern.
-                        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
-                        $processPolicyAdjusted = $true
-                        Import-Module PackageManagement -ErrorAction Stop
-                    }
                     Set-Item -Path Function:\Write-PSWindowsUpdateModuleLog -Value ([scriptblock]::Create($LoggerText))
-                    Set-Item -Path Function:\Update-NuGetProvider -Value ([scriptblock]::Create($NuGetUpdaterText))
-                    Set-Item -Path Function:\Update-PS7PackageManagementModule -Value ([scriptblock]::Create($PackageManagementUpdaterText))
                     Set-Item -Path Function:\Update-PSWindowsUpdateModule -Value ([scriptblock]::Create($UpdaterText))
                     $remoteLogger = { param($Message, $Level) [pscustomobject]@{ Type = 'ModuleLog'; Message = $Message; Level = $Level } }
                     # ArgumentList-Werte können bei älteren Remoting-Endpunkten als
@@ -504,13 +784,10 @@ function Update-PSWindowsUpdateModule {
                     } elseif ($null -ne $ForceUpdate) {
                         $forceEnabled = [bool]$ForceUpdate
                     }
-                    if ($processPolicyAdjusted) {
-                        [pscustomobject]@{ Type = 'ModuleLog'; Message = 'PackageManagement wurde mit einer nur für diesen Remoting-Prozess geltenden Ausführungsrichtlinie geladen.'; Level = 'INFO' }
-                    }
                     if ($ForceUpdate -isnot [bool] -and $null -ne $ForceUpdate) {
                         [pscustomobject]@{ Type = 'ModuleLog'; Message = "Force-Argument remote als $($ForceUpdate.GetType().FullName) empfangen; sicher normalisiert."; Level = 'INFO' }
                     }
-                    $updateParameters = @{ WriteLog = $remoteLogger }
+                    $updateParameters = @{ WriteLog = $remoteLogger; OfflineModulePath = $OfflineModulePath }
                     if ($forceEnabled) { $updateParameters.Force = $true }
                     $updateOutput = @(Update-PSWindowsUpdateModule @updateParameters)
                     foreach ($entry in $updateOutput) {
@@ -522,16 +799,13 @@ function Update-PSWindowsUpdateModule {
                     }
                 }
                 finally {
-                    if ($processPolicyAdjusted) {
-                        if ([string]::IsNullOrWhiteSpace($originalExecutionPolicyPreference)) {
-                            Remove-Item Env:PSExecutionPolicyPreference -ErrorAction SilentlyContinue
-                        } else {
-                            $env:PSExecutionPolicyPreference = $originalExecutionPolicyPreference
-                        }
+                    if ($OfflineModulePath) {
+                        Remove-Item -LiteralPath $OfflineModulePath -Recurse -Force -ErrorAction SilentlyContinue
                     }
                 }
             }
-            $remoteResults = @(Invoke-Command -Session $session -ScriptBlock $remoteWorker -ArgumentList $updateDefinition, $nugetUpdaterDefinition, $packageManagementUpdaterDefinition, $logDefinition, [bool]$Force -ErrorAction Stop)
+            $remoteModulePath = Join-Path $remotePayloadPath 'PSWindowsUpdate'
+            $remoteResults = @(Invoke-Command -Session $session -ScriptBlock $remoteWorker -ArgumentList $updateDefinition, $logDefinition, [bool]$Force, $remoteModulePath -ErrorAction Stop)
             $success = $false
             foreach ($entry in $remoteResults) {
                 if ($entry.Type -eq 'ModuleLog') { Write-PSWindowsUpdateModuleLog $WriteLog "[$ComputerName] $($entry.Message)" $entry.Level }
@@ -544,100 +818,72 @@ function Update-PSWindowsUpdateModule {
             Write-PSWindowsUpdateModuleLog $WriteLog "WARNUNG: PSWindowsUpdate konnte auf '$ComputerName' nicht aktualisiert werden; vorhandene Version wird verwendet. Ursache: $($_.Exception.Message)" 'WARN'
             return $false
         }
-        finally { if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue } }
+        finally {
+            if ($session -and $remotePayloadPath) {
+                Invoke-Command -Session $session -ScriptBlock {
+                    param($Path)
+                    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+                } -ArgumentList $remotePayloadPath -ErrorAction SilentlyContinue
+            }
+            if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+            if ($modulePayload -and $modulePayload.Root) {
+                Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    $modulePayload = $null
+    $availableOfflineVersions = if ($OfflineModulePath -and (Test-Path -LiteralPath $OfflineModulePath -PathType Container)) {
+        @(Get-ChildItem -LiteralPath $OfflineModulePath -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+)*$' })
+    } else { @() }
+    if ($availableOfflineVersions.Count -eq 0) {
+        try {
+            $modulePayload = New-WindowsUpdateModulePayload -ModuleName 'PSWindowsUpdate' `
+                -OfflineModulePath $OfflineModulePath -WriteLog $WriteLog
+            $OfflineModulePath = Join-Path $modulePayload.Root 'PSWindowsUpdate'
+        }
+        catch {
+            Write-PSWindowsUpdateModuleLog $WriteLog "Aktuelles PSWindowsUpdate-Paket konnte nicht online beschafft werden; Offline-/Installationsprüfung fehlgeschlagen: $($_.Exception.Message)" 'ERROR'
+            return $false
+        }
     }
 
     $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
         Sort-Object Version -Descending | Select-Object -First 1
-    $galleryVersion = $null
-    $offlineVersions = @()
-    if ($OfflineModulePath -and (Test-Path -LiteralPath $OfflineModulePath -PathType Container)) {
-        $offlineVersions = @(Get-ChildItem -LiteralPath $OfflineModulePath -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^\d+(\.\d+)*$' } |
-            Sort-Object { [version]$_.Name } -Descending)
+    $offlineVersions = @(Get-ChildItem -LiteralPath $OfflineModulePath -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d+(\.\d+)*$' } |
+        Sort-Object { [version]$_.Name } -Descending)
+    if ($offlineVersions.Count -eq 0) {
+        Write-PSWindowsUpdateModuleLog $WriteLog "Kein verwendbares PSWindowsUpdate-Offlinepaket in '$OfflineModulePath' gefunden." 'ERROR'
+        if ($modulePayload -and $modulePayload.Root) {
+            Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        return $false
     }
-    $offlineHandled = $false
-    $onlineUpdateSkipped = $false
-    if ($offlineVersions.Count -gt 0) {
-        $offlineVersion = [version]$offlineVersions[0].Name
-        if (-not $installedModule -or $offlineVersion -gt $installedModule.Version -or $Force) {
-            try {
-                $offlineTarget = Join-Path (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules') 'PSWindowsUpdate'
-                $offlineTargetVersion = Join-Path $offlineTarget ([string]$offlineVersion)
-                New-Item -ItemType Directory -Path $offlineTarget -Force -ErrorAction Stop | Out-Null
-                if (Test-Path -LiteralPath $offlineTargetVersion) {
-                    Remove-Item -LiteralPath $offlineTargetVersion -Recurse -Force -ErrorAction Stop
-                }
-                Copy-Item -LiteralPath $offlineVersions[0].FullName -Destination $offlineTargetVersion -Recurse -Force -ErrorAction Stop
-                $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
-                    Sort-Object Version -Descending | Select-Object -First 1
-                if (-not $installedModule -or $installedModule.Version -lt $offlineVersion) {
-                    throw "PSWindowsUpdate $offlineVersion wurde aus dem Offline-Paket nicht gefunden."
-                }
-                Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate aus Offline-Paket bereitgestellt (Version $($installedModule.Version)); NuGet/PSGallery auf dem Ziel nicht erforderlich." 'SUCCESS'
-                $offlineHandled = $true
+
+    $offlineVersion = [version]$offlineVersions[0].Name
+    if (-not $installedModule -or $offlineVersion -gt $installedModule.Version -or $Force) {
+        try {
+            $offlineTarget = Join-Path (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules') 'PSWindowsUpdate'
+            $offlineTargetVersion = Join-Path $offlineTarget ([string]$offlineVersion)
+            New-Item -ItemType Directory -Path $offlineTarget -Force -ErrorAction Stop | Out-Null
+            if (Test-Path -LiteralPath $offlineTargetVersion) {
+                Remove-Item -LiteralPath $offlineTargetVersion -Recurse -Force -ErrorAction Stop
             }
-            catch {
-                Write-PSWindowsUpdateModuleLog $WriteLog "Offline-Bereitstellung von PSWindowsUpdate fehlgeschlagen: $($_.Exception.Message)" 'WARN'
+            Copy-Item -LiteralPath $offlineVersions[0].FullName -Destination $offlineTargetVersion -Recurse -Force -ErrorAction Stop
+            $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if (-not $installedModule -or $installedModule.Version -lt $offlineVersion) {
+                throw "PSWindowsUpdate $offlineVersion wurde aus dem Offlinepaket nicht gefunden."
             }
-        } else {
-            Write-PSWindowsUpdateModuleLog $WriteLog "Offline-Paket PSWindowsUpdate $offlineVersion geprüft; vorhandene Version $($installedModule.Version) bleibt erhalten." 'SUCCESS'
-            $offlineHandled = $true
+            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate aus dem zentral bereitgestellten Offlinepaket eingerichtet (Version $($installedModule.Version)); NuGet auf dem Ziel war nicht erforderlich." 'SUCCESS'
         }
-    }
-
-    if (-not $offlineHandled) {
-        # Auf abgeriegelten Systemen kann der Provider-Bootstrap nicht online
-        # erfolgen. Ist PSWindowsUpdate bereits vorhanden, bleibt es aktiv und
-        # die optionale Gallery-Versionsprüfung wird ohne Folge-Warnungen
-        # ausgelassen.
-        $nugetReady = Update-NuGetProvider -WriteLog $WriteLog -Force:$Force -Optional:($null -ne $installedModule)
-        if (-not $nugetReady -and $installedModule) {
-            Write-PSWindowsUpdateModuleLog $WriteLog "NuGet/PSGallery für den Onlineabruf nicht verfügbar; vorhandenes PSWindowsUpdate $($installedModule.Version) bleibt aktiv." 'INFO'
-            $onlineUpdateSkipped = $true
+        catch {
+            Write-PSWindowsUpdateModuleLog $WriteLog "Offline-Bereitstellung von PSWindowsUpdate fehlgeschlagen: $($_.Exception.Message)" 'ERROR'
         }
-    }
-
-    if (-not $offlineHandled -and -not $onlineUpdateSkipped) {
-    try {
-        $null = Update-PS7PackageManagementModule -WriteLog $WriteLog -Force:$Force
-
-        $galleryModule = Find-Module -Name PSWindowsUpdate -Repository PSGallery -ErrorAction Stop -WarningAction SilentlyContinue
-        $galleryVersion = [version]$galleryModule.Version
-        if (-not $installedModule -or $installedModule.Version -lt $galleryVersion -or $Force) {
-            $oldVersion = if ($installedModule) { [string]$installedModule.Version } else { 'nicht installiert' }
-            $action = if ($Force) { 'erzwungen aktualisiert' } elseif ($installedModule) { 'aktualisiert' } else { 'installiert' }
-            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate wird ${action}: $oldVersion -> $galleryVersion." 'UPDATE'
-
-            $installSucceeded = $false
-            for ($attempt = 1; $attempt -le 3 -and -not $installSucceeded; $attempt++) {
-                try {
-                    if ($attempt -eq 2) {
-                        Write-PSWindowsUpdateModuleLog $WriteLog 'PSWindowsUpdate-Installation wird erneut versucht.' 'WARN'
-                    }
-                    Install-Module -Name PSWindowsUpdate -Repository PSGallery -Scope AllUsers `
-                        -Force -AllowClobber -SkipPublisherCheck -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue
-                    $installSucceeded = $true
-                }
-                catch {
-                    Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Installationsversuch $attempt/3 fehlgeschlagen: $($_.Exception.Message)" 'WARN'
-                    if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
-                }
-            }
-            if (-not $installSucceeded) { throw "PSWindowsUpdate konnte nach drei Versuchen nicht von PSGallery installiert werden." }
-        }
-        else {
-            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate ist aktuell (Version $($installedModule.Version))." 'SUCCESS'
-        }
-    }
-    catch {
-        if ($installedModule) {
-            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Onlineprüfung nicht verfügbar; vorhandene Version $($installedModule.Version) bleibt aktiv: $($_.Exception.Message)" 'INFO'
-        }
-        else {
-            Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Onlineprüfung fehlgeschlagen und kein vorhandenes Modul verfügbar: $($_.Exception.Message)" 'WARN'
-        }
-    }
+    } else {
+        Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate-Paket $offlineVersion geprüft; installierte neuere Version $($installedModule.Version) bleibt erhalten." 'SUCCESS'
     }
 
     $sourceModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
@@ -685,6 +931,9 @@ function Update-PSWindowsUpdateModule {
 
     if (-not $sourceModule) {
         Write-PSWindowsUpdateModuleLog $WriteLog 'PSWindowsUpdate ist nicht installiert und konnte nicht aktualisiert werden.' 'ERROR'
+        if ($modulePayload -and $modulePayload.Root) {
+            Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
         return $false
     }
 
@@ -708,6 +957,9 @@ function Update-PSWindowsUpdateModule {
     }
 
     Write-PSWindowsUpdateModuleLog $WriteLog "PSWindowsUpdate bereit; verfügbare Version: $($sourceModule.Version)." 'SUCCESS'
+    if ($modulePayload -and $modulePayload.Root) {
+        Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
+    }
     return $true
 }
 
@@ -720,6 +972,17 @@ function Update-WinGetClientModule {
         [string]$ComputerName,
         $AuthInfo
     )
+
+    $modulePayload = $null
+    try {
+        $modulePayload = New-WindowsUpdateModulePayload -ModuleName 'Microsoft.WinGet.Client' `
+            -OfflineModulePath $OfflineModulePath -WriteLog $WriteLog
+        $OfflineModulePath = $modulePayload.Root
+    }
+    catch {
+        Write-PSWindowsUpdateModuleLog $WriteLog "Microsoft.WinGet.Client konnte online oder aus einem Offlinepaket nicht beschafft werden: $($_.Exception.Message)" 'WARN'
+        return $false
+    }
 
     $worker = {
         param([string]$OfflineModulePath)
@@ -774,70 +1037,7 @@ try {
             exit 0
         }
     }
-    Import-Module PackageManagement -ErrorAction Stop
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $minimumNuGetVersion = [version]'2.8.5.201'
-    $installed = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
-        Sort-Object Version -Descending | Select-Object -First 1
-    $nuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-        Where-Object { $_.Version -ge $minimumNuGetVersion } |
-        Sort-Object Version -Descending | Select-Object -First 1
-    if (-not $nuget) {
-        try {
-            Install-PackageProvider -Name NuGet -MinimumVersion $minimumNuGetVersion -Scope AllUsers `
-                -Force -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
-        }
-        catch {
-            if ($installed) {
-                "__WINGETCLIENT__SUCCESS`t$($installed.Version)`tvorhandene Version beibehalten; NuGet-/PSGallery-Onlineabruf nicht verfügbar"
-                exit 0
-            }
-            throw "NuGet ist nicht verfügbar und Microsoft.WinGet.Client ist nicht installiert: $($_.Exception.Message)"
-        }
-        $nuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-            Where-Object { $_.Version -ge $minimumNuGetVersion } |
-            Sort-Object Version -Descending | Select-Object -First 1
-        if (-not $nuget) {
-            if ($installed) {
-                "__WINGETCLIENT__SUCCESS`t$($installed.Version)`tvorhandene Version beibehalten; NuGet-Provider konnte nicht bereitgestellt werden"
-                exit 0
-            }
-            throw 'NuGet-Provider konnte nicht bereitgestellt werden und Microsoft.WinGet.Client ist nicht installiert.'
-        }
-    }
-    try {
-        $latest = Find-Module -Name Microsoft.WinGet.Client -Repository PSGallery `
-            -ErrorAction Stop -WarningAction SilentlyContinue
-    }
-    catch {
-        if ($installed) {
-            "__WINGETCLIENT__SUCCESS`t$($installed.Version)`tvorhandene Version beibehalten; PSGallery-Onlineabruf nicht verfügbar"
-            exit 0
-        }
-        throw
-    }
-    $latestVersion = [version]$latest.Version
-    if ($installed -and $installed.Version -ge $latestVersion) {
-        "__WINGETCLIENT__SUCCESS`t$($installed.Version)`taktuell"
-        exit 0
-    }
-    $oldVersion = if ($installed) { [string]$installed.Version } else { 'nicht installiert' }
-    try {
-        Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -RequiredVersion ([string]$latestVersion) `
-            -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
-    }
-    catch {
-        if ($installed) {
-            "__WINGETCLIENT__SUCCESS`t$($installed.Version)`tvorhandene Version beibehalten; PSGallery-Download nicht verfügbar"
-            exit 0
-        }
-        throw
-    }
-    $verified = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
-        Where-Object { $_.Version -ge $latestVersion } | Sort-Object Version -Descending | Select-Object -First 1
-    if (-not $verified) { throw "Microsoft.WinGet.Client $latestVersion ist im maschinenweiten Modulpfad nicht auffindbar." }
-    "__WINGETCLIENT__SUCCESS`t$($verified.Version)`t$oldVersion -> $latestVersion"
-    exit 0
+    throw 'Kein gültiges zentral vorbereitetes Offlinepaket für Microsoft.WinGet.Client vorhanden; lokaler NuGet-/PSGallery-Bootstrap wird nicht versucht.'
 }
 catch {
     $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
@@ -896,21 +1096,40 @@ catch {
         return @($logs)
     }
 
-    if ([string]::IsNullOrWhiteSpace($ComputerName) -or $ComputerName -ieq $env:COMPUTERNAME -or $ComputerName -ieq 'localhost') {
-        $results = @(& $worker $OfflineModulePath)
-    }
-    else {
-        $session = $null
-        try {
+    $session = $null
+    $remotePayloadPath = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($ComputerName) -or $ComputerName -ieq $env:COMPUTERNAME -or $ComputerName -ieq 'localhost') {
+            $results = @(& $worker $OfflineModulePath)
+        } else {
             $sessionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OperationTimeoutSeconds 1800
             $session = New-PSSession @sessionParameters
-            $results = @(Invoke-Command -Session $session -ScriptBlock $worker -ArgumentList $OfflineModulePath -ErrorAction Stop)
+            $remotePayloadPath = Join-Path ([IO.Path]::GetTempPath()) ('WinGetClientPayload-{0}' -f [guid]::NewGuid().ToString('N'))
+            Invoke-Command -Session $session -ScriptBlock {
+                param($Path)
+                New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+            } -ArgumentList $remotePayloadPath -ErrorAction Stop
+            Copy-Item -Path (Join-Path $OfflineModulePath '*') -Destination $remotePayloadPath `
+                -ToSession $session -Recurse -Force -ErrorAction Stop
+            $results = @(Invoke-Command -Session $session -ScriptBlock $worker -ArgumentList $remotePayloadPath -ErrorAction Stop)
         }
-        catch {
-            Write-PSWindowsUpdateModuleLog $WriteLog "WinGet-Client-Modulpflege auf $ComputerName fehlgeschlagen: $($_.Exception.Message)" 'WARN'
-            return $false
+    }
+    catch {
+        $destination = if ($ComputerName) { " auf $ComputerName" } else { '' }
+        Write-PSWindowsUpdateModuleLog $WriteLog "WinGet-Client-Modulpflege$destination fehlgeschlagen: $($_.Exception.Message)" 'WARN'
+        return $false
+    }
+    finally {
+        if ($session -and $remotePayloadPath) {
+            Invoke-Command -Session $session -ScriptBlock {
+                param($Path)
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+            } -ArgumentList $remotePayloadPath -ErrorAction SilentlyContinue
         }
-        finally { if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue } }
+        if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+        if ($modulePayload -and $modulePayload.Root) {
+            Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     foreach ($entry in $results) {
@@ -3883,4 +4102,4 @@ function Add-WindowsUpdateTrustedHost {
 function Get-WindowsUpdateAdmDeploymentVersion {
     '2'
 }
-Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, Get-WindowsUpdateTargetOperatingSystem, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic, Get-WindowsUpdateAdmDeploymentVersion
+Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, Get-WindowsUpdateTargetOperatingSystem, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, New-WindowsUpdateNuGetProviderPayload, New-WindowsUpdateModulePayload, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic, Get-WindowsUpdateAdmDeploymentVersion

@@ -208,62 +208,42 @@ if ($nonAdTargets.Count -gt 0) {
     }
 }
 
-# Module werden einmal auf dem Verwaltungsserver aus PSGallery gespeichert und
-# danach ausschließlich als temporäres Offline-Paket an die Ziele übertragen.
+# Aktuelle Module und NuGet-Provider werden zuerst zentral online beschafft und
+# ausschließlich als temporäres Offlinepaket an die Ziele übertragen.
 $script:OfflineModulePayloadRoot = $null
 if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
     $moduleNames = @('PSWindowsUpdate')
     if ($enableWingetUpdates) { $moduleNames += 'Microsoft.WinGet.Client' }
-    $offlineFallbackModules = @()
-    $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdateAdm-ModulePayload-{0}' -f [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $payloadRoot -Force -ErrorAction Stop | Out-Null
-    foreach ($moduleName in $moduleNames) {
-        $modulePayload = Join-Path $payloadRoot $moduleName
-        $previousProgress = $ProgressPreference
+    $modulePayload = $null
+    try {
+        $modulePayload = New-WindowsUpdateModulePayload -ModuleName $moduleNames -OfflineModulePath $PSScriptRoot -WriteLog {
+            param($message, $level)
+            $deployLevel = switch ($level) { 'WARN' { 'Warning' } 'ERROR' { 'Error' } 'SUCCESS' { 'Success' } default { 'Info' } }
+            Write-DeployLog $message -Level $deployLevel -LogOnly
+        }
+        $script:OfflineModulePayloadRoot = $modulePayload.Root
+        $nugetPayload = $null
         try {
-            $ProgressPreference = 'SilentlyContinue'
-            # Save-Module lädt deklarierte Abhängigkeiten automatisch; das
-            # Cmdlet besitzt keinen Parameter -IncludeDependencies.
-            Save-Module -Name $moduleName -Repository PSGallery -Path $payloadRoot -Force -ErrorAction Stop | Out-Null
-            if (-not (Test-Path -LiteralPath $modulePayload -PathType Container)) { throw "Save-Module hat kein Paket für $moduleName abgelegt." }
-            Write-DeployLog "Modul $moduleName für Offline-Verteilung vorbereitet." -LogOnly
-        }
-        catch {
-            $saveModuleError = $_
-            if (Test-Path -LiteralPath $modulePayload) { Remove-Item -LiteralPath $modulePayload -Recurse -Force -ErrorAction SilentlyContinue }
-            $localModule = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue |
-                Sort-Object Version -Descending | Select-Object -First 1
-            $saveModuleCause = ($saveModuleError.Exception.ToString() -replace '\s+', ' ').Trim()
-            Write-DeployLog "PSGallery-Speicherung für $moduleName fehlgeschlagen; Ursache: $saveModuleCause" -Level Warning -LogOnly
-            if ($localModule) {
-                try {
-                    $fallbackVersion = Join-Path $modulePayload ([string]$localModule.Version)
-                    New-Item -ItemType Directory -Path $fallbackVersion -Force -ErrorAction Stop | Out-Null
-                    Copy-Item -Path (Join-Path $localModule.ModuleBase '*') -Destination $fallbackVersion -Recurse -Force -ErrorAction Stop
-                    $offlineFallbackModules += "$moduleName $($localModule.Version)"
-                    Write-DeployLog "PSGallery-Bereitstellung für $moduleName nicht erfolgreich; lokale Version $($localModule.Version) als Offline-Fallback kopiert." -Level Warning -LogOnly
-                }
-                catch {
-                    Write-DeployLog "Offline-Paket für $moduleName konnte nicht erstellt werden: $($_.Exception.Message)" -Level Warning
-                }
-            } else {
-                Write-DeployLog "Offline-Paket für $moduleName konnte nicht geladen werden; Ursache: $($_.Exception.Message)" -Level Warning
+            $nugetPayload = New-WindowsUpdateNuGetProviderPayload -DestinationPath $modulePayload.Root -WriteLog {
+                param($message, $level)
+                $deployLevel = switch ($level) { 'WARN' { 'Warning' } 'ERROR' { 'Error' } 'SUCCESS' { 'Success' } default { 'Info' } }
+                Write-DeployLog $message -Level $deployLevel -LogOnly
             }
+        } catch {
+            Write-DeployLog "NuGet-Provider konnte nicht zentral vorbereitet werden; vorhandener Provider auf dem Ziel bleibt Rückfalloption. Ursache: $($_.Exception.Message)" -Level Warning -LogOnly
         }
-        finally {
-            if ($null -ne $previousProgress) { $ProgressPreference = $previousProgress }
+        Write-DeployLog 'Aktuelle Offlinepakete für Module und NuGet-Provider vorbereitet.' -Level Info
+        if ($modulePayload.FallbackModules.Count -gt 0 -or ($nugetPayload -and $nugetPayload.Source -eq 'Fallback')) {
+            $fallbackSummary = @($modulePayload.FallbackModules)
+            if ($nugetPayload -and $nugetPayload.Source -eq 'Fallback') { $fallbackSummary += "NuGet-Provider $($nugetPayload.Version)" }
+            Write-DeployLog "HINWEIS: Onlineabruf nicht vollständig; Offline-Fallback verwendet für: $($fallbackSummary -join ', ')." -Level Warning
         }
-    }
-    $stagedModules = @(Get-ChildItem -LiteralPath $payloadRoot -Directory -ErrorAction SilentlyContinue)
-    if ($stagedModules.Count -gt 0) {
-        $script:OfflineModulePayloadRoot = $payloadRoot
-        Write-DeployLog "Offline-Modulpakete bereit; PSGallery-Zugriff wird nur auf dem Verwaltungsserver benötigt." -Level Info
-        if ($offlineFallbackModules.Count -gt 0) {
-            Write-DeployLog "HINWEIS: Onlinebereitstellung nicht vollständig; folgende Offlinepakete werden verwendet: $($offlineFallbackModules -join ', '). Ursache siehe Verteilungsprotokoll." -Level Warning
+    } catch {
+        if ($modulePayload -and $modulePayload.Root) {
+            Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
         }
-    } else {
-        Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
-        Write-DeployLog 'Keine Offline-Modulpakete verfügbar; das Setup versucht den bisherigen Onlineweg.' -Level Warning
+        $script:OfflineModulePayloadRoot = $null
+        Write-DeployLog "Zentrale Paketbereitstellung fehlgeschlagen; Ursache: $($_.Exception.Message)" -Level Warning
     }
 }
 

@@ -197,16 +197,13 @@ try {
     Write-SetupLog "=== NuGet Provider Check ===" "INFO"
     
     $offlineModulesPresent = Test-Path -LiteralPath $offlinePSWU -PathType Container
-    if ($offlineModulesPresent) {
-        Write-SetupLog 'Offline-Modulpakete bereitgestellt; NuGet- und PSGallery-Bootstrap auf dem Ziel wird übersprungen.' 'INFO'
-    } else {
-        $nugetReady = Update-NuGetProvider -Force:$ForceUpdate -WriteLog {
-            param($message, $level)
-            Write-SetupLog $message $level
-        }
-        if (-not $nugetReady) {
-            Write-SetupLog 'PSWindowsUpdate-Installation wird möglicherweise fehlschlagen.' 'WARN'
-        }
+    $offlineNuGetProvider = Join-Path $offlineRoot 'NuGetProvider'
+    $nugetReady = Update-NuGetProvider -Force:$ForceUpdate -OfflineProviderPath $offlineNuGetProvider -WriteLog {
+        param($message, $level)
+        Write-SetupLog $message $level
+    }
+    if (-not $nugetReady) {
+        Write-SetupLog 'NuGet-Provider nicht verfügbar; bereitgestellte Module lassen sich weiterhin ohne NuGet laden.' 'WARN'
     }
     # === PowerShell Gallery konfigurieren
     # =========================================================
