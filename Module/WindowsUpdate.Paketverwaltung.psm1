@@ -709,8 +709,6 @@ catch {
                 $queryScript = @'
 $ErrorActionPreference = 'Stop'
 $resultPath = __RESULT_PATH__
-$stdoutPath = $resultPath + '.stdout'
-$stderrPath = $resultPath + '.stderr'
 $query = [ordered]@{ Success = $false; Output = ''; ExitCode = -1; Error = '' }
 try {
     $app = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
@@ -720,12 +718,30 @@ try {
     if (-not $app) { throw 'App Installer ist für diesen Benutzer nicht registriert.' }
     $winget = Join-Path ([string]$app.InstallLocation) 'winget.exe'
     if (-not (Test-Path -LiteralPath $winget -PathType Leaf)) { throw 'winget.exe wurde im Benutzerkontext nicht gefunden.' }
-    $arguments = @('list', '--upgrade-available', '--accept-source-agreements', '--disable-interactivity')
-    $process = Start-Process -FilePath $winget -ArgumentList $arguments -PassThru -Wait `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
-    $query.ExitCode = [int]$process.ExitCode
-    $stdout = if (Test-Path -LiteralPath $stdoutPath) { [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::Default) } else { '' }
-    $stderr = if (Test-Path -LiteralPath $stderrPath) { [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::Default) } else { '' }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $winget
+    $startInfo.Arguments = 'list --upgrade-available --accept-source-agreements --disable-interactivity'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $false
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Normal
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    try {
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(270000)) {
+            try { $process.Kill() } catch { }
+            throw 'winget.exe überschritt das Zeitlimit von viereinhalb Minuten.'
+        }
+        $process.WaitForExit()
+        $query.ExitCode = [int]$process.ExitCode
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+    }
+    finally { $process.Dispose() }
     $outputParts = @()
     if (-not [string]::IsNullOrWhiteSpace($stdout)) { $outputParts += $stdout.Trim() }
     if (-not [string]::IsNullOrWhiteSpace($stderr)) { $outputParts += $stderr.Trim() }
@@ -734,7 +750,6 @@ try {
 }
 catch { $query.Error = $_.Exception.ToString() }
 finally {
-    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
     try { [IO.File]::WriteAllText($resultPath, ($query | ConvertTo-Json -Compress), [Text.Encoding]::UTF8) } catch { }
 }
 '@
@@ -748,12 +763,12 @@ finally {
                     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
                     $taskRegistered = $true
                     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                    $deadline = (Get-Date).AddSeconds(30)
+                    $deadline = (Get-Date).AddSeconds(300)
                     while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
                         Start-Sleep -Milliseconds 500
                     }
                     if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
-                        throw "Keine Rückgabe innerhalb von 30 Sekunden für '$userName'."
+                        throw "Keine Rückgabe innerhalb von 300 Sekunden für '$userName'."
                     }
                     $userQuery = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
                     if (-not $userQuery.Success) {
