@@ -1199,6 +1199,8 @@ if (-not $script:IsLocalSystemRun -and $LinuxConfigured -and (Test-Path -Literal
       $LinuxCheckErrors = [int]$linuxCheckStats.FailedHosts
       $RepBody += "<div class='section-title'>🐧 Linux-Updates</div>"
       foreach ($linuxHost in @($linuxCheckStats.HostStatus)) {
+        Write-ScriptLog ''
+        Write-ScriptLog "Starte Update-Check auf Linux-Server $($linuxHost.Host)..."
         $RepBody += "<div class='server-title'>Server: $([System.Net.WebUtility]::HtmlEncode([string]$linuxHost.Host))</div>"
         if (-not [string]::IsNullOrWhiteSpace([string]$linuxHost.SetupIssue)) {
           Add-CheckExternalSetupNotice -Area 'Linux' -Target ([string]$linuxHost.Host) -Reason ([string]$linuxHost.SetupIssue)

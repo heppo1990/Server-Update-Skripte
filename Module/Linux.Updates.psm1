@@ -511,7 +511,12 @@ foreach ($entry in $hostEntries) {
     $logFile = if ($script:WriteExecutionLog) { Join-Path $script:LogDirectory ("{0}_{1}.log" -f $remoteHost,(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')) } else { '' }
     Write-LinuxLog -Message '' -LogFile $logFile
     $actionHeading = if ($CheckOnly -or $DryRun) { "Starte Update-Check auf Linux-Server $remoteHost..." } elseif ($ConnectionOnly) { "Prüfe Verbindung zu Linux-Server $remoteHost..." } else { "Starte Update-Installation auf Linux-Server $remoteHost..." }
-    Write-LinuxLog -Message $actionHeading -LogFile $logFile -ConsoleWhenQuiet
+    # Beim CheckOnly werden die Host-Überschriften zusammen mit den
+    # Ergebniszeilen im aufrufenden Check-Skript ausgegeben. So bleibt die
+    # Konsole je Server in der Reihenfolge Überschrift → Ergebnis.
+    if (-not ($CheckOnly -and $script:QuietMode)) {
+        Write-LinuxLog -Message $actionHeading -LogFile $logFile -ConsoleWhenQuiet
+    }
     $setupIssue = ''
     try {
         if (-not $CheckOnly) { Ensure-LinuxSSHKey -KeyPath $KeyPath -LogFile $logFile }

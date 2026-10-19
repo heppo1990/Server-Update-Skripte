@@ -746,12 +746,17 @@ finally {
                     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
                     $taskRegistered = $true
                     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                    $deadline = (Get-Date).AddSeconds(30)
+                    # Benutzerbezogene WinGet-Abfragen können beim ersten
+                    # Katalogzugriff länger dauern als die Systemabfrage.
+                    # Das Gesamtlaufzeitlimit der WinGet-Prüfung beträgt fünf
+                    # Minuten; die Benutzerabfrage darf nicht schon nach 30 s
+                    # verworfen werden.
+                    $deadline = (Get-Date).AddSeconds(180)
                     while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
                         Start-Sleep -Milliseconds 500
                     }
                     if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
-                        throw "Keine Rückgabe innerhalb von 30 Sekunden für '$userName'."
+                        throw "Keine Rückgabe innerhalb von 180 Sekunden für '$userName'."
                     }
                     $userQuery = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
                     if (-not $userQuery.Success) {
