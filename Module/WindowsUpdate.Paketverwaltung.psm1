@@ -615,6 +615,7 @@ $ErrorActionPreference = 'Stop'
 $resultPath = __RESULT_PATH__
 $stdoutPath = $resultPath + '.stdout'
 $stderrPath = $resultPath + '.stderr'
+$process = $null
 $query = [ordered]@{ Success = $false; Output = ''; ExitCode = -1; Error = '' }
 try {
     $app = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
@@ -624,12 +625,30 @@ try {
     if (-not $app) { throw 'App Installer ist für diesen Benutzer nicht registriert.' }
     $winget = Join-Path ([string]$app.InstallLocation) 'winget.exe'
     if (-not (Test-Path -LiteralPath $winget -PathType Leaf)) { throw 'winget.exe wurde im Benutzerkontext nicht gefunden.' }
-    $arguments = @('list','--upgrade-available','--accept-source-agreements','--disable-interactivity')
-    $process = Start-Process -FilePath $winget -ArgumentList $arguments -PassThru -Wait `
-        -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+    # Start-Process -WindowStyle Hidden kann das Konsolenfenster erst nach
+    # dessen Erzeugung verbergen. CreateNoWindow verhindert den sichtbaren
+    # Konsolenstart von Anfang an.
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $winget
+    $startInfo.Arguments = 'list --upgrade-available --accept-source-agreements --disable-interactivity'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(180000)) {
+        try { $process.Kill() } catch { }
+        throw 'winget.exe überschritt das Zeitlimit von 3 Minuten.'
+    }
+    $process.WaitForExit()
     $query.ExitCode = [int]$process.ExitCode
-    $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::Default) } else { '' }
-    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::Default) } else { '' }
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     $outputParts = @()
     if (-not [string]::IsNullOrWhiteSpace($stdout)) { $outputParts += $stdout.Trim() }
     if (-not [string]::IsNullOrWhiteSpace($stderr)) { $outputParts += $stderr.Trim() }
@@ -638,6 +657,7 @@ try {
 }
 catch { $query.Error = $_.Exception.ToString() }
 finally {
+    if ($process) { $process.Dispose() }
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
     try { [IO.File]::WriteAllText($resultPath, ($query | ConvertTo-Json -Compress), [Text.Encoding]::UTF8) } catch { }
 }
