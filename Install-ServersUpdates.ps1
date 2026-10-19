@@ -161,6 +161,7 @@ function Invoke-PackageManagerUpdates {
       try {
         $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $AuthInfo -TimeoutSeconds 30 `
           -WriteLog { param($message) Write-ScriptLog $message -LogOnly }
+        Write-ScriptLog "Betriebssystem auf $Servername erkannt: $($targetOsInfo.Caption); Version $($targetOsInfo.Version); Build $($targetOsInfo.BuildNumber); ProductType $($targetOsInfo.ProductType)." -LogOnly
         if ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
           $enableWinget = $false
           $wingetSkipReason = "Windows-Server-Build $($targetOsInfo.BuildNumber) liegt vor Server 2019"
@@ -1665,6 +1666,7 @@ $chocolateyEnabledForManagement = -not $UpdateSettings.PSObject.Properties['Enab
 if ($wingetEnabledForManagement) {
   try {
     $localOsInfo = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    Write-ScriptLog "Betriebssystem des Verwaltungsservers erkannt: $($localOsInfo.Caption); Version $($localOsInfo.Version); Build $($localOsInfo.BuildNumber); ProductType $($localOsInfo.ProductType)." -LogOnly
     if ([int]$localOsInfo.ProductType -in @(2, 3) -and [int]$localOsInfo.BuildNumber -lt 17763) {
       $wingetEnabledForManagement = $false
       Write-ScriptLog "WinGet auf Verwaltungsserver $env:COMPUTERNAME übersprungen: Windows-Server-Build $($localOsInfo.BuildNumber) liegt vor Server 2019."
