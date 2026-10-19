@@ -340,18 +340,26 @@ try {
         # - ForceUpdate gesetzt
         # - Quelle ist ein Benutzerprofil-Pfad (SYSTEM findet es nicht)
         $installedVersion = $null
-        if (Test-Path $TargetBase) {
-            $installedVersion = Get-Module -ListAvailable -Name PSWindowsUpdate |
-                Where-Object { $_.ModuleBase -like "$TargetBase*" } |
-                Sort-Object Version -Descending |
-                Select-Object -First 1 -ExpandProperty Version
+        if (Test-Path -LiteralPath $TargetBase -PathType Container) {
+            $targetManifests = @(Get-ChildItem -LiteralPath $TargetBase -Filter 'PSWindowsUpdate.psd1' -File -Recurse -ErrorAction SilentlyContinue)
+            foreach ($targetManifest in $targetManifests) {
+                try {
+                    $manifestData = Import-PowerShellDataFile -LiteralPath $targetManifest.FullName -ErrorAction Stop
+                    $manifestVersion = [version]$manifestData.ModuleVersion
+                    $rootModule = [string]$manifestData.RootModule
+                    if ($rootModule -and -not (Test-Path -LiteralPath (Join-Path $targetManifest.DirectoryName $rootModule) -PathType Leaf)) { continue }
+                    if ($null -eq $installedVersion -or $manifestVersion -gt $installedVersion) { $installedVersion = $manifestVersion }
+                } catch {
+                    # Ein fehlendes oder ungültiges Manifest zählt nicht als installierte Version.
+                }
+            }
         }
 
         $sourceIsUserProfile = $SourcePath -like "*$env:USERPROFILE*" -or $SourcePath -like "*\Users\*"
         $NeedsCopy = $ForceUpdate -or
-                     (-not (Test-Path $VersionPath)) -or
+                     ($null -eq $installedVersion) -or
                      ($sourceIsUserProfile) -or
-                     ($null -ne $installedVersion -and $SourceVersion -gt $installedVersion)
+                     ([version]$SourceVersion -gt [version]$installedVersion)
 
         if ($NeedsCopy) {
             Write-SetupLog "Kopiere Modul nach $Label Pfad..." "UPDATE"
