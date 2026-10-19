@@ -699,7 +699,9 @@ catch {
                 $userName = [string]$users[$userSid]
                 $taskName = 'WindowsUpdateAdm-WinGetCheck-' + [guid]::NewGuid().ToString('N')
                 $resultPath = Join-Path $env:windir "Temp\$taskName.json"
+                $wrapperPath = Join-Path $env:windir "Temp\$taskName.vbs"
                 $powershellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                $scriptHostPath = Join-Path $env:windir 'System32\wscript.exe'
                 if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
                     $notes += "Abfrage für '$userName' übersprungen: Windows PowerShell fehlt."
                     continue
@@ -743,7 +745,16 @@ finally {
                 $taskRegistered = $false
                 try {
                     Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
-                    $action = New-ScheduledTaskAction -Execute $powershellPath -Argument "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $encodedQuery"
+                    if (Test-Path -LiteralPath $scriptHostPath -PathType Leaf) {
+                        $powerShellCommand = '"{0}" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand {1}' -f $powershellPath, $encodedQuery
+                        $escapedPowerShellCommand = $powerShellCommand.Replace('"', '""')
+                        $wrapperSource = 'Set shell = CreateObject("WScript.Shell")' + "`r`n" +
+                            'shell.Run "' + $escapedPowerShellCommand + '", 0, True' + "`r`n"
+                        [IO.File]::WriteAllText($wrapperPath, $wrapperSource, [Text.Encoding]::ASCII)
+                        $action = New-ScheduledTaskAction -Execute $scriptHostPath -Argument ('//B //NoLogo "{0}"' -f $wrapperPath)
+                    } else {
+                        $action = New-ScheduledTaskAction -Execute $powershellPath -Argument "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $encodedQuery"
+                    }
                     $principal = New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
                     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
                     $taskRegistered = $true
@@ -775,7 +786,7 @@ finally {
                 }
                 finally {
                     if ($taskRegistered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
-                    Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $resultPath, $wrapperPath -Force -ErrorAction SilentlyContinue
                 }
             }
             [pscustomobject]@{ Lines = @($upgradeLines); Notes = @($notes) }
