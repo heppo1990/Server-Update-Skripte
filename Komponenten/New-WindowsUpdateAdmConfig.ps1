@@ -854,7 +854,36 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
     if (!(Test-Path $RoleCapDir)) { New-Item -Path $RoleCapDir -ItemType Directory -Force | Out-Null }
     
     $JeaManifest = Join-Path $JeaBaseDir "$JeaModuleName.psd1"
-    if (!(Test-Path $JeaManifest) -or $ForceUpdate) {
+    $manifestExists = Test-Path -LiteralPath $JeaManifest -PathType Leaf
+    $manifestNeedsRebuild = -not $manifestExists
+    if ($manifestExists) {
+        if ($ForceUpdate) {
+            $manifestNeedsRebuild = $true
+            Write-SetupLog 'Force-Update: JEA-Trägermodul-Manifest wird neu erstellt.' 'UPDATE'
+        } else {
+            try {
+                Test-ModuleManifest -Path $JeaManifest -ErrorAction Stop | Out-Null
+            }
+            catch {
+                $manifestNeedsRebuild = $true
+                $manifestLength = (Get-Item -LiteralPath $JeaManifest -ErrorAction Stop).Length
+                Write-SetupLog "Ungültiges JEA-Trägermodul-Manifest erkannt (Dateigröße: $manifestLength Byte); es wird gesichert und neu erstellt." 'WARN'
+            }
+        }
+    }
+
+    if ($manifestNeedsRebuild -and $manifestExists) {
+        $manifestBackupDirectory = Join-Path $env:ProgramData 'WindowsUpdateAdm\Logs'
+        if (-not (Test-Path -LiteralPath $manifestBackupDirectory -PathType Container)) {
+            New-Item -Path $manifestBackupDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        $manifestBackupPath = Join-Path $manifestBackupDirectory ("JEA_Updates.psd1.invalid-{0}.bak" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
+        Copy-Item -LiteralPath $JeaManifest -Destination $manifestBackupPath -ErrorAction Stop
+        Remove-Item -LiteralPath $JeaManifest -Force -ErrorAction Stop
+        Write-SetupLog "Vorheriges JEA-Manifest zur Diagnose gesichert: $manifestBackupPath" 'INFO'
+    }
+
+    if ($manifestNeedsRebuild) {
         New-ModuleManifest -Path $JeaManifest `
                            -RootModule "$JeaModuleName.psm1" `
                            -Guid ([Guid]::NewGuid()) `
@@ -862,7 +891,7 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
                            -ModuleVersion "1.0" `
                            -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus') `
                            -Description "Stabiler JEA Endpunkt fuer Windows Update Verwaltung"
-        Write-SetupLog "JEA-Trägermodul Manifest erstellt: $JeaManifest" "SUCCESS"
+        Write-SetupLog "JEA-Trägermodul-Manifest neu erstellt: $JeaManifest" 'SUCCESS'
     } else {
         try {
             # Vorhandene Manifeste stammen teils aus älteren Verteilungen und
@@ -879,6 +908,15 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
             Write-SetupDiagnostic -Operation 'JEA-Trägermodul-Manifest' -ErrorRecord $_ -Context @("Path=$JeaManifest")
             throw 'JEA-Trägermodul-Manifest konnte nicht auf die Statusfunktion aktualisiert werden; Details stehen im Setup-Protokoll.'
         }
+    }
+
+    try {
+        Test-ModuleManifest -Path $JeaManifest -ErrorAction Stop | Out-Null
+        Write-SetupLog 'JEA-Trägermodul-Manifest ist gültig.' 'SUCCESS'
+    }
+    catch {
+        Write-SetupDiagnostic -Operation 'JEA-Trägermodul-Manifest validieren' -ErrorRecord $_ -Context @("Path=$JeaManifest")
+        throw 'Das JEA-Trägermodul-Manifest ist nach der Erstellung/Aktualisierung weiterhin ungültig.'
     }
     
     # Role Capability Datei erstellen
