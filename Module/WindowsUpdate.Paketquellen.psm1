@@ -12,6 +12,39 @@ function Reset-WindowsUpdateRemoteWinGetSources {
     $resetScript = {
         $ErrorActionPreference = 'Stop'
         $knownDefaultSources = @('msstore', 'winget', 'winget-font')
+
+        function Invoke-WinGetCliWithoutWindow {
+            param([Parameter(Mandatory)][string]$Executable, [string[]]$Arguments = @())
+            $quotedArguments = foreach ($argument in $Arguments) {
+                $value = [string]$argument
+                if ($value -match '[\s"]') { '"' + $value.Replace('"', '\"') + '"' } else { $value }
+            }
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $Executable
+            $startInfo.Arguments = $quotedArguments -join ' '
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $process = [Diagnostics.Process]::new()
+            try {
+                $process.StartInfo = $startInfo
+                if (-not $process.Start()) { throw 'WinGet-CLI-Prozess konnte nicht gestartet werden.' }
+                $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                $stderrTask = $process.StandardError.ReadToEndAsync()
+                if (-not $process.WaitForExit(180000)) {
+                    try { $process.Kill() } catch { }
+                    throw 'WinGet-CLI-Prozess überschritt das Zeitlimit von 180 Sekunden.'
+                }
+                $process.WaitForExit()
+                $output = @($stdoutTask.GetAwaiter().GetResult(), $stderrTask.GetAwaiter().GetResult()) |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+                [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = ($output -join [Environment]::NewLine).Trim() }
+            }
+            finally { $process.Dispose() }
+        }
+
         $appInstaller = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
             Where-Object { $_.Status -eq 'Ok' -and $_.InstallLocation } |
             Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
@@ -19,8 +52,9 @@ function Reset-WindowsUpdateRemoteWinGetSources {
         $wingetPath = Join-Path ([string]$appInstaller[0].InstallLocation) 'winget.exe'
         if (-not (Test-Path -LiteralPath $wingetPath -PathType Leaf)) { throw "winget.exe fehlt im App-Installer-Paketpfad: $wingetPath" }
 
-        $sourceList = (& $wingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-        $sourceListExitCode = $LASTEXITCODE
+        $sourceListResult = Invoke-WinGetCliWithoutWindow -Executable $wingetPath -Arguments @('source', 'list', '--disable-interactivity')
+        $sourceList = [string]$sourceListResult.Output
+        $sourceListExitCode = [int]$sourceListResult.ExitCode
         if ($sourceListExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($sourceList)) {
             throw "WinGet-Quellenliste konnte vor dem Reset nicht zuverlässig gelesen werden (Exitcode $sourceListExitCode): $sourceList"
         }
@@ -35,19 +69,22 @@ function Reset-WindowsUpdateRemoteWinGetSources {
             throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); Reset wurde ausgelassen, damit diese erhalten bleiben."
         }
 
-        $resetOutput = (& $wingetPath source reset --force --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-        $resetExitCode = $LASTEXITCODE
+        $resetResult = Invoke-WinGetCliWithoutWindow -Executable $wingetPath -Arguments @('source', 'reset', '--force', '--disable-interactivity')
+        $resetOutput = [string]$resetResult.Output
+        $resetExitCode = [int]$resetResult.ExitCode
         if ($resetExitCode -ne 0) { throw "WinGet-CLI-Quellenreset fehlgeschlagen (Exitcode $resetExitCode): $resetOutput" }
 
         # Den Katalog unmittelbar über dieselbe CLI aktualisieren, die der
         # Benutzer remote erfolgreich getestet hat. Die folgende Paketabfrage
         # läuft anschließend über eine neue WinRM-Verbindung.
-        $updateOutput = (& $wingetPath source update --name winget --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-        $updateExitCode = $LASTEXITCODE
+        $updateResult = Invoke-WinGetCliWithoutWindow -Executable $wingetPath -Arguments @('source', 'update', '--name', 'winget', '--disable-interactivity')
+        $updateOutput = [string]$updateResult.Output
+        $updateExitCode = [int]$updateResult.ExitCode
         if ($updateExitCode -ne 0) { throw "WinGet-Quelle 'winget' konnte nach dem Reset nicht aktualisiert werden (Exitcode $updateExitCode): $updateOutput" }
 
-        $sourcesAfterResetOutput = (& $wingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-        $sourcesAfterResetExitCode = $LASTEXITCODE
+        $sourcesAfterResetResult = Invoke-WinGetCliWithoutWindow -Executable $wingetPath -Arguments @('source', 'list', '--disable-interactivity')
+        $sourcesAfterResetOutput = [string]$sourcesAfterResetResult.Output
+        $sourcesAfterResetExitCode = [int]$sourcesAfterResetResult.ExitCode
         if ($sourcesAfterResetExitCode -ne 0) { throw "WinGet-Quellenliste konnte nach dem Reset nicht gelesen werden (Exitcode $sourcesAfterResetExitCode): $sourcesAfterResetOutput" }
         $sourcesAfterReset = @(
             foreach ($line in ($sourcesAfterResetOutput -split "`r?`n")) {

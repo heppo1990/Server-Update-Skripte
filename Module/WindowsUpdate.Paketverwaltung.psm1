@@ -56,6 +56,42 @@ function Invoke-WindowsUpdatePackageManagers {
     $packageScript = {
         param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false)
 
+        function Invoke-WindowsUpdateHiddenProcess {
+            param(
+                [Parameter(Mandatory)][string]$Path,
+                [string[]]$Arguments = @(),
+                [ValidateRange(1, 300)][int]$TimeoutSeconds = 180
+            )
+            $quotedArguments = foreach ($argument in $Arguments) {
+                $value = [string]$argument
+                if ($value -match '[\s"]') { '"' + $value.Replace('"', '\"') + '"' } else { $value }
+            }
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $Path
+            $startInfo.Arguments = $quotedArguments -join ' '
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $process = [Diagnostics.Process]::new()
+            try {
+                $process.StartInfo = $startInfo
+                if (-not $process.Start()) { throw "Prozess konnte nicht gestartet werden: $Path" }
+                $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                $stderrTask = $process.StandardError.ReadToEndAsync()
+                if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                    try { $process.Kill() } catch { }
+                    throw "Prozess überschritt das Zeitlimit von $TimeoutSeconds Sekunden: $Path"
+                }
+                $process.WaitForExit()
+                $output = @($stdoutTask.GetAwaiter().GetResult(), $stderrTask.GetAwaiter().GetResult()) |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+                [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = ($output -join [Environment]::NewLine).Trim() }
+            }
+            finally { $process.Dispose() }
+        }
+
         function Invoke-WingetRunspaceWithTimeout {
             param(
                 [Parameter(Mandatory)][scriptblock]$ScriptBlock,
@@ -236,9 +272,11 @@ finally {
                 throw 'Windows PowerShell 5.1 wurde für die WinGet-Quellenregistrierung nicht gefunden.'
             }
             $encodedScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrapScript))
-            $output = (& $shellPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-                -EncodedCommand $encodedScript 2>&1 | Out-String -Width 300).Trim()
-            $exitCode = $LASTEXITCODE
+            $processResult = Invoke-WindowsUpdateHiddenProcess -Path $shellPath -Arguments @(
+                '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedScript
+            )
+            $output = [string]$processResult.Output
+            $exitCode = [int]$processResult.ExitCode
             $successLine = @($output -split "`r?`n" | Where-Object { $_ -match '^__WINGETSOURCE__SUCCESS\|' } | Select-Object -Last 1)
             if ($exitCode -ne 0 -or $successLine.Count -eq 0) {
                 throw "Registrierung des WinGet-Quellenpakets fehlgeschlagen (Exitcode $exitCode): $output"
@@ -912,8 +950,9 @@ finally {
         function Reset-WingetDefaultSources {
             param([Parameter(Mandatory)][string]$Path)
             $knownDefaultSources = @('msstore', 'winget', 'winget-font')
-            $configuredOutput = (& $Path source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-            $configuredExitCode = $LASTEXITCODE
+            $configuredResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'list', '--disable-interactivity')
+            $configuredOutput = [string]$configuredResult.Output
+            $configuredExitCode = [int]$configuredResult.ExitCode
             if ($configuredExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($configuredOutput)) {
                 throw "WinGet-Quellenliste konnte vor dem Reset nicht zuverlässig gelesen werden (Exitcode $configuredExitCode): $configuredOutput"
             }
@@ -930,14 +969,17 @@ finally {
 
             # Den explizit bewährten CLI-Reset verwenden. Anschließend wird die
             # Paketquelle vor dem Retry aktualisiert.
-            $resetOutput = (& $Path source reset --force --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-            $resetExitCode = $LASTEXITCODE
+            $resetResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'reset', '--force', '--disable-interactivity')
+            $resetOutput = [string]$resetResult.Output
+            $resetExitCode = [int]$resetResult.ExitCode
             if ($resetExitCode -ne 0) { throw "WinGet-CLI-Quellenreset fehlgeschlagen (Exitcode $resetExitCode): $resetOutput" }
-            $updateOutput = (& $Path source update --name winget --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-            $updateExitCode = $LASTEXITCODE
+            $updateResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'update', '--name', 'winget', '--disable-interactivity')
+            $updateOutput = [string]$updateResult.Output
+            $updateExitCode = [int]$updateResult.ExitCode
             if ($updateExitCode -ne 0) { throw "WinGet-Quelle 'winget' konnte nach dem Reset nicht aktualisiert werden (Exitcode $updateExitCode): $updateOutput" }
-            $sourcesAfterOutput = (& $Path source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
-            $sourcesAfterExitCode = $LASTEXITCODE
+            $sourcesAfterResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'list', '--disable-interactivity')
+            $sourcesAfterOutput = [string]$sourcesAfterResult.Output
+            $sourcesAfterExitCode = [int]$sourcesAfterResult.ExitCode
             if ($sourcesAfterExitCode -ne 0) { throw "WinGet-Quellenliste konnte nach dem Reset nicht gelesen werden (Exitcode $sourcesAfterExitCode): $sourcesAfterOutput" }
             $sourcesAfterReset = @(
                 foreach ($line in ($sourcesAfterOutput -split "`r?`n")) {
