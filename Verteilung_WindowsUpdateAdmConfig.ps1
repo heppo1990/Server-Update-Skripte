@@ -530,7 +530,8 @@ function Invoke-WinRMDeployment {
         foreach ($moduleName in @('PSWindowsUpdate', $(if ($enableWingetUpdates) { 'Microsoft.WinGet.Client' }))) {
             if ([string]::IsNullOrWhiteSpace($moduleName)) { continue }
             $expected = $script:ExpectedModuleVersions[$moduleName]
-            $installed = $targetModuleStatus.$moduleName
+            $statusProperty = if ($moduleName -eq 'Microsoft.WinGet.Client') { 'WinGetClient' } else { 'PSWindowsUpdate' }
+            $installed = $targetModuleStatus.PSObject.Properties[$statusProperty].Value
             if (-not $expected -or -not $installed -or ([version]$installed -lt [version]$expected)) {
                 $modulesToStage.Add($moduleName)
             }
@@ -540,7 +541,9 @@ function Invoke-WinRMDeployment {
         $modulesVerifiedCurrent = ($modulesToStage.Count -eq 0 -and -not $nugetNeeded)
         $moduleStateText = foreach ($moduleName in @('PSWindowsUpdate', $(if ($enableWingetUpdates) { 'Microsoft.WinGet.Client' }))) {
             if (-not [string]::IsNullOrWhiteSpace($moduleName)) {
-                '{0} {1}/{2}' -f $moduleName, $targetModuleStatus.$moduleName, $script:ExpectedModuleVersions[$moduleName]
+                $statusProperty = if ($moduleName -eq 'Microsoft.WinGet.Client') { 'WinGetClient' } else { 'PSWindowsUpdate' }
+                $installed = $targetModuleStatus.PSObject.Properties[$statusProperty].Value
+                '{0} {1}/{2}' -f $moduleName, $installed, $script:ExpectedModuleVersions[$moduleName]
             }
         }
         $moduleStateText += 'NuGet {0}/{1}' -f $targetModuleStatus.NuGet, $nugetExpected
