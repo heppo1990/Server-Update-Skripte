@@ -3017,6 +3017,108 @@ catch {
             }
         }
 
+        function Get-WingetInteractiveUserUpgradeLines {
+            # WinGet läuft im WinRM-Aufruf unter dem Remoting-Konto. Dadurch
+            # fehlen benutzerbezogene Installationen anderer angemeldeter
+            # Benutzer (z. B. VS Code User). Die Zusatzabfrage läuft als
+            # kurzlebige interaktive Aufgabe in deren vorhandener Sitzung und
+            # liest nur die Upgrade-Liste; sie installiert nichts.
+            $upgradeLines = @()
+            $notes = @()
+            $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $users = @{}
+            try {
+                $explorerProcesses = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop)
+                foreach ($process in $explorerProcesses) {
+                    if ([int]$process.SessionId -eq 0) { continue }
+                    $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop
+                    $ownerSid = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+                    if ($owner.ReturnValue -ne 0 -or $ownerSid.ReturnValue -ne 0 -or
+                        [string]::IsNullOrWhiteSpace([string]$ownerSid.Sid) -or $ownerSid.Sid -eq $currentSid) { continue }
+                    if (-not $users.ContainsKey([string]$ownerSid.Sid)) {
+                        $users[[string]$ownerSid.Sid] = '{0}\{1}' -f [string]$owner.Domain, [string]$owner.User
+                    }
+                }
+            }
+            catch {
+                return [pscustomobject]@{ Lines = @(); Notes = @("Abfrage angemeldeter Benutzer nicht möglich: $($_.Exception.Message)") }
+            }
+
+            foreach ($userSid in @($users.Keys)) {
+                $userName = [string]$users[$userSid]
+                $taskName = 'WindowsUpdateAdm-WinGetCheck-' + [guid]::NewGuid().ToString('N')
+                $resultPath = Join-Path $env:windir "Temp\$taskName.json"
+                $powershellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
+                    $notes += "Abfrage für '$userName' übersprungen: Windows PowerShell fehlt."
+                    continue
+                }
+
+                $resultPathJson = ConvertTo-Json -InputObject $resultPath -Compress
+                $queryScript = @'
+$ErrorActionPreference = 'Stop'
+$resultPath = __RESULT_PATH__
+$query = [ordered]@{ Success = $false; Output = ''; ExitCode = -1; Error = '' }
+try {
+    $app = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+        Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
+        Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
+        Select-Object -First 1
+    if (-not $app) { throw 'App Installer ist für diesen Benutzer nicht registriert.' }
+    $winget = Join-Path ([string]$app.InstallLocation) 'winget.exe'
+    if (-not (Test-Path -LiteralPath $winget -PathType Leaf)) { throw 'winget.exe wurde im Benutzerkontext nicht gefunden.' }
+    $query.Output = (& $winget list --upgrade-available --accept-source-agreements --disable-interactivity 2>&1 | Out-String -Width 1200).Trim()
+    $query.ExitCode = $LASTEXITCODE
+    $query.Success = ($query.ExitCode -eq 0 -or $query.Output -match '(?i)(no installed package found|es wurde kein installiertes paket gefunden|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar)')
+}
+catch { $query.Error = $_.Exception.ToString() }
+finally {
+    try { [IO.File]::WriteAllText($resultPath, ($query | ConvertTo-Json -Compress), [Text.Encoding]::UTF8) } catch { }
+}
+'@
+                $queryScript = $queryScript.Replace('__RESULT_PATH__', $resultPathJson)
+                $encodedQuery = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($queryScript))
+                $taskRegistered = $false
+                try {
+                    Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+                    $action = New-ScheduledTaskAction -Execute $powershellPath -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedQuery"
+                    $principal = New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
+                    Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
+                    $taskRegistered = $true
+                    Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                    $deadline = (Get-Date).AddSeconds(30)
+                    while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
+                        Start-Sleep -Milliseconds 500
+                    }
+                    if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                        throw "Keine Rückgabe innerhalb von 30 Sekunden für '$userName'."
+                    }
+                    $userQuery = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+                    if (-not $userQuery.Success) {
+                        $detail = if ($userQuery.Error) { [string]$userQuery.Error } else { "WinGet-Exitcode $($userQuery.ExitCode): $($userQuery.Output)" }
+                        throw $detail
+                    }
+                    foreach ($row in @(Get-WingetUpgradeLines -Output ([string]$userQuery.Output))) {
+                        $match = [regex]::Match([string]$row, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
+                        if (-not $match.Success) { continue }
+                        $displayName = "[$userName] $($match.Groups['Name'].Value.Trim())"
+                        $upgradeLines += [string]::Format('{0}  {1}  {2}  {3}  {4}', $displayName,
+                            $match.Groups['Id'].Value, $match.Groups['Installed'].Value,
+                            $match.Groups['Available'].Value, $match.Groups['Source'].Value)
+                    }
+                    $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' erfolgreich."
+                }
+                catch {
+                    $notes += "Benutzerbezogene WinGet-Abfrage für '$userName' nicht möglich: $($_.Exception.Message)"
+                }
+                finally {
+                    if ($taskRegistered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
+                    Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+            [pscustomobject]@{ Lines = @($upgradeLines); Notes = @($notes) }
+        }
+
         function Invoke-WingetCliPackageUpdate {
             param(
                 [Parameter(Mandatory)][string]$Path,
@@ -3450,6 +3552,38 @@ catch {
                         $emptyVerificationSummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
                     }
                     $wingetDiagnosticOutput = "$emptyVerificationSummary`r`nModulausgabe:`r`n$moduleEmptyOutput`r`nCLI-Gegenprüfung:`r`n$([string]$cliQueryResult.DiagnosticOutput)"
+                }
+                # Die normale WinGet-Abfrage läuft im Remoting-Benutzerkontext.
+                # Ergänze im Check benutzerbezogene Updates angemeldeter
+                # interaktiver Benutzer, z. B. VS Code User. Installationsläufe
+                # bleiben auf den bisherigen ausführenden Kontext beschränkt.
+                if ($ExecutionMode -eq 'Check') {
+                    $interactiveQuery = Get-WingetInteractiveUserUpgradeLines
+                    $interactiveLines = @($interactiveQuery.Lines)
+                    if ($interactiveLines.Count -gt 0) {
+                        $knownPackages = @{}
+                        foreach ($existingLine in @(Get-WingetUpgradeLines -Output $availableOutput)) {
+                            $existingMatch = [regex]::Match([string]$existingLine, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
+                            if ($existingMatch.Success) {
+                                $existingKey = '{0}|{1}|{2}' -f $existingMatch.Groups['Id'].Value.ToLowerInvariant(), $existingMatch.Groups['Source'].Value.ToLowerInvariant(), $existingMatch.Groups['Name'].Value.ToLowerInvariant()
+                                $knownPackages[$existingKey] = $true
+                            }
+                        }
+                        $additionalLines = foreach ($interactiveLine in $interactiveLines) {
+                            $interactiveMatch = [regex]::Match([string]$interactiveLine, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
+                            if (-not $interactiveMatch.Success) { continue }
+                            $interactiveKey = '{0}|{1}|{2}' -f $interactiveMatch.Groups['Id'].Value.ToLowerInvariant(), $interactiveMatch.Groups['Source'].Value.ToLowerInvariant(), $interactiveMatch.Groups['Name'].Value.ToLowerInvariant()
+                            if ($knownPackages.ContainsKey($interactiveKey)) { continue }
+                            $knownPackages[$interactiveKey] = $true
+                            $interactiveLine
+                        }
+                        if (@($additionalLines).Count -gt 0) {
+                            $availableOutput = (@($availableOutput, @($additionalLines)) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join [Environment]::NewLine
+                        }
+                    }
+                    if (@($interactiveQuery.Notes).Count -gt 0) {
+                        $wingetDiagnosticOutput += "`r`nAbfrage angemeldeter Benutzer:`r`n$(@($interactiveQuery.Notes) -join "`r`n")"
+                    }
                 }
                 $sourceFailureLines = @($availableOutput -split "`r?`n" | Where-Object {
                     Test-WingetSourceFailureLine -Line ([string]$_)
