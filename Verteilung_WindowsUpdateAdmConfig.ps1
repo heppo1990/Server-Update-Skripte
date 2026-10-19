@@ -212,42 +212,22 @@ if ($nonAdTargets.Count -gt 0) {
     }
 }
 
-# Aktuelle Module und NuGet-Provider werden zuerst zentral online beschafft und
-# ausschließlich als temporäres Offlinepaket an die Ziele übertragen.
+# Zielserver erhalten zunächst nur eine Versionsprüfung. Pakete werden erst
+# zentral bereitgestellt, wenn ein Ziel ein fehlendes oder veraltetes benötigt.
 $script:OfflineModulePayloadRoot = $null
+$script:ExpectedModuleVersions = @{}
 if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
-    $moduleNames = @('PSWindowsUpdate')
-    if ($enableWingetUpdates) { $moduleNames += 'Microsoft.WinGet.Client' }
-    $modulePayload = $null
-    try {
-        $modulePayload = New-WindowsUpdateModulePayload -ModuleName $moduleNames -OfflineModulePath $PSScriptRoot -WriteLog {
-            param($message, $level)
-            $deployLevel = switch ($level) { 'WARN' { 'Warning' } 'ERROR' { 'Error' } 'SUCCESS' { 'Success' } default { 'Info' } }
-            Write-DeployLog $message -Level $deployLevel -LogOnly
-        }
-        $script:OfflineModulePayloadRoot = $modulePayload.Root
-        $nugetPayload = $null
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $ProgressPreference = 'SilentlyContinue'
+    foreach ($moduleName in @('PSWindowsUpdate', $(if ($enableWingetUpdates) { 'Microsoft.WinGet.Client' }))) {
+        if ([string]::IsNullOrWhiteSpace($moduleName)) { continue }
         try {
-            $nugetPayload = New-WindowsUpdateNuGetProviderPayload -DestinationPath $modulePayload.Root -WriteLog {
-                param($message, $level)
-                $deployLevel = switch ($level) { 'WARN' { 'Warning' } 'ERROR' { 'Error' } 'SUCCESS' { 'Success' } default { 'Info' } }
-                Write-DeployLog $message -Level $deployLevel -LogOnly
-            }
+            $galleryModule = Find-Module -Name $moduleName -Repository PSGallery -ErrorAction Stop -WarningAction SilentlyContinue |
+                Sort-Object Version -Descending | Select-Object -First 1
+            if ($galleryModule) { $script:ExpectedModuleVersions[$moduleName] = [version]$galleryModule.Version }
         } catch {
-            Write-DeployLog "NuGet-Provider konnte nicht zentral vorbereitet werden; vorhandener Provider auf dem Ziel bleibt Rückfalloption. Ursache: $($_.Exception.Message)" -Level Warning -LogOnly
+            Write-DeployLog "Aktuelle PSGallery-Version von $moduleName nicht ermittelbar; Zielprüfung verwendet eine sichere Bereitstellung." -Level Warning -LogOnly
         }
-        Write-DeployLog 'Aktuelle Offlinepakete für Module und NuGet-Provider vorbereitet.' -Level Info
-        if ($modulePayload.FallbackModules.Count -gt 0 -or ($nugetPayload -and $nugetPayload.Source -eq 'Fallback')) {
-            $fallbackSummary = @($modulePayload.FallbackModules)
-            if ($nugetPayload -and $nugetPayload.Source -eq 'Fallback') { $fallbackSummary += "NuGet-Provider $($nugetPayload.Version)" }
-            Write-DeployLog "HINWEIS: Onlineabruf nicht vollständig; Offline-Fallback verwendet für: $($fallbackSummary -join ', ')." -Level Warning
-        }
-    } catch {
-        if ($modulePayload -and $modulePayload.Root) {
-            Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        $script:OfflineModulePayloadRoot = $null
-        Write-DeployLog "Zentrale Paketbereitstellung fehlgeschlagen; Ursache: $($_.Exception.Message)" -Level Warning
     }
 }
 
@@ -327,6 +307,7 @@ function Invoke-WinRMDeployment {
 
     $session = $null
     $remoteTemp = $null
+    $targetModulePayloadRoot = $null
     $usedCertificate = $false
     $bootstrapCredential = $null
     try {
@@ -513,6 +494,85 @@ function Invoke-WinRMDeployment {
             }
         }
 
+        # Nur veraltete oder fehlende Komponenten werden als Offlinepaket erstellt.
+        $targetModuleStatus = Invoke-Command -Session $session -ArgumentList ([bool]$enableWingetUpdates) -ScriptBlock {
+            param($includeWinGet)
+            function Get-HighestInstalledModuleVersion {
+                param([string]$Name)
+                $roots = @(
+                    (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules\$Name"),
+                    (Join-Path $env:ProgramFiles "PowerShell\Modules\$Name")
+                )
+                $versions = foreach ($root in $roots) {
+                    if (Test-Path -LiteralPath $root -PathType Container) {
+                        Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                            Where-Object Name -Match '^\d+(\.\d+){1,3}$' |
+                            ForEach-Object { try { [version]$_.Name } catch { } }
+                    }
+                }
+                @($versions | Sort-Object -Descending | Select-Object -First 1)[0]
+            }
+            $nugetRoot = Join-Path $env:ProgramFiles 'PackageManagement\ProviderAssemblies\nuget'
+            $nugetVersions = @()
+            if (Test-Path -LiteralPath $nugetRoot -PathType Container) {
+                $nugetVersions = @(Get-ChildItem -LiteralPath $nugetRoot -Directory -ErrorAction SilentlyContinue |
+                    Where-Object Name -Match '^\d+(\.\d+){1,3}$' |
+                    ForEach-Object { try { [version]$_.Name } catch { } })
+            }
+            [pscustomobject]@{
+                PSWindowsUpdate = Get-HighestInstalledModuleVersion 'PSWindowsUpdate'
+                WinGetClient = if ($includeWinGet) { Get-HighestInstalledModuleVersion 'Microsoft.WinGet.Client' } else { $null }
+                NuGet = @($nugetVersions | Sort-Object -Descending | Select-Object -First 1)[0]
+            }
+        } -ErrorAction Stop
+
+        $modulesToStage = [System.Collections.Generic.List[string]]::new()
+        foreach ($moduleName in @('PSWindowsUpdate', $(if ($enableWingetUpdates) { 'Microsoft.WinGet.Client' }))) {
+            if ([string]::IsNullOrWhiteSpace($moduleName)) { continue }
+            $expected = $script:ExpectedModuleVersions[$moduleName]
+            $installed = $targetModuleStatus.$moduleName
+            if (-not $expected -or -not $installed -or ([version]$installed -lt [version]$expected)) {
+                $modulesToStage.Add($moduleName)
+            }
+        }
+        $nugetExpected = [version]'2.8.5.208'
+        $nugetNeeded = -not $targetModuleStatus.NuGet -or ([version]$targetModuleStatus.NuGet -lt $nugetExpected)
+        $modulesVerifiedCurrent = ($modulesToStage.Count -eq 0 -and -not $nugetNeeded)
+        $moduleStateText = foreach ($moduleName in @('PSWindowsUpdate', $(if ($enableWingetUpdates) { 'Microsoft.WinGet.Client' }))) {
+            if (-not [string]::IsNullOrWhiteSpace($moduleName)) {
+                '{0} {1}/{2}' -f $moduleName, $targetModuleStatus.$moduleName, $script:ExpectedModuleVersions[$moduleName]
+            }
+        }
+        $moduleStateText += 'NuGet {0}/{1}' -f $targetModuleStatus.NuGet, $nugetExpected
+        Write-DeployLog "[$Servername] Versionsprüfung: $($moduleStateText -join '; ')." -LogOnly
+        if ($modulesVerifiedCurrent) {
+            Write-DeployLog "[$Servername] PSWindowsUpdate, NuGet und optionale WinGet-Module sind aktuell; keine Offlinepakete werden übertragen." -LogOnly
+        } else {
+            $targetModulePayloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdate-Zielpakete-{0}' -f [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $targetModulePayloadRoot -Force -ErrorAction Stop | Out-Null
+            if ($modulesToStage.Count -gt 0) {
+                $modulePayload = New-WindowsUpdateModulePayload -ModuleName @($modulesToStage) -OfflineModulePath $RootDirectory -WriteLog {
+                    param($message, $level)
+                    $deployLevel = switch ($level) { 'WARN' { 'Warning' } 'ERROR' { 'Error' } 'SUCCESS' { 'Success' } default { 'Info' } }
+                    Write-DeployLog "[$Servername] $message" -Level $deployLevel -LogOnly
+                }
+                foreach ($moduleDirectory in @(Get-ChildItem -LiteralPath $modulePayload.Root -Directory -ErrorAction Stop)) {
+                    Copy-Item -LiteralPath $moduleDirectory.FullName -Destination $targetModulePayloadRoot -Recurse -Force -ErrorAction Stop
+                }
+                Remove-Item -LiteralPath $modulePayload.Root -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($nugetNeeded) {
+                $null = New-WindowsUpdateNuGetProviderPayload -DestinationPath $targetModulePayloadRoot -WriteLog {
+                    param($message, $level)
+                    $deployLevel = switch ($level) { 'WARN' { 'Warning' } 'ERROR' { 'Error' } 'SUCCESS' { 'Success' } default { 'Info' } }
+                    Write-DeployLog "[$Servername] $message" -Level $deployLevel -LogOnly
+                }
+            }
+            $stagedNames = @($modulesToStage)
+            if ($nugetNeeded) { $stagedNames += 'NuGet' }
+            Write-DeployLog "[$Servername] Übertrage nur fehlende/veraltete Komponenten: $($stagedNames -join ', ')." -LogOnly
+        }
+
         $remoteTemp = Invoke-Command -Session $session -ScriptBlock {
             param($folderName)
             # Nicht den benutzerspezifischen TEMP-Pfad verwenden: WinRM kann
@@ -538,8 +598,8 @@ function Invoke-WinRMDeployment {
             Copy-Item -LiteralPath $componentModule.FullName -Destination (Join-Path $remoteTemp $componentModule.Name) `
                       -ToSession $session -Force -ErrorAction Stop
         }
-        if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
-            foreach ($moduleDirectory in @(Get-ChildItem -LiteralPath $OfflineModulePayloadRoot -Directory -ErrorAction Stop)) {
+        if ($targetModulePayloadRoot -and (Test-Path -LiteralPath $targetModulePayloadRoot -PathType Container)) {
+            foreach ($moduleDirectory in @(Get-ChildItem -LiteralPath $targetModulePayloadRoot -Directory -ErrorAction Stop)) {
                 Copy-Item -LiteralPath $moduleDirectory.FullName -Destination $remoteTemp `
                           -ToSession $session -Recurse -Force -ErrorAction Stop
             }
@@ -558,9 +618,10 @@ function Invoke-WinRMDeployment {
         $setupParameters = @{}
         $setupParameters.DeploymentVersion = $expectedDeploymentVersion
         if ($enableWingetUpdates) { $setupParameters.InstallWinGetClientModule = $true }
-        if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
+        if (-not $modulesVerifiedCurrent -and $targetModulePayloadRoot) {
             $setupParameters.OfflineModuleRoot = $remoteTemp
         }
+        if ($modulesVerifiedCurrent) { $setupParameters.ModulesVerifiedCurrent = $true }
         if ($DeployType -ne 'AD') { $setupParameters.EnableClientCertificateRemoting = $true }
         if ($DeployType -eq 'Hypervisor' -and -not $usedCertificate) {
             $setupParameters.CertificateMappingCredential = $bootstrapCredential
@@ -711,6 +772,9 @@ function Invoke-WinRMDeployment {
         }
     }
     finally {
+        if ($targetModulePayloadRoot -and (Test-Path -LiteralPath $targetModulePayloadRoot)) {
+            Remove-Item -LiteralPath $targetModulePayloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
         if ($session) {
             if ($remoteTemp) {
                 try {

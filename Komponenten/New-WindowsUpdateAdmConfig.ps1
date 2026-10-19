@@ -74,6 +74,11 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$OfflineModuleRoot,
 
+    # Interne Übergabe der Verteilung: Versionsprüfung auf diesem Ziel war
+    # erfolgreich und alle benötigten Module/Provider sind bereits aktuell.
+    [Parameter(Mandatory=$false)]
+    [switch]$ModulesVerifiedCurrent,
+
     # Computerkonto des Verwaltungsservers. Dieses erhält ausschließlich die
     # eingeschränkte JEA-Rolle für Update-Abfragen aus einem SYSTEM-Aufgabenlauf.
     [Parameter(Mandatory=$false)]
@@ -208,7 +213,9 @@ try {
     $offlineRoot = if ($OfflineModuleRoot) { $OfflineModuleRoot } else { $PSScriptRoot }
     $offlinePSWU = Join-Path $offlineRoot 'PSWindowsUpdate'
 
-    if ($InstallWinGetClientModule) {
+    if ($ModulesVerifiedCurrent) {
+        Write-SetupLog 'Modul- und NuGet-Versionen wurden durch die Verteilung geprüft; keine Pakete werden aktualisiert.' 'INFO'
+    } elseif ($InstallWinGetClientModule) {
         Write-SetupLog "=== WinGet-Client-Modul ===" "INFO"
         $winGetClientReady = Update-WinGetClientModule -OfflineModulePath $offlineRoot -WriteLog {
             param($message, $level)
@@ -228,20 +235,24 @@ try {
     Write-SetupLog "=== NuGet Provider Check ===" "INFO"
     
     $offlineModulesPresent = Test-Path -LiteralPath $offlinePSWU -PathType Container
-    $offlineNuGetProvider = Join-Path $offlineRoot 'NuGetProvider'
-    $nugetReady = Update-NuGetProvider -Force:$ForceUpdate -OfflineProviderPath $offlineNuGetProvider -WriteLog {
-        param($message, $level)
-        Write-SetupLog $message $level
-    }
-    if (-not $nugetReady) {
-        Write-SetupLog 'NuGet-Provider nicht verfügbar; bereitgestellte Module lassen sich weiterhin ohne NuGet laden.' 'WARN'
+    if ($ModulesVerifiedCurrent) {
+        $nugetReady = $true
+    } else {
+        $offlineNuGetProvider = Join-Path $offlineRoot 'NuGetProvider'
+        $nugetReady = Update-NuGetProvider -Force:$ForceUpdate -OfflineProviderPath $offlineNuGetProvider -WriteLog {
+            param($message, $level)
+            Write-SetupLog $message $level
+        }
+        if (-not $nugetReady) {
+            Write-SetupLog 'NuGet-Provider nicht verfügbar; bereitgestellte Module lassen sich weiterhin ohne NuGet laden.' 'WARN'
+        }
     }
     # === PowerShell Gallery konfigurieren
     # =========================================================
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== PowerShell Gallery Konfiguration ===" "INFO"
     
-    if ($offlineModulesPresent) {
+    if ($ModulesVerifiedCurrent -or $offlineModulesPresent) {
         Write-SetupLog 'PSGallery-Konfiguration übersprungen; PSWindowsUpdate wird aus dem bereitgestellten Offline-Paket gepflegt.' 'INFO'
     } else {
     try {
@@ -266,8 +277,13 @@ try {
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== PSWindowsUpdate Installation/Update ===" "INFO"
     
-    $Success = Update-PSWindowsUpdateModule -Force:$ForceUpdate -OfflineModulePath $offlinePSWU `
-        -WriteLog { param($message, $level) Write-SetupLog $message $level }
+    if ($ModulesVerifiedCurrent) {
+        $Success = $true
+        Write-SetupLog 'PSWindowsUpdate ist laut zentraler Versionsprüfung aktuell.' 'SUCCESS'
+    } else {
+        $Success = Update-PSWindowsUpdateModule -Force:$ForceUpdate -OfflineModulePath $offlinePSWU `
+            -WriteLog { param($message, $level) Write-SetupLog $message $level }
+    }
 
     if (-not $Success) {
         Write-SetupLog "" "INFO"
