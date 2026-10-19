@@ -685,16 +685,30 @@ try {
     if (-not $app) { throw 'App Installer ist für diesen Benutzer nicht registriert.' }
     $winget = Join-Path ([string]$app.InstallLocation) 'winget.exe'
     if (-not (Test-Path -LiteralPath $winget -PathType Leaf)) { throw 'winget.exe wurde im Benutzerkontext nicht gefunden.' }
-    # Bewährten Startmodus der Benutzerabfrage wiederherstellen. Der Versuch,
-    # den Konsolenblitz mit CreateNoWindow zu unterdrücken, fiel zeitlich mit
-    # ausbleibenden Ergebnissen für benutzerbezogene Pakete zusammen.
-    $process = Start-Process -FilePath $winget `
-        -ArgumentList @('list', '--upgrade-available', '--accept-source-agreements', '--disable-interactivity') `
-        -PassThru -Wait -WindowStyle Hidden `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+    # Die Abfrage läuft in einer interaktiven Sitzung. CreateNoWindow
+    # verhindert dort das kurz sichtbare Konsolenfenster; die frühere
+    # Nichtrückgabe wurde durch das zu kurze 30-Sekunden-Limit verursacht.
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $winget
+    $startInfo.Arguments = 'list --upgrade-available --accept-source-agreements --disable-interactivity'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(270000)) {
+        try { $process.Kill() } catch { }
+        throw 'winget.exe überschritt das Zeitlimit von viereinhalb Minuten.'
+    }
+    $process.WaitForExit()
     $query.ExitCode = [int]$process.ExitCode
-    $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::Default) } else { '' }
-    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::Default) } else { '' }
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     $outputParts = @()
     if (-not [string]::IsNullOrWhiteSpace($stdout)) { $outputParts += $stdout.Trim() }
     if (-not [string]::IsNullOrWhiteSpace($stderr)) { $outputParts += $stderr.Trim() }
