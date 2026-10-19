@@ -3500,9 +3500,11 @@ catch {
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0) {
-                    if ($SourceResetPerformed) {
-                        # Die äußere Wiederholungslogik protokolliert den Erfolg
-                        # samt neuer Sitzung genau einmal.
+                    if ($SourceResetPerformed -or $SourcePackageRefreshPerformed) {
+                        # Die äußere Wiederholungslogik hat Quellenreset oder
+                        # Quellenpaketprüfung bereits ausgeführt. Eine weiterhin
+                        # leere, fehlerfreie Suche ist jetzt ein gültiges Ergebnis;
+                        # sie darf keine zweite Reparaturrunde anfordern.
                     }
                     else {
                         # Ein erfolgreicher, aber leerer Suchlauf kann auf einen
