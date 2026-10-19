@@ -837,11 +837,17 @@ function Update-PSWindowsUpdateModule {
     }
 
     $modulePayload = $null
-    $availableOfflineVersions = if ($OfflineModulePath -and (Test-Path -LiteralPath $OfflineModulePath -PathType Container)) {
-        @(Get-ChildItem -LiteralPath $OfflineModulePath -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^\d+(\.\d+)*$' })
-    } else { @() }
-    if ($availableOfflineVersions.Count -eq 0) {
+    # In Windows PowerShell 5.1 kann eine einzelne zurückgegebene Version
+    # beim Zuweisen aus einem if-Ausdruck zu einem skalaren DirectoryInfo
+    # entpackt werden. Die explizite Arrayinitialisierung hält .Count stabil.
+    $availableOfflineVersions = @()
+    if ($OfflineModulePath -and (Test-Path -LiteralPath $OfflineModulePath -PathType Container)) {
+        $availableOfflineVersions = @(
+            Get-ChildItem -LiteralPath $OfflineModulePath -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\d+(\.\d+)*$' }
+        )
+    }
+    if (@($availableOfflineVersions).Count -eq 0) {
         try {
             $modulePayload = New-WindowsUpdateModulePayload -ModuleName 'PSWindowsUpdate' `
                 -OfflineModulePath $OfflineModulePath -WriteLog $WriteLog

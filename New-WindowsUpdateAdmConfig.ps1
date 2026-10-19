@@ -100,6 +100,7 @@ catch {
 # Zertifikatsvalidierung temporär speichern (für Retry-Logik)
 $OriginalCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
 $script:SetupLogPath = $null
+$script:SetupSucceeded = $false
 try {
     $setupLogDirectory = Join-Path $env:ProgramData 'WindowsUpdateAdm\Logs'
     New-Item -Path $setupLogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
@@ -1288,6 +1289,7 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
     # Nicht-AD-Ziele werden ausschließlich von
     # Verteilung_WindowsUpdateAdmConfig.ps1 per WinRM eingerichtet.
 
+    $script:SetupSucceeded = $true
     exit 0
 }
 catch {
@@ -1349,4 +1351,22 @@ finally {
     }
     # Zertifikatsvalidierung in jedem Fall wiederherstellen
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $OriginalCertificateCallback
+
+    # Nach einem erfolgreichen Setup bleibt pro Ziel nur das neueste
+    # Setup-Protokoll erhalten. Bei Fehlern bleiben ältere Logs zur Diagnose.
+    if ($script:SetupSucceeded -and $script:SetupLogPath) {
+        try {
+            $setupLogDirectory = Split-Path -Parent $script:SetupLogPath
+            $retention = Invoke-WindowsUpdateFileRetention `
+                -Directory $setupLogDirectory `
+                -Filter ("Setup_{0}_*.log" -f $env:COMPUTERNAME) `
+                -KeepFiles 1
+            if (@($retention.FailedFiles).Count -gt 0) {
+                Write-Verbose 'Ältere erfolgreiche Setup-Protokolle konnten nicht vollständig bereinigt werden.'
+            }
+        }
+        catch {
+            Write-Verbose "Ältere erfolgreiche Setup-Protokolle konnten nicht bereinigt werden: $($_.Exception.Message)"
+        }
+    }
 }
