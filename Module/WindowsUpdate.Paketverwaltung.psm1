@@ -56,6 +56,44 @@ function Invoke-WindowsUpdatePackageManagers {
     $packageScript = {
         param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false)
 
+        function Invoke-WingetRunspaceWithTimeout {
+            param(
+                [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+                [object[]]$ArgumentList = @(),
+                [ValidateRange(1, 300)][int]$TimeoutSeconds = 60
+            )
+            $runspace = $null
+            $worker = $null
+            $asyncResult = $null
+            try {
+                # Start-Job startet für jede Abfrage einen eigenen powershell.exe-
+                # Prozess; genau diese Konsolen blitzen im interaktiven Lauf auf.
+                # Ein eigener Runspace hält die Abfrage im aktuellen Prozess.
+                $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+                $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+                $runspace.Open()
+                $worker = [System.Management.Automation.PowerShell]::Create()
+                $worker.Runspace = $runspace
+                [void]$worker.AddScript($ScriptBlock.ToString())
+                foreach ($argument in $ArgumentList) { [void]$worker.AddArgument($argument) }
+                $asyncResult = $worker.BeginInvoke()
+                if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
+                    $worker.Stop()
+                    throw [System.TimeoutException]::new("WinGet-Abfrage hat das Zeitlimit von $TimeoutSeconds Sekunden überschritten.")
+                }
+                $results = @($worker.EndInvoke($asyncResult))
+                if ($worker.HadErrors -and $worker.Streams.Error.Count -gt 0) {
+                    throw [System.InvalidOperationException]::new([string]$worker.Streams.Error[0])
+                }
+                return $results
+            }
+            finally {
+                if ($asyncResult -and $asyncResult.AsyncWaitHandle) { $asyncResult.AsyncWaitHandle.Close() }
+                if ($worker) { $worker.Dispose() }
+                if ($runspace) { $runspace.Dispose() }
+            }
+        }
+
         # Winget ist eine benutzerbezogene App-Installer-Anwendung. Im
         # LocalSystem-Kontext ist es nicht zuverlässig verfügbar und darf dort
         # daher weder gesucht noch ausgeführt werden.
@@ -381,7 +419,7 @@ catch {
             if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
                 throw 'winget.exe wurde für den CLI-Fallback nicht gefunden.'
             }
-            $cliJob = Start-Job -ArgumentList $Path -ScriptBlock {
+            $cliResult = Invoke-WingetRunspaceWithTimeout -ArgumentList @($Path) -TimeoutSeconds 210 -ScriptBlock {
                 param([string]$WingetPath)
                 $ErrorActionPreference = 'Stop'
                 $runtimeContext = [pscustomobject]@{
@@ -484,19 +522,8 @@ catch {
                     Sources = @($queryDefinitions | ForEach-Object { $_.Source }); SkippedSources = @($skippedSources)
                     Results = @($sourceResults)
                 }
-            }
-            try {
-                $jobState = Wait-Job -Job $cliJob -Timeout 210
-                if (-not $jobState) {
-                    Stop-Job -Job $cliJob -ErrorAction SilentlyContinue
-                    throw [System.TimeoutException]::new('WinGet-CLI-Abfrage hat das Zeitlimit von 3 Minuten 30 Sekunden überschritten.')
-                }
-                $cliResult = Receive-Job -Job $cliJob -ErrorAction Stop | Select-Object -Last 1
-                if (-not $cliResult) { throw 'WinGet-CLI-Abfrage lieferte keine Rückgabe.' }
-            }
-            finally {
-                Remove-Job -Job $cliJob -Force -ErrorAction SilentlyContinue
-            }
+            } | Select-Object -Last 1
+            if (-not $cliResult) { throw 'WinGet-CLI-Abfrage lieferte keine Rückgabe.' }
 
             $context = $cliResult.Context
             $diagnostics = @(
@@ -742,12 +769,10 @@ finally {
         }
 
         function Get-WingetModuleUpdateOutput {
-            $queryJob = $null
             try {
-                # Katalogabfragen können in WinGet/COM hängen bleiben. Sie laufen
-                # daher in einem eigenen Prozess begrenzt. Bei Modulfehlern bleibt
-                # so Zeit für den CLI-Fallback innerhalb des äußeren 5-Minuten-Limits.
-                $queryJob = Start-Job -ScriptBlock {
+                # Katalogabfragen bleiben zeitlich begrenzt, laufen aber im
+                # separaten Runspace desselben Prozesses statt in einem Start-Job.
+                $queryResult = Invoke-WingetRunspaceWithTimeout -TimeoutSeconds 60 -ScriptBlock {
                     $ErrorActionPreference = 'Stop'
                     try {
                         Import-Module Microsoft.WinGet.Client -ErrorAction Stop
@@ -770,15 +795,7 @@ finally {
                             [pscustomobject]@{ Success = $false; Output = ''; Error = $_.Exception.ToString() }
                         }
                     }
-                }
-                # Reserve für den CLI-Fallback; der äußere Check-Timeout bleibt
-                # bei fünf Minuten.
-                $queryState = Wait-Job -Job $queryJob -Timeout 60
-                if (-not $queryState) {
-                    Stop-Job -Job $queryJob -ErrorAction SilentlyContinue
-                    throw [System.TimeoutException]::new('WinGet-Modulabfrage hat das Zeitlimit von 60 Sekunden überschritten.')
-                }
-                $queryResult = Receive-Job -Job $queryJob -ErrorAction Stop | Select-Object -Last 1
+                } | Select-Object -Last 1
                 if (-not $queryResult) { throw 'WinGet-Katalogabfrage lieferte keine Rückgabe.' }
                 if (-not $queryResult.Success) { throw [string]$queryResult.Error }
                 return [string]$queryResult.Output
@@ -789,11 +806,6 @@ finally {
                 if ($detail.Length -gt 350) { $detail = $detail.Substring(0, 347) + '...' }
                 if (Test-WingetSourceFailureLine -Line $detail) { return $detail }
                 throw
-            }
-            finally {
-                if ($queryJob) {
-                    Remove-Job -Job $queryJob -Force -ErrorAction SilentlyContinue
-                }
             }
         }
 
