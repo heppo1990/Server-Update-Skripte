@@ -430,10 +430,6 @@ function Update-ServerUpdateSettingsDefaults {
             # Sicherung entsteht anschließend gemeinsam mit der Migration.
             $passwordWasProtected = [bool](& $settingsPasswordProtector -Document $settings)
             $backupSettings = Copy-ServerUpdateJsonValue -Value $settings
-            # Vergleiche das Layout mit einer kanonischen Formatierung desselben
-            # JSON-Objekts. So vermeiden unterschiedliche ConvertTo-Json-Ausgaben
-            # in PS5/PS7 wiederholte Backups bei bereits formatierten Dateien.
-            $originalCanonicalJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $settings -Depth 100)
             # Skriptspezifische Dateien erhalten fehlende Werte aus der effektiven
             # gemeinsamen Konfiguration; ihre bereits gesetzten Werte bleiben maßgeblich.
             $fileDefaults = $defaults
@@ -455,10 +451,9 @@ function Update-ServerUpdateSettingsDefaults {
             $orderChanged = $currentCompactJson -cne $orderedCompactJson
             $backupJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $backupSettings -Depth 100)
             $updatedJson = Format-ServerUpdateJsonArrays -Json (ConvertTo-Json -InputObject $orderedSettings -Depth 100)
-            $originalFormatComparable = [regex]::Replace($originalSettingsText.TrimStart([char]0xFEFF).Replace("`r`n", "`n"), "`n+\z", '')
-            $canonicalFormatComparable = [regex]::Replace($originalCanonicalJson.Replace("`r`n", "`n"), "`n+\z", '')
-            $formatChanged = $originalFormatComparable -cne $canonicalFormatComparable
-            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected -and -not $formatChanged) { continue }
+            # Reine Whitespace-/Einrückungsunterschiede lösen keine Migration
+            # aus. Das verhindert wiederholte Sicherungen bei jeder Ausführung.
+            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected) { continue }
 
             # Eindeutiger Name: Auch parallele Update-Läufe überschreiben keine Sicherung.
             $backupDirectory = Join-Path $ScriptRoot 'Sicherungen'
@@ -488,11 +483,7 @@ function Update-ServerUpdateSettingsDefaults {
             if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or -not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
                 throw 'Einstellungsdatei oder Sicherung fehlt nach dem atomaren Austausch.'
             }
-            if ($addedCount -eq 0 -and $removedCount -eq 0 -and $legacyMigrationCount -eq 0 -and -not $orderChanged -and -not $passwordWasProtected) {
-                Write-Host "Einrückung der Settings vereinheitlicht; Sicherung: $backupPath" -ForegroundColor Cyan
-            } else {
-                Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt, {1} veraltete Einstellung(en) entfernt und {2} Legacy-Einstellung(en) konvertiert; Sicherung: {3}" -f $addedCount, $removedCount, $legacyMigrationCount, $backupPath) -ForegroundColor Cyan
-            }
+            Write-Host ("{0} fehlende Standard-Einstellung(en) ergänzt, {1} veraltete Einstellung(en) entfernt und {2} Legacy-Einstellung(en) konvertiert; Sicherung: {3}" -f $addedCount, $removedCount, $legacyMigrationCount, $backupPath) -ForegroundColor Cyan
         }
         catch {
             Write-ServerUpdateUpdaterDiagnostic -Operation 'Settings migrieren' -ErrorRecord $_ -Context ([IO.Path]::GetFileName($settingsPath))
@@ -1002,11 +993,22 @@ try {
 
     $pwshCommand = Get-Command -Name 'pwsh.exe' -ErrorAction SilentlyContinue
     if (-not $pwshCommand) { throw 'Nach dem Paketupdate wurde pwsh.exe nicht gefunden.' }
-    $scriptArguments = @(ConvertFrom-Json -InputObject $env:SERVER_UPDATE_BOOTSTRAP_ARGUMENTS_JSON -ErrorAction Stop)
-    $env:SERVER_UPDATE_POWERSHELL7_CHECKED = '1'
-    Write-Host 'PowerShell 7 wurde aktualisiert; starte Install-ServersUpdates.ps1 mit der aktualisierten Version neu.'
-    & $pwshCommand.Source -NoLogo -NoProfile -ExecutionPolicy Bypass -File $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH @scriptArguments
-    $scriptExitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+    $continuationSource = @(
+        '$ErrorActionPreference = ''Stop'''
+        '$scriptArguments = @(ConvertFrom-Json -InputObject $env:SERVER_UPDATE_BOOTSTRAP_ARGUMENTS_JSON -ErrorAction Stop)'
+        '$env:SERVER_UPDATE_POWERSHELL7_CHECKED = ''1'''
+        '& $env:SERVER_UPDATE_BOOTSTRAP_SCRIPT_PATH @scriptArguments'
+        'if ($null -ne $LASTEXITCODE) { exit ([int]$LASTEXITCODE) }'
+        'exit 0'
+    ) -join "`n"
+    $encodedContinuation = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($continuationSource))
+    Write-Host 'PowerShell 7 wurde aktualisiert; starte den Installationslauf in einem sichtbaren Fenster mit der aktualisierten Version neu.'
+    # Nur dieser Fortsetzungslauf ist sichtbar. Der PS7-Updatevorlauf selbst
+    # läuft weiter im verborgenen Bootstrap-Prozess.
+    $continuationProcess = Start-Process -FilePath $pwshCommand.Source `
+        -ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encodedContinuation) `
+        -Wait -PassThru -WindowStyle Normal -ErrorAction Stop
+    $scriptExitCode = [int]$continuationProcess.ExitCode
     Set-Content -LiteralPath $statusPath -Value (@{ Restarted = $true; ExitCode = $scriptExitCode } | ConvertTo-Json -Compress) -Encoding UTF8 -Force
 }
 catch {

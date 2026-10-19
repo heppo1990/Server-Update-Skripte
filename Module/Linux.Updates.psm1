@@ -53,10 +53,10 @@ $script:VMRebootIndex = $VMRebootIndexStart
 $script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new()
 
 function Write-LinuxLog {
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info')
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile, [ValidateSet('Info','Success','Warning','Error')][string]$Level = 'Info', [switch]$ConsoleWhenQuiet)
     $color = @{ Info='White'; Success='Green'; Warning='Yellow'; Error='Red' }[$Level]
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
-    if (-not $script:QuietMode -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color }
+    if ((-not $script:QuietMode -or $ConsoleWhenQuiet) -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color }
     if ($script:WriteExecutionLog) {
         [IO.File]::AppendAllText($LogFile, $Message + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
     }
@@ -511,7 +511,7 @@ foreach ($entry in $hostEntries) {
     $logFile = if ($script:WriteExecutionLog) { Join-Path $script:LogDirectory ("{0}_{1}.log" -f $remoteHost,(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')) } else { '' }
     Write-LinuxLog -Message '' -LogFile $logFile
     $actionHeading = if ($CheckOnly -or $DryRun) { "Starte Update-Check auf Linux-Server $remoteHost..." } elseif ($ConnectionOnly) { "Prüfe Verbindung zu Linux-Server $remoteHost..." } else { "Starte Update-Installation auf Linux-Server $remoteHost..." }
-    Write-LinuxLog -Message $actionHeading -LogFile $logFile
+    Write-LinuxLog -Message $actionHeading -LogFile $logFile -ConsoleWhenQuiet
     $setupIssue = ''
     try {
         if (-not $CheckOnly) { Ensure-LinuxSSHKey -KeyPath $KeyPath -LogFile $logFile }
@@ -520,10 +520,12 @@ foreach ($entry in $hostEntries) {
                 $setupIssue = 'Lokaler SSH-Privatschlüssel fehlt; Linux-Verteilung erforderlich.'
                 throw $setupIssue
             }
+            Write-LinuxLog -Message "Prüfe SSH-Schlüsselverbindung zu Linux-Server $remoteHost ..." -LogFile $logFile -ConsoleWhenQuiet
             if (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile)) {
                 $setupIssue = 'SSH-Schlüsselverbindung nicht bestätigt; Linux-Verteilung und Verbindung prüfen.'
                 throw $setupIssue
             }
+            Write-LinuxLog -Message "Prüfe Updateberechtigung auf Linux-Server $remoteHost ..." -LogFile $logFile -ConsoleWhenQuiet
             if (-not (Test-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile)) {
                 $setupIssue = "Linux-Updateeinrichtung fehlt oder ist veraltet (erwartete Version $script:LinuxSudoSetupVersion); Verteilung erforderlich."
                 Write-LinuxLog -Message "$setupIssue Die lesende Update-Suche wird trotzdem versucht." -LogFile $logFile -Level Warning
@@ -542,6 +544,7 @@ foreach ($entry in $hostEntries) {
         $result = $null
         $rebootError = $null
         $isVirtual = $false; $rebootScheduled = $false
+        if ($CheckOnly -or $DryRun) { Write-LinuxLog -Message "Frage verfügbare Linux-Paketupdates auf $remoteHost ab ..." -LogFile $logFile -ConsoleWhenQuiet }
         $result = Invoke-LinuxUpdate -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile -DryRun:$DryRun
         $totalUpdatesInstalled += $result.UpdateCount
         if (-not $DryRun -and $result.RebootRequired) {
