@@ -190,10 +190,10 @@ if ($includeOptionalSystems) {
 }
 
 # Das Client-Zertifikat wird nur benötigt, wenn mindestens ein Nicht-AD-Gerät
-# eingerichtet wird. Es wird bei Bedarf automatisch im Skriptordner erstellt.
+# eingerichtet wird. Der öffentliche Schlüssel liegt unter Komponenten.
 $nonAdTargets = @($Serverlist | Where-Object { $_.DeployType -and $_.DeployType -ne 'AD' })
 if ($nonAdTargets.Count -gt 0) {
-    $clientCertificate = Join-Path $PSScriptRoot 'WinRM-ClientCert.cer'
+    $clientCertificate = Join-Path (Join-Path $PSScriptRoot 'Komponenten') 'WinRM-ClientCert.cer'
     $certificateSetup = Join-Path $PSScriptRoot 'Komponenten\Setup-ClientCertificate.ps1'
     if (-not (Test-Path $certificateSetup)) {
         throw "Das Zertifikat-Setup-Skript wurde nicht gefunden: $certificateSetup"
@@ -540,7 +540,7 @@ function Invoke-WinRMDeployment {
 
         # AD-Geräte erhalten weder Client-Zertifikat noch Zertifikats-Mapping.
         if ($DeployType -ne 'AD') {
-            $certSource = Join-Path $RootDirectory 'WinRM-ClientCert.cer'
+            $certSource = Join-Path (Join-Path $RootDirectory 'Komponenten') 'WinRM-ClientCert.cer'
             if (-not (Test-Path $certSource)) {
                 throw "Client-Zertifikat fehlt: $certSource. Zuerst Setup-ClientCertificate.ps1 ausführen."
             }

@@ -620,7 +620,7 @@ try {
         }
 
         # Client-Zertifikat (Public Key) aus Skriptordner importieren
-        $clientCertPath = Join-Path $PSScriptRoot "WinRM-ClientCert.cer"
+        $clientCertPath = Join-Path $PSScriptRoot 'WinRM-ClientCert.cer'
         if (Test-Path $clientCertPath) {
             Write-SetupLog "Importiere Client-Zertifikat: $clientCertPath" "INFO"
             try {
@@ -756,7 +756,7 @@ try {
         } else {
             Write-SetupLog "Kein Client-Zertifikat gefunden ($clientCertPath)." "INFO"
             Write-SetupLog "Zuerst Komponenten\Setup-ClientCertificate.ps1 auf dem Verwaltungsserver ausführen," "INFO"
-            Write-SetupLog "dann WinRM-ClientCert.cer in den Skriptordner legen und dieses Skript erneut ausführen." "INFO"
+            Write-SetupLog "dann Komponenten\WinRM-ClientCert.cer bereitstellen und dieses Skript erneut ausführen." "INFO"
             Write-SetupLog "Passwort-Authentifizierung bleibt aktiv." "INFO"
         }
 

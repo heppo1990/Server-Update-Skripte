@@ -4,7 +4,7 @@ Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen 
 
 ## Ordnerstruktur
 
-Die direkt ausführbaren Hauptskripte sowie `settings.json` und `default_settings.json` liegen im Stammordner. Fachmodule stehen unter `Module`, Hilfs- und Verteilungsskripte unter `Komponenten`, diese Dokumentation unter `Dokumentation`. `Logs` und `Sicherungen` werden erst bei Bedarf angelegt und gehören nicht als leere Ordner ins Repository.
+Die direkt ausführbaren Hauptskripte sowie `settings.json` und `default_settings.json` liegen im Stammordner. Fachmodule stehen unter `Module`, Hilfs- und Verteilungsskripte sowie der öffentliche WinRM-Clientschlüssel unter `Komponenten`, diese Dokumentation unter `Dokumentation`. `Logs` und `Sicherungen` werden nur bei Bedarf angelegt, sind in Git ignoriert und gehören nicht als leere Ordner ins Repository. Der öffentliche Schlüssel liegt lokal unter `Komponenten\WinRM-ClientCert.cer`; der private Schlüssel verbleibt im Zertifikatsspeicher des Verwaltungsrechners.
 
 ## Schnellstart
 

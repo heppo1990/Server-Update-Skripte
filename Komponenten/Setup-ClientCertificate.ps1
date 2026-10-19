@@ -129,7 +129,9 @@ if ([string]::IsNullOrWhiteSpace($currentThumbprint)) {
 }
 
 $certStorePath = "Cert:\CurrentUser\My"
-$exportPath    = Join-Path $repositoryRoot "WinRM-ClientCert.cer"
+$certificateDirectory = Join-Path $repositoryRoot 'Komponenten'
+$exportPath    = Join-Path $certificateDirectory 'WinRM-ClientCert.cer'
+$legacyExportPath = Join-Path $repositoryRoot 'WinRM-ClientCert.cer'
 $certUpn       = "$CertName@localhost"
 $settingsFiles = @()
 $genericSettings = Join-Path $repositoryRoot 'settings.json'
@@ -234,8 +236,14 @@ if (-not $existingCert) {
 # Public Key exportieren
 Write-Host "`nExportiere Public Key nach: $exportPath" -ForegroundColor Cyan
 try {
+    if (-not (Test-Path -LiteralPath $certificateDirectory -PathType Container)) {
+        New-Item -Path $certificateDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
     $certBytes = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
     [System.IO.File]::WriteAllBytes($exportPath, $certBytes)
+    if (Test-Path -LiteralPath $legacyExportPath -PathType Leaf) {
+        Remove-Item -LiteralPath $legacyExportPath -Force -ErrorAction Stop
+    }
     Write-Host "Public Key exportiert." -ForegroundColor Green
 }
 catch {

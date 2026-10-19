@@ -11,6 +11,7 @@
 /*.html
 
 # Lokale Zertifikate und Schlüsselmaterial.
+Komponenten/*.cer
 /*.cer
 /*.pfx
 /*.p12
