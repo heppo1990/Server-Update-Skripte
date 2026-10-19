@@ -267,7 +267,21 @@ $SuccessCount = 0
 $FailCount    = 0
 $LinuxConnectionErrors = 0
 $HAConnectionErrors = 0
-$script:BootstrapCredential = $null
+$script:BootstrapCredentials = @{}
+
+function Get-TargetBootstrapCredential {
+    param([Parameter(Mandatory)][string]$Servername)
+
+    $suggestedUser = "$Servername\Administrator"
+    $message = "Einmalige WinRM-Einrichtung für $Servername. Bei einem anderen lokalen Administratorkonto den Benutzernamen im Dialog anpassen."
+    $credentialCommand = Get-Command -Name Get-Credential -ErrorAction Stop
+    if ($credentialCommand.Parameters.ContainsKey('UserName')) {
+        return Get-Credential -UserName $suggestedUser -Message $message
+    }
+
+    # Windows PowerShell 5.1 kann den Benutzernamen nicht im Dialog vorbelegen.
+    return Get-Credential -Message "$message Benutzername: $suggestedUser"
+}
 
 function Add-TrustedWinRMServerCertificate {
     param(
@@ -366,11 +380,17 @@ function Invoke-WinRMDeployment {
             }
 
             if (-not $session) {
-                if ($null -eq $script:BootstrapCredential) {
+                if ($script:BootstrapCredentials.ContainsKey($Servername)) {
+                    $bootstrapCredential = $script:BootstrapCredentials[$Servername]
+                    Write-DeployLog "Verwende für $Servername gespeicherte Zugangsdaten für '$($bootstrapCredential.UserName)'." -LogOnly
+                } else {
                     Write-DeployLog "Einmalige Anmeldedaten für $Servername werden benötigt." -Level Warning
-                    $script:BootstrapCredential = Get-Credential -Message "Einmalige WinRM-Einrichtung für Nicht-AD-Geräte (z. B. .\Administrator)"
+                    $bootstrapCredential = Get-TargetBootstrapCredential -Servername $Servername
                 }
-                $bootstrapCredential = $script:BootstrapCredential
+                if (-not $bootstrapCredential) {
+                    throw "Die Zugangsdaten für $Servername wurden nicht eingegeben."
+                }
+                Write-DeployLog "WinRM-Anmeldung für $Servername mit Benutzer '$($bootstrapCredential.UserName)'." -LogOnly
                 Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
                 try {
                     $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
@@ -385,12 +405,16 @@ function Invoke-WinRMDeployment {
                         $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
                     }
                     catch {
-                        # Ein lokales Administratorkonto kann je Nicht-AD-Gerät
-                        # unterschiedlich heißen. Werden zwischengespeicherte
-                        # Daten abgelehnt, fragen wir genau für dieses Ziel neu.
+                        # Zugangsdaten können je Nicht-AD-Gerät abweichen. Bei
+                        # Ablehnung genau dieses Ziel neu abfragen und den
+                        # Benutzernamen im Log (ohne Kennwort) nachvollziehbar machen.
                         Write-DeployLog "Einrichtungsdaten für $Servername wurden abgelehnt." -Level Warning
                         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTP-Anmeldung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Anmeldedaten erneut abfragen')
-                        $bootstrapCredential = Get-Credential -Message "Lokale Administrator-Anmeldedaten für $Servername (z. B. .\Administrator)"
+                        $bootstrapCredential = Get-TargetBootstrapCredential -Servername $Servername
+                        if (-not $bootstrapCredential) {
+                            throw "Die erneuten Zugangsdaten für $Servername wurden nicht eingegeben."
+                        }
+                        Write-DeployLog "Erneuter WinRM-Anmeldeversuch für $Servername mit Benutzer '$($bootstrapCredential.UserName)'." -LogOnly
                         try {
                             $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
                                 -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
@@ -400,9 +424,9 @@ function Invoke-WinRMDeployment {
                             Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTPS-Wiederholungsverbindung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=HTTP für einmalige Ersteinrichtung')
                             $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
                         }
-                        $script:BootstrapCredential = $bootstrapCredential
                     }
                 }
+                $script:BootstrapCredentials[$Servername] = $bootstrapCredential
             }
         } else {
             Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
