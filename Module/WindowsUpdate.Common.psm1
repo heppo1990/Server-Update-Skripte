@@ -2576,9 +2576,10 @@ function Invoke-WindowsUpdatePackageManagers {
             # bereitgestellt. In nicht interaktiven WinRM-Sitzungen kann WinGet
             # den Index zwar herunterladen, aber nicht zuverlässig registrieren.
             # Deshalb fehlt er später trotz erreichbarer Quelle im Benutzerprofil.
-            # Ein Quellenreset kann den Fehler allein nicht beheben: Auch ein
-            # vorhandenes, als Ok markiertes Paket wird nach einem leeren Suchlauf
-            # einmal direkt per AppX erneuert.
+            # Ein Quellenreset kann einen veralteten Zustand allein nicht beheben.
+            # Ein vorhandenes Paket wird aber nur ersetzt, wenn das heruntergeladene
+            # MSIX tatsächlich neuer ist. Eine erneute AppX-Registrierung derselben
+            # Version kann auf Servern mit aktivem Paketprofil an PLM scheitern.
             $bootstrapScript = @'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -2590,18 +2591,40 @@ try {
     $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
         Where-Object { $_.Status -eq 'Ok' })
     if ($registered.Count -eq 0 -or $refreshSource) {
-        $sourceChanged = $true
         $sourceWasRegistered = $registered.Count -gt 0
         $sourcePath = Join-Path $env:TEMP ('winget-source-{0}.msix' -f [guid]::NewGuid().ToString('N'))
         Invoke-WebRequest -Uri 'https://cdn.winget.microsoft.com/cache/source2.msix' `
             -OutFile $sourcePath -UseBasicParsing -ErrorAction Stop
-        Add-AppxPackage -Path $sourcePath -ErrorAction Stop
-        $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
-            Where-Object { $_.Status -eq 'Ok' })
-        if ($registered.Count -eq 0) {
-            throw 'Das WinGet-Quellenpaket wurde nach Add-AppxPackage im aktuellen Benutzerprofil nicht gefunden.'
+
+        $shouldRegister = -not $sourceWasRegistered
+        if ($sourceWasRegistered) {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($sourcePath)
+            try {
+                $manifestEntry = $archive.GetEntry('AppxManifest.xml')
+                if (-not $manifestEntry) { throw 'Das WinGet-Quellenpaket enthält kein AppxManifest.xml.' }
+                $manifestReader = [System.IO.StreamReader]::new($manifestEntry.Open())
+                try { $manifest = [xml]$manifestReader.ReadToEnd() }
+                finally { $manifestReader.Dispose() }
+                $downloadVersion = [version]$manifest.Package.Identity.Version
+            }
+            finally { $archive.Dispose() }
+
+            $installedVersion = @($registered | Sort-Object { [version]$_.Version } -Descending |
+                Select-Object -First 1)[0].Version
+            $shouldRegister = $downloadVersion -gt [version]$installedVersion
         }
-        $sourceRefreshed = $sourceWasRegistered
+
+        if ($shouldRegister) {
+            $sourceChanged = $true
+            Add-AppxPackage -Path $sourcePath -ErrorAction Stop
+            $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
+                Where-Object { $_.Status -eq 'Ok' })
+            if ($registered.Count -eq 0) {
+                throw 'Das WinGet-Quellenpaket wurde nach Add-AppxPackage im aktuellen Benutzerprofil nicht gefunden.'
+            }
+            $sourceRefreshed = $sourceWasRegistered
+        }
     }
     [Console]::Out.WriteLine('__WINGETSOURCE__SUCCESS|{0}|{1}|{2}', [string]$registered[-1].Version, $sourceChanged, $sourceRefreshed)
 }
@@ -3817,7 +3840,7 @@ catch {
                     throw "Wiederholungsprüfung fehlgeschlagen: $retryDetail"
                 }
                 $retryMessage = if ($sourcePackageRefreshPerformed -and @($retryResult.Packages).Count -eq 0) {
-                    'WinGet-Abfrage nach Erneuerung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar.'
+                    'WinGet-Abfrage nach Prüfung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar.'
                 } elseif ($retryRequiresSourceReset) {
                     'WinGet-Wiederholungsprüfung nach Quellenreset und Erneuerung des Quellenpakets erfolgreich.'
                 } elseif ($retryRequiresSourcePackageRefresh) {
@@ -3920,7 +3943,7 @@ catch {
         $bootstrapMessageProperty = $packageResult.PSObject.Properties['BootstrapMessage']
         if ($packageResult.Manager -eq 'Winget' -and $bootstrapMessageProperty -and -not [string]::IsNullOrWhiteSpace([string]$bootstrapMessageProperty.Value)) {
             $bootstrapMessage = [string]$bootstrapMessageProperty.Value
-            $logOnly = $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des 24-Stunden-Limits übersprungen\.|WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar\.'
+            $logOnly = $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des 24-Stunden-Limits übersprungen\.|WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar\.|WinGet-Abfrage nach Prüfung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar\.'
             if ($WriteLog) { & $WriteLog $bootstrapMessage ([bool]$logOnly) }
         }
     }
