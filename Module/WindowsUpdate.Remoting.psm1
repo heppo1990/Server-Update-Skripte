@@ -138,6 +138,7 @@ function Get-WorkerUpdateField {
 function ConvertTo-WorkerUpdateRows {
     param([object[]]$Items)
     $pendingItems = [System.Collections.Generic.Queue[object]]::new()
+    $seenUpdateIdentities = @{}
     foreach ($inputItem in $Items) {
         if ($null -ne $inputItem) { $pendingItems.Enqueue($inputItem) }
     }
@@ -150,6 +151,17 @@ function ConvertTo-WorkerUpdateRows {
         $kb = Get-WorkerUpdateField -Update $item -Names @('KB', 'KBArticleID', 'KBArticleIDs')
         $size = Get-WorkerUpdateField -Update $item -Names @('Size', 'MaxDownloadSize')
         $title = Get-WorkerUpdateField -Update $item -Names @('Title', 'UpdateTitle', 'Name')
+        $updateId = Get-WorkerUpdateField -Update $item -Names @('UpdateID', 'UpdateGuid')
+        $revision = Get-WorkerUpdateField -Update $item -Names @('RevisionNumber', 'Revision')
+        if ([string]::IsNullOrWhiteSpace([string]$updateId)) {
+            $identity = Get-WorkerUpdateField -Update $item -Names @('UpdateIdentity', 'Identity')
+            if ($identity -and $identity -isnot [string]) {
+                $updateId = Get-WorkerUpdateField -Update $identity -Names @('UpdateID', 'UpdateGuid', 'Id')
+                if ([string]::IsNullOrWhiteSpace([string]$revision)) {
+                    $revision = Get-WorkerUpdateField -Update $identity -Names @('RevisionNumber', 'Revision')
+                }
+            }
+        }
         if ([string]::IsNullOrWhiteSpace([string]$status) -and
             [string]::IsNullOrWhiteSpace([string]$kb) -and
             [string]::IsNullOrWhiteSpace([string]$size) -and
@@ -168,6 +180,14 @@ function ConvertTo-WorkerUpdateRows {
             $kb = (@(([string]$kb -split ',\s*') | ForEach-Object { if ($_ -match '^KB') { $_ } else { "KB$_" } }) -join ', ')
         }
         if ([string]::IsNullOrWhiteSpace([string]$computerName)) { $computerName = $env:COMPUTERNAME }
+        # Dieselbe dynamisch gelieferte Update-ID und Revision kann in der
+        # Windows-Update-Antwort mehrfach vorkommen. Andere IDs/Revisionen
+        # bleiben erhalten; es gibt keine fest verdrahtete Update-Auswahlliste.
+        if (-not [string]::IsNullOrWhiteSpace([string]$updateId)) {
+            $identityKey = '{0}|{1}' -f ([string]$updateId).Trim().ToLowerInvariant(), ([string]$revision).Trim()
+            if ($seenUpdateIdentities.ContainsKey($identityKey)) { continue }
+            $seenUpdateIdentities[$identityKey] = $true
+        }
         [PSCustomObject]@{ ComputerName = $computerName; Status = $status; KB = $kb; Size = $size; Title = $title }
     }
 }

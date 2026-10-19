@@ -449,9 +449,41 @@ catch {
                     }
                     return (@($keptLines) -join [Environment]::NewLine)
                 }
+                function Invoke-WingetCliHidden {
+                    param([Parameter(Mandatory)][string]$Executable, [string[]]$Arguments)
+                    $quotedArguments = foreach ($argument in $Arguments) {
+                        $value = [string]$argument
+                        if ($value -match '[\s"]') { '"' + $value.Replace('"', '\"') + '"' } else { $value }
+                    }
+                    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+                    $startInfo.FileName = $Executable
+                    $startInfo.Arguments = $quotedArguments -join ' '
+                    $startInfo.UseShellExecute = $false
+                    $startInfo.CreateNoWindow = $true
+                    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+                    $startInfo.RedirectStandardOutput = $true
+                    $startInfo.RedirectStandardError = $true
+                    $process = [Diagnostics.Process]::new()
+                    try {
+                        $process.StartInfo = $startInfo
+                        if (-not $process.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
+                        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                        $stderrTask = $process.StandardError.ReadToEndAsync()
+                        if (-not $process.WaitForExit(180000)) {
+                            try { $process.Kill() } catch { }
+                            throw 'winget.exe überschritt das Zeitlimit von 3 Minuten.'
+                        }
+                        $process.WaitForExit()
+                        $output = @($stdoutTask.GetAwaiter().GetResult(), $stderrTask.GetAwaiter().GetResult()) |
+                            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+                        [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = ($output -join [Environment]::NewLine) }
+                    }
+                    finally { $process.Dispose() }
+                }
                 try {
-                    $sourceListOutput = Remove-WingetProgressOutput -Text ((& $WingetPath source list --disable-interactivity 2>&1 | Out-String -Width 1200).Trim())
-                    $sourceListExitCode = $LASTEXITCODE
+                    $sourceListResult = Invoke-WingetCliHidden -Executable $WingetPath -Arguments @('source', 'list', '--disable-interactivity')
+                    $sourceListOutput = Remove-WingetProgressOutput -Text ([string]$sourceListResult.Output)
+                    $sourceListExitCode = [int]$sourceListResult.ExitCode
                     $sourceListError = ''
                 }
                 catch {
@@ -505,9 +537,10 @@ catch {
                     )
                     if ($queryDefinition.Explicit) { $arguments += @('--source', $sourceName) }
                     try {
-                        $output = Remove-WingetProgressOutput -Text ((& $WingetPath @arguments 2>&1 | Out-String -Width 1200).Trim())
+                        $queryResult = Invoke-WingetCliHidden -Executable $WingetPath -Arguments $arguments
+                        $output = Remove-WingetProgressOutput -Text ([string]$queryResult.Output)
                         $sourceResults += [pscustomobject]@{
-                            Source = $sourceName; Output = $output; ExitCode = $LASTEXITCODE; Error = ''
+                            Source = $sourceName; Output = $output; ExitCode = [int]$queryResult.ExitCode; Error = ''
                         }
                     }
                     catch {
