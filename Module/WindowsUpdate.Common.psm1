@@ -29,7 +29,13 @@ foreach ($componentModule in $componentModules) {
     if (-not (Test-Path -LiteralPath $componentPath -PathType Leaf)) {
         throw "Fachmodul fehlt: $componentPath"
     }
-    . $componentPath
+    # Eine .psm1-Datei direkt mit dem Punktoperator zu laden behandelt
+    # PowerShell als Modulimport und isoliert deren Funktionsbereich. Die
+    # Fachmodule werden deshalb als Skriptinhalt in diesem Modul ausgeführt,
+    # damit Funktionen sich wie im bisherigen gemeinsamen Modul gegenseitig
+    # aufrufen können.
+    $componentScript = [scriptblock]::Create([IO.File]::ReadAllText($componentPath))
+    . $componentScript
 }
 
 Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, Get-WindowsUpdateTargetOperatingSystem, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, New-WindowsUpdateNuGetProviderPayload, New-WindowsUpdateModulePayload, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic, Get-WindowsUpdateAdmDeploymentVersion
