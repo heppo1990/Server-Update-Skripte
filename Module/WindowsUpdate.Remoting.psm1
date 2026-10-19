@@ -180,11 +180,12 @@ function ConvertTo-WorkerUpdateRows {
             $kb = (@(([string]$kb -split ',\s*') | ForEach-Object { if ($_ -match '^KB') { $_ } else { "KB$_" } }) -join ', ')
         }
         if ([string]::IsNullOrWhiteSpace([string]$computerName)) { $computerName = $env:COMPUTERNAME }
-        # Dieselbe dynamisch gelieferte Update-ID und Revision kann in der
-        # Windows-Update-Antwort mehrfach vorkommen. Andere IDs/Revisionen
-        # bleiben erhalten; es gibt keine fest verdrahtete Update-Auswahlliste.
+        # Dieselbe dynamisch gelieferte Update-ID kann in der Windows-Update-
+        # Antwort mit mehreren Revisionen vorkommen. Für die Update-Liste zählt
+        # die Update-ID; sie wird deshalb unabhängig von der Revision nur
+        # einmal ausgegeben. Andere IDs bleiben erhalten.
         if (-not [string]::IsNullOrWhiteSpace([string]$updateId)) {
-            $identityKey = '{0}|{1}' -f ([string]$updateId).Trim().ToLowerInvariant(), ([string]$revision).Trim()
+            $identityKey = ([string]$updateId).Trim().ToLowerInvariant()
             if ($seenUpdateIdentities.ContainsKey($identityKey)) { continue }
             $seenUpdateIdentities[$identityKey] = $true
         }
