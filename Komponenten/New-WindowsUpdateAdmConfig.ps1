@@ -213,19 +213,6 @@ try {
     $offlineRoot = if ($OfflineModuleRoot) { $OfflineModuleRoot } else { $PSScriptRoot }
     $offlinePSWU = Join-Path $offlineRoot 'PSWindowsUpdate'
 
-    if ($ModulesVerifiedCurrent) {
-        Write-SetupLog 'Modul- und NuGet-Versionen wurden durch die Verteilung geprüft; keine Pakete werden aktualisiert.' 'INFO'
-    } elseif ($InstallWinGetClientModule) {
-        Write-SetupLog "=== WinGet-Client-Modul ===" "INFO"
-        $winGetClientReady = Update-WinGetClientModule -OfflineModulePath $offlineRoot -WriteLog {
-            param($message, $level)
-            Write-SetupLog $message $level
-        }
-        if (-not $winGetClientReady) {
-            Write-SetupLog "WinGet-Client-Modul konnte nicht aktualisiert werden; WindowsUpdateAdm-Setup wird fortgesetzt." "WARN"
-        }
-    }
-    
     if ($ForceUpdate) { Write-SetupLog "Force-Update aktiviert" "UPDATE" }
     
     # =========================================================
@@ -247,6 +234,23 @@ try {
             Write-SetupLog 'NuGet-Provider nicht verfügbar; bereitgestellte Module lassen sich weiterhin ohne NuGet laden.' 'WARN'
         }
     }
+
+    if ($ModulesVerifiedCurrent) {
+        Write-SetupLog 'Modul- und NuGet-Versionen wurden durch die Verteilung geprüft; keine Pakete werden aktualisiert.' 'INFO'
+    } elseif ($InstallWinGetClientModule) {
+        # NuGet steht nun bereit, bevor Update-WinGetClientModule Gallery- und
+        # Paketabfragen startet. So kommt auf alten PowerShellGet-Ständen
+        # keine interaktive Provider-Rückfrage.
+        Write-SetupLog "=== WinGet-Client-Modul ===" "INFO"
+        $winGetClientReady = Update-WinGetClientModule -OfflineModulePath $offlineRoot -WriteLog {
+            param($message, $level)
+            Write-SetupLog $message $level
+        }
+        if (-not $winGetClientReady) {
+            Write-SetupLog "WinGet-Client-Modul konnte nicht aktualisiert werden; WindowsUpdateAdm-Setup wird fortgesetzt." "WARN"
+        }
+    }
+
     # === PowerShell Gallery konfigurieren
     # =========================================================
     Write-SetupLog "" "INFO"

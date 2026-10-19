@@ -125,7 +125,8 @@ function New-WindowsUpdateNuGetProviderPayload {
     try {
         # Nur den klassischen OneGet-Bootstrap-Provider verwenden. Der integrierte
         # NuGet-Provider 3.0.0.1 aus PowerShell 7 ist kein Paket dieses Feeds.
-        $provider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction Stop -WarningAction SilentlyContinue |
+        $provider = Find-PackageProvider -Name NuGet -AllVersions -ForceBootstrap -Force `
+            -ErrorAction Stop -WarningAction SilentlyContinue |
             Where-Object { $_.Source -match '(?i)(cdn\.oneget\.org|onegetcdn\.azureedge\.net)/providers/nuget-\d+(\.\d+){1,3}\.package\.swidtag$' } |
             Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
         if ($provider) { $providerVersion = [string]$provider.Version }
@@ -210,7 +211,8 @@ function Update-NuGetProvider {
     try {
         # Die Suche prüft Bootstrap-Feed und PSGallery. Ein "No match" aus PSGallery
         # darf die gefundenen Bootstrap-Versionen nicht durch ErrorAction Stop verwerfen.
-        $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ErrorAction SilentlyContinue -WarningAction SilentlyContinue |
+        $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ForceBootstrap -Force `
+            -ErrorAction SilentlyContinue -WarningAction SilentlyContinue |
             Where-Object { $_.Source -match '(?i)(cdn\.oneget\.org|onegetcdn\.azureedge\.net)/providers/nuget-\d+(\.\d+){1,3}\.package\.swidtag$' } |
             Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
     }
