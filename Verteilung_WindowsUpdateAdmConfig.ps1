@@ -60,6 +60,7 @@ if ($scriptUpdateLoaded) {
 Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1') -Force -ErrorAction Stop
+$expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
 
 # Konfiguration
 $PSSCfgSkriptFile = "New-WindowsUpdateAdmConfig.ps1"
@@ -221,21 +222,26 @@ if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
         $previousProgress = $ProgressPreference
         try {
             $ProgressPreference = 'SilentlyContinue'
-            Save-Module -Name $moduleName -Repository PSGallery -Path $payloadRoot -IncludeDependencies -Force -ErrorAction Stop | Out-Null
+            # Save-Module lädt deklarierte Abhängigkeiten automatisch; das
+            # Cmdlet besitzt keinen Parameter -IncludeDependencies.
+            Save-Module -Name $moduleName -Repository PSGallery -Path $payloadRoot -Force -ErrorAction Stop | Out-Null
             if (-not (Test-Path -LiteralPath $modulePayload -PathType Container)) { throw "Save-Module hat kein Paket für $moduleName abgelegt." }
             Write-DeployLog "Modul $moduleName für Offline-Verteilung vorbereitet." -LogOnly
         }
         catch {
+            $saveModuleError = $_
             if (Test-Path -LiteralPath $modulePayload) { Remove-Item -LiteralPath $modulePayload -Recurse -Force -ErrorAction SilentlyContinue }
             $localModule = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue |
                 Sort-Object Version -Descending | Select-Object -First 1
+            $saveModuleCause = ($saveModuleError.Exception.ToString() -replace '\s+', ' ').Trim()
+            Write-DeployLog "PSGallery-Speicherung für $moduleName fehlgeschlagen; Ursache: $saveModuleCause" -Level Warning -LogOnly
             if ($localModule) {
                 try {
                     $fallbackVersion = Join-Path $modulePayload ([string]$localModule.Version)
                     New-Item -ItemType Directory -Path $fallbackVersion -Force -ErrorAction Stop | Out-Null
                     Copy-Item -Path (Join-Path $localModule.ModuleBase '*') -Destination $fallbackVersion -Recurse -Force -ErrorAction Stop
                     $offlineFallbackModules += "$moduleName $($localModule.Version)"
-                    Write-DeployLog "PSGallery-Download für $moduleName nicht erfolgreich; lokale Version $($localModule.Version) als Offline-Fallback kopiert." -Level Warning -LogOnly
+                    Write-DeployLog "PSGallery-Bereitstellung für $moduleName nicht erfolgreich; lokale Version $($localModule.Version) als Offline-Fallback kopiert." -Level Warning -LogOnly
                 }
                 catch {
                     Write-DeployLog "Offline-Paket für $moduleName konnte nicht erstellt werden: $($_.Exception.Message)" -Level Warning
@@ -253,7 +259,7 @@ if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
         $script:OfflineModulePayloadRoot = $payloadRoot
         Write-DeployLog "Offline-Modulpakete bereit; PSGallery-Zugriff wird nur auf dem Verwaltungsserver benötigt." -Level Info
         if ($offlineFallbackModules.Count -gt 0) {
-            Write-DeployLog "HINWEIS: PSGallery-Onlineabruf nicht erfolgreich; folgende Offlinepakete werden verwendet: $($offlineFallbackModules -join ', ')." -Level Warning
+            Write-DeployLog "HINWEIS: Onlinebereitstellung nicht vollständig; folgende Offlinepakete werden verwendet: $($offlineFallbackModules -join ', '). Ursache siehe Verteilungsprotokoll." -Level Warning
         }
     } else {
         Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -561,6 +567,7 @@ function Invoke-WinRMDeployment {
         }
 
         $setupParameters = @{}
+        $setupParameters.DeploymentVersion = $expectedDeploymentVersion
         if ($enableWingetUpdates) { $setupParameters.InstallWinGetClientModule = $true }
         if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
             $setupParameters.OfflineModuleRoot = $remoteTemp
@@ -683,7 +690,6 @@ function Invoke-WinRMDeployment {
         }
 
         Write-DeployLog "[$Servername] Teste WindowsUpdateAdm-Endpunkt."
-        $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
         $validateEndpoint = {
             $status = Invoke-Command @testParams
             if ($status.UpdateCommand -ne 'Get-WindowsUpdate') {
@@ -700,7 +706,7 @@ function Invoke-WinRMDeployment {
                 Write-DeployLog "WindowsUpdateAdm-Endpunkt auf $Servername noch nicht bereit; erneuter Versuch folgt." -LogOnly
             }
         } -ScriptBlock $validateEndpoint
-        Write-DeployLog "[$Servername] WindowsUpdateAdm-Endpunkt und Statusfunktion (Version $($endpointStatus.DeploymentVersion)) erfolgreich getestet." -Level Success
+        Write-DeployLog "[$Servername] WindowsUpdateAdm-Endpunkt und Statusfunktion (Version $expectedDeploymentVersion) erfolgreich getestet." -Level Success
 
         return [PSCustomObject]@{
             Status = 'Success'

@@ -15,6 +15,7 @@ Skriptsammlung zur zentralen Aktualisierung von Windows-Servern, Linux-Systemen 
 Beim PSWindowsUpdate-Check werden NuGet und PSWindowsUpdate auf dem Verwaltungsrechner und den Windows-Zielen geprüft und bei Bedarf aktualisiert.
 PowerShell 7 prüft zusätzlich PackageManagement auf Updates; auf Remotezielen erfolgt das nur, wenn PowerShell 7 installiert ist.
 Bei der WindowsUpdateAdm-Verteilung lädt der Verwaltungsserver PSWindowsUpdate und – sofern WinGet-Updates aktiviert sind – Microsoft.WinGet.Client vorab als Offline-Pakete. Die Ziele benötigen dafür keinen Zugriff auf NuGet oder PSGallery; temporäre Paketablagen werden nach der Verteilung entfernt.
+`Save-Module` lädt Modulabhängigkeiten selbstständig. Das Verteilungsskript verwendet dafür keinen separaten `-IncludeDependencies`-Parameter und protokolliert bei einem fehlgeschlagenen Paketabruf die konkrete Ursache.
 
 ## Wichtig
 
@@ -27,6 +28,8 @@ Bei der WindowsUpdateAdm-Verteilung lädt der Verwaltungsserver PSWindowsUpdate 
 - Check, Download und Install trennen Ergebnisblöcke je Ziel mit Leerzeilen. Zusammenfassungen nennen nur Systemarten, für die Ziele vorhanden sind.
 - Der Check prüft WindowsUpdateAdm-Versionen, Linux-SSH-/sudo-Einrichtungen und den Home-Assistant-SSH-Zugang. Fehlende oder veraltete Voraussetzungen werden in Konsole und Check-Mail als Handlungsbedarf gemeldet.
 - Bei Nicht-AD-Zielen erkennt die Verteilung bestehende WinRM-Zertifikatszuordnungen auch dann, wenn Windows ihre Schlüssel nur im WSMan-Attribut `Keys` liefert. Scheitert die Zertifikatsanmeldung, wird die Zuordnung anhand der einmalig eingegebenen lokalen Administrator-Anmeldedaten erneuert.
+- Bei WinRM über HTTPS prüft die Verteilung zusätzlich die HTTP.sys-Bindung auf Port 5986 und aktiviert nötigenfalls die Clientzertifikataushandlung. Die Änderung erhält das gebundene Zertifikat und dessen App-ID; eine erhöhte Bereitstellungsversion fordert die erneute Verteilung an.
+- Die Verteilung übergibt die zentral ermittelte WindowsUpdateAdm-Version explizit an das Setup und verwendet sie auch für Endpunktprüfung und Erfolgsmeldung.
 - Nicht konfigurierte Linux- und Home-Assistant-Ziele werden still ausgelassen und nicht als übersprungen ausgegeben.
 - Zurückgestellte Windows-Updates und Neustart-Wartungsfenster werden über `UpdateSettings` konfiguriert.
 - Alle Skripte zeigen Ziele, Updates und Aktionen knapp, farbig und mit Leerzeilen getrennt. Installierte Paketmanager melden auch dann ihren Status, wenn keine Updates verfügbar sind; Fehlerdetails stehen im Log.

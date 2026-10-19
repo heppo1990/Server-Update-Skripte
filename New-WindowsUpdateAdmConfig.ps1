@@ -77,7 +77,12 @@ param(
     # Für Ziele außerhalb der Verwaltungs-AD wird Zertifikats-Remoting auch
     # dann benötigt, wenn das Gerät Mitglied einer anderen AD-Domäne ist.
     [Parameter(Mandatory=$false)]
-    [switch]$EnableClientCertificateRemoting
+    [switch]$EnableClientCertificateRemoting,
+
+    # Interne Übergabe der zentral ermittelten WindowsUpdateAdm-Version.
+    # Die Verteilung und das Setup protokollieren und registrieren denselben Wert.
+    [Parameter(Mandatory=$false)]
+    [string]$DeploymentVersion
 )
 # Dieses Setup wird auf Zielservern nur vorübergehend in %TEMP% ausgeführt.
 # Es lädt dort keine weiteren Repository-Skripte aus GitHub nach.
@@ -476,6 +481,64 @@ try {
             }
         }
 
+        # HTTP.sys muss Clientzertifikate bereits während des TLS-Handshakes
+        # aushandeln. Ein WSMan-Zertifikatsmapping allein reicht nicht: ohne
+        # diese Option liefert WinRM 401/503 und meldet, dass kein
+        # Clientzertifikat abgerufen werden konnte.
+        try {
+            $sslBindingOutput = @(& "$env:SystemRoot\System32\netsh.exe" http show sslcert ipport=0.0.0.0:5986 2>&1)
+            $sslBindingExitCode = $LASTEXITCODE
+            $sslBindingText = ($sslBindingOutput | ForEach-Object { [string]$_ }) -join "`n"
+            if ($sslBindingExitCode -ne 0) {
+                throw "HTTP.sys-Bindung für 0.0.0.0:5986 konnte nicht gelesen werden (netsh Exitcode $sslBindingExitCode): $sslBindingText"
+            }
+
+            # netsh lokalisiert die Beschriftungen. Die Werte selbst (Hash,
+            # GUID, Store und Enabled/Disabled) sind sprachneutral.
+            $certificateHashMatch = [regex]::Match($sslBindingText, '(?im)^\s*(?:Certificate\s+Hash|Zertifikathash|Zertifikat-Hash)\s*:\s*([0-9a-f]{40,64})\s*$')
+            $applicationIdMatch = [regex]::Match($sslBindingText, '(?im)^\s*(?:Application\s+ID|Anwendungs-ID)\s*:\s*(\{?[0-9a-f-]{36}\}?)\s*$')
+            $certificateStoreMatch = [regex]::Match($sslBindingText, '(?im)^\s*(?:Certificate\s+Store\s+Name|Zertifikatspeichername|Zertifikatsspeichername)\s*:\s*(\S+)\s*$')
+            $negotiationMatch = [regex]::Match($sslBindingText, '(?im)^\s*(?:Client\s+Certificate\s+Negotiation|Clientzertifikat\s+aushandeln)\s*:\s*(Enabled|Disabled|Aktiviert|Deaktiviert)\s*$')
+
+            if (-not $certificateHashMatch.Success -or -not $applicationIdMatch.Success -or -not $certificateStoreMatch.Success -or -not $negotiationMatch.Success) {
+                throw "Die HTTP.sys-Bindungswerte konnten nicht sicher ausgewertet werden. Ausgabe: $sslBindingText"
+            }
+
+            $clientCertificateNegotiationEnabled = $negotiationMatch.Groups[1].Value -match '^(?i:Enabled|Aktiviert)$'
+            if (-not $clientCertificateNegotiationEnabled) {
+                $certificateHash = $certificateHashMatch.Groups[1].Value
+                $applicationId = $applicationIdMatch.Groups[1].Value
+                $certificateStoreName = $certificateStoreMatch.Groups[1].Value
+                if ($certificateStoreName -match '^(?i:\(?null\)?)$') { $certificateStoreName = 'MY' }
+                $netshArguments = @(
+                    'http', 'update', 'sslcert', 'ipport=0.0.0.0:5986',
+                    "certhash=$certificateHash", "appid=$applicationId",
+                    "certstorename=$certificateStoreName", 'clientcertnegotiation=enable'
+                )
+                $updateOutput = @(& "$env:SystemRoot\System32\netsh.exe" @netshArguments 2>&1)
+                $updateExitCode = $LASTEXITCODE
+                if ($updateExitCode -ne 0) {
+                    throw "HTTP.sys-Clientzertifikataushandlung konnte nicht aktiviert werden (netsh Exitcode $updateExitCode): $($updateOutput -join ' ')"
+                }
+
+                $verifyOutput = @(& "$env:SystemRoot\System32\netsh.exe" http show sslcert ipport=0.0.0.0:5986 2>&1)
+                $verifyExitCode = $LASTEXITCODE
+                $verifyText = ($verifyOutput | ForEach-Object { [string]$_ }) -join "`n"
+                $verifyNegotiationMatch = [regex]::Match($verifyText, '(?im)^\s*(?:Client\s+Certificate\s+Negotiation|Clientzertifikat\s+aushandeln)\s*:\s*(Enabled|Disabled|Aktiviert|Deaktiviert)\s*$')
+                if ($verifyExitCode -ne 0 -or -not $verifyNegotiationMatch.Success -or $verifyNegotiationMatch.Groups[1].Value -notmatch '^(?i:Enabled|Aktiviert)$') {
+                    throw "Aktivierung der HTTP.sys-Clientzertifikataushandlung wurde nicht bestätigt. Ausgabe: $verifyText"
+                }
+
+                Write-SetupLog "HTTP.sys-Clientzertifikataushandlung für WinRM HTTPS (5986) aktiviert und verifiziert." "SUCCESS"
+            } else {
+                Write-SetupLog "HTTP.sys handelt Clientzertifikate für WinRM HTTPS (5986) bereits aus." "SUCCESS"
+            }
+        }
+        catch {
+            Write-SetupDiagnostic -Operation 'HTTP.sys-Clientzertifikataushandlung' -ErrorRecord $_ -Context @("Computer=$hostname", 'Binding=0.0.0.0:5986')
+            throw 'HTTP.sys-Clientzertifikataushandlung für WinRM HTTPS konnte nicht sicher eingerichtet werden; Details stehen im Setup-Protokoll.'
+        }
+
         # Firewall-Regel für Port 5986
         $fwRule = Get-NetFirewallRule -DisplayName "WinRM HTTPS" -ErrorAction SilentlyContinue
         if ($fwRule) {
@@ -742,7 +805,14 @@ try {
     $RoleCapDir    = Join-Path $JeaBaseDir "RoleCapabilities"
 
     $JeaModuleFile = Join-Path $JeaBaseDir "$JeaModuleName.psm1"
-    $deploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
+    $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
+    if ([string]::IsNullOrWhiteSpace($DeploymentVersion)) {
+        $deploymentVersion = $expectedDeploymentVersion
+    } elseif ($DeploymentVersion -ne $expectedDeploymentVersion) {
+        throw "Übergebene WindowsUpdateAdm-Version '$DeploymentVersion' stimmt nicht mit der zentral erwarteten Version '$expectedDeploymentVersion' überein."
+    } else {
+        $deploymentVersion = $DeploymentVersion
+    }
     $JeaModuleSource = @"
 function Get-WindowsUpdateAdmDeploymentStatus {
     [PSCustomObject]@{ Version = '$deploymentVersion' }

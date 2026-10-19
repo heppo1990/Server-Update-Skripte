@@ -3823,6 +3823,6 @@ function Add-WindowsUpdateTrustedHost {
 # Erhöhen, wenn eine Änderung an der WindowsUpdateAdm-Einrichtung eine
 # Neuverteilung auf bereits eingerichteten Zielsystemen erfordert.
 function Get-WindowsUpdateAdmDeploymentVersion {
-    '1'
+    '2'
 }
 Export-ModuleMember -Function Get-WindowsUpdateSettings, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, Get-WindowsUpdateTargetOperatingSystem, New-WindowsUpdateInvokeCommandParams, Initialize-WindowsUpdateRemoting, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic, Get-WindowsUpdateAdmDeploymentVersion
