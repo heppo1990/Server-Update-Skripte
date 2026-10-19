@@ -685,30 +685,16 @@ try {
     if (-not $app) { throw 'App Installer ist für diesen Benutzer nicht registriert.' }
     $winget = Join-Path ([string]$app.InstallLocation) 'winget.exe'
     if (-not (Test-Path -LiteralPath $winget -PathType Leaf)) { throw 'winget.exe wurde im Benutzerkontext nicht gefunden.' }
-    # Start-Process -WindowStyle Hidden kann das Konsolenfenster erst nach
-    # dessen Erzeugung verbergen. CreateNoWindow verhindert den sichtbaren
-    # Konsolenstart von Anfang an.
-    $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $winget
-    $startInfo.Arguments = 'list --upgrade-available --accept-source-agreements --disable-interactivity'
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
-    if (-not $process.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit(180000)) {
-        try { $process.Kill() } catch { }
-        throw 'winget.exe überschritt das Zeitlimit von 3 Minuten.'
-    }
-    $process.WaitForExit()
+    # Bewährten Startmodus der Benutzerabfrage wiederherstellen. Der Versuch,
+    # den Konsolenblitz mit CreateNoWindow zu unterdrücken, fiel zeitlich mit
+    # ausbleibenden Ergebnissen für benutzerbezogene Pakete zusammen.
+    $process = Start-Process -FilePath $winget `
+        -ArgumentList @('list', '--upgrade-available', '--accept-source-agreements', '--disable-interactivity') `
+        -PassThru -Wait -WindowStyle Hidden `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
     $query.ExitCode = [int]$process.ExitCode
-    $stdout = $stdoutTask.GetAwaiter().GetResult()
-    $stderr = $stderrTask.GetAwaiter().GetResult()
+    $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::Default) } else { '' }
+    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::Default) } else { '' }
     $outputParts = @()
     if (-not [string]::IsNullOrWhiteSpace($stdout)) { $outputParts += $stdout.Trim() }
     if (-not [string]::IsNullOrWhiteSpace($stderr)) { $outputParts += $stderr.Trim() }
@@ -749,14 +735,14 @@ finally {
                     # Benutzerbezogene WinGet-Abfragen können beim ersten
                     # Katalogzugriff länger dauern als die Systemabfrage.
                     # Das Gesamtlaufzeitlimit der WinGet-Prüfung beträgt fünf
-                    # Minuten; die Benutzerabfrage darf nicht schon nach 30 s
-                    # verworfen werden.
-                    $deadline = (Get-Date).AddSeconds(180)
+                    # Minuten; die Benutzerabfrage darf nicht vor Ablauf
+                    # desselben Zeitfensters verworfen werden.
+                    $deadline = (Get-Date).AddSeconds(300)
                     while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
                         Start-Sleep -Milliseconds 500
                     }
                     if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
-                        throw "Keine Rückgabe innerhalb von 180 Sekunden für '$userName'."
+                        throw "Keine Rückgabe innerhalb von 300 Sekunden für '$userName'."
                     }
                     $userQuery = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
                     if (-not $userQuery.Success) {
