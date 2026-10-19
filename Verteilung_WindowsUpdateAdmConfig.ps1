@@ -213,6 +213,7 @@ $script:OfflineModulePayloadRoot = $null
 if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
     $moduleNames = @('PSWindowsUpdate')
     if ($enableWingetUpdates) { $moduleNames += 'Microsoft.WinGet.Client' }
+    $offlineFallbackModules = @()
     $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdateAdm-ModulePayload-{0}' -f [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $payloadRoot -Force -ErrorAction Stop | Out-Null
     foreach ($moduleName in $moduleNames) {
@@ -233,7 +234,8 @@ if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
                     $fallbackVersion = Join-Path $modulePayload ([string]$localModule.Version)
                     New-Item -ItemType Directory -Path $fallbackVersion -Force -ErrorAction Stop | Out-Null
                     Copy-Item -Path (Join-Path $localModule.ModuleBase '*') -Destination $fallbackVersion -Recurse -Force -ErrorAction Stop
-                    Write-DeployLog "PSGallery-Download für $moduleName fehlgeschlagen; lokale Version $($localModule.Version) wird als Offline-Fallback verwendet." -Level Warning
+                    $offlineFallbackModules += "$moduleName $($localModule.Version)"
+                    Write-DeployLog "PSGallery-Download für $moduleName nicht erfolgreich; lokale Version $($localModule.Version) als Offline-Fallback kopiert." -Level Warning -LogOnly
                 }
                 catch {
                     Write-DeployLog "Offline-Paket für $moduleName konnte nicht erstellt werden: $($_.Exception.Message)" -Level Warning
@@ -250,6 +252,9 @@ if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
     if ($stagedModules.Count -gt 0) {
         $script:OfflineModulePayloadRoot = $payloadRoot
         Write-DeployLog "Offline-Modulpakete bereit; PSGallery-Zugriff wird nur auf dem Verwaltungsserver benötigt." -Level Info
+        if ($offlineFallbackModules.Count -gt 0) {
+            Write-DeployLog "HINWEIS: PSGallery-Onlineabruf nicht erfolgreich; folgende Offlinepakete werden verwendet: $($offlineFallbackModules -join ', ')." -Level Warning
+        }
     } else {
         Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
         Write-DeployLog 'Keine Offline-Modulpakete verfügbar; das Setup versucht den bisherigen Onlineweg.' -Level Warning
