@@ -724,16 +724,21 @@ try {
     if (-not (Test-Path -LiteralPath $winget -PathType Leaf)) { throw 'winget.exe wurde im Benutzerkontext nicht gefunden.' }
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $winget
-    $startInfo.Arguments = 'list --upgrade-available --accept-source-agreements --disable-interactivity'
+    # Die Benutzerabfrage beschränkt sich auf die WinGet-Communityquelle.
+    # msstore kann trotz NonInteractive-Option eine interaktive Zustimmung
+    # anfordern und dadurch die geplante Aufgabe bis zum Timeout blockieren.
+    $startInfo.Arguments = 'list --upgrade-available --source winget --accept-source-agreements --disable-interactivity'
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $false
     $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Normal
+    $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $process = [Diagnostics.Process]::new()
     try {
         $process.StartInfo = $startInfo
         if (-not $process.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
+        $process.StandardInput.Close()
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit(270000)) {
@@ -752,8 +757,20 @@ try {
     $query.Output = ($outputParts -join [Environment]::NewLine).Trim()
     $query.Success = ($query.ExitCode -eq 0 -or $query.Output -match '(?i)(no installed package found|es wurde kein installiertes paket gefunden|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar)')
     if (__INSTALL_UPDATES__ -and $query.Success) {
-        $packagePattern = '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$'
+        # Nur Zeilen innerhalb der eigentlichen WinGet-Tabelle werten. Vor
+        # der Tabelle können Hinweise und Quellenabfragen dieselbe Spaltenform
+        # haben und dürfen nicht als Paketupdates installiert werden.
+        $headerPattern = '^\s*(?:Name|SearchName)\s+(?:Id|SearchId)\s+(?:Version|SearchVersion)\s+(?:Available|Verfügbar)(?:\s+(?:Source|Quelle))?\s*$'
+        $packagePattern = '^\s*(?<Name>.+?)\s{2,}(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s{2,}(?<Installed>\S+)\s{2,}(?<Available>\S+)(?:\s{2,}(?<Source>\S+))?\s*$'
+        $tableHeaderSeen = $false
+        $tableActive = $false
         foreach ($line in @($query.Output -split "`r?`n")) {
+            if (-not $tableActive) {
+                if ($line -match $headerPattern) { $tableHeaderSeen = $true; continue }
+                if ($tableHeaderSeen -and $line -match '^\s*-{3,}(?:\s+-{2,})+\s*$') { $tableActive = $true; continue }
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$line)) { break }
             $match = [regex]::Match([string]$line, $packagePattern)
             if (-not $match.Success) { continue }
             $package = [ordered]@{
@@ -761,7 +778,7 @@ try {
                 Id = $match.Groups['Id'].Value
                 InstalledVersion = $match.Groups['Installed'].Value
                 AvailableVersion = $match.Groups['Available'].Value
-                Source = $match.Groups['Source'].Value
+                Source = if ($match.Groups['Source'].Success) { $match.Groups['Source'].Value } else { 'winget' }
                 Success = $false
                 ExitCode = -1
                 Output = ''
@@ -781,12 +798,14 @@ try {
             $installInfo.UseShellExecute = $false
             $installInfo.CreateNoWindow = $false
             $installInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Normal
+            $installInfo.RedirectStandardInput = $true
             $installInfo.RedirectStandardOutput = $true
             $installInfo.RedirectStandardError = $true
             $installer = [Diagnostics.Process]::new()
             try {
                 $installer.StartInfo = $installInfo
                 if (-not $installer.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
+                $installer.StandardInput.Close()
                 $stdoutTask = $installer.StandardOutput.ReadToEndAsync()
                 $stderrTask = $installer.StandardError.ReadToEndAsync()
                 if (-not $installer.WaitForExit(900000)) {

@@ -187,6 +187,8 @@ function Invoke-PackageManagerUpdates {
     # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
     $successfulPackagesByManager = @{}
     $manualPackageCount = 0
+    $wingetNoUpdatesFound = $false
+    $wingetManualAction = $false
     foreach ($result in $results) {
       if ($result.Skipped) {
         $skipReason = if ([string]::IsNullOrWhiteSpace([string]$result.SkipReason)) { 'ohne Angabe eines Grundes' } else { [string]$result.SkipReason }
@@ -198,6 +200,7 @@ function Invoke-PackageManagerUpdates {
         continue
       }
       if (-not $result.Success) {
+        if ($result.Manager -eq 'Winget') { $wingetManualAction = $true }
         $manualActionProperty = $result.PSObject.Properties['RequiresManualAction']
         $requiresManualAction = $manualActionProperty -and [bool]$manualActionProperty.Value
         if ($requiresManualAction) {
@@ -219,6 +222,7 @@ function Invoke-PackageManagerUpdates {
 
       $packageCount = @($result.Packages).Count
       if ($packageCount -eq 0) {
+        if ($result.Manager -eq 'Winget' -and $result.Available -and $result.Success) { $wingetNoUpdatesFound = $true }
         continue
       }
 
@@ -231,12 +235,53 @@ function Invoke-PackageManagerUpdates {
         $debugActionOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-ScriptLog "  $_" -IsDebug }
       }
     }
+    if ($wingetNoUpdatesFound -and -not $wingetManualAction -and -not $successfulPackagesByManager.ContainsKey('Winget')) {
+      Write-ScriptLog "WinGet auf ${Servername}: keine Paketupdates verfügbar."
+    }
     $managerOutputWritten = $false
     foreach ($manager in $successfulPackagesByManager.Keys) {
       if ($managerOutputWritten) { Write-ScriptLog '' }
       $managerOutputWritten = $true
       $managerPackages = @($successfulPackagesByManager[$manager])
-      Write-ScriptLog "$manager auf ${Servername}: $($managerPackages.Count) Paketupdates installiert"
+      $installedPackageCount = $managerPackages.Count
+      if ($manager -eq 'Winget') {
+        $normalizedRows = @(ConvertTo-WindowsUpdatePackageRows -ComputerName $Servername -Manager Winget -Packages $managerPackages)
+        $packageGroups = @($normalizedRows | Group-Object -Property { ('{0}|{1}' -f [string]$_.Id, [string]$_.Source).ToLowerInvariant() })
+        $managerPackages = @(
+          foreach ($packageGroup in $packageGroups) {
+            $groupRows = @($packageGroup.Group)
+            $baseRow = $groupRows[0]
+            $packageName = [string]$baseRow.Name
+            $scopes = @(
+              foreach ($row in $groupRows) {
+                $userMatch = [regex]::Match([string]$row.Name, '^\[(?<User>[^\]]+)\]\s*(?<Name>.*)$')
+                if ($userMatch.Success) {
+                  $row.Name = [string]$userMatch.Groups['Name'].Value
+                  "Benutzer $($userMatch.Groups['User'].Value)"
+                } else { 'ausführender Kontext' }
+              }
+            ) | Select-Object -Unique
+            if ($groupRows.Count -gt 1) {
+              $packageName = [string]$groupRows[0].Name
+              $scopeText = @($scopes) -join ' + '
+              $packageName = "$packageName [$scopeText]"
+            }
+            [pscustomobject]@{
+              Name = $packageName; Id = [string]$baseRow.Id
+              InstalledVersion = [string]$baseRow.InstalledVersion
+              AvailableVersion = [string]$baseRow.AvailableVersion
+              Source = [string]$baseRow.Source
+            }
+          }
+        )
+        if ($managerPackages.Count -lt $installedPackageCount) {
+          Write-ScriptLog "$manager auf ${Servername}: $installedPackageCount Paketupdates installiert; $($managerPackages.Count) eindeutige Paket-ID(s), Mehrfachtreffer aus Benutzerkontexten zusammengeführt."
+        } else {
+          Write-ScriptLog "$manager auf ${Servername}: $installedPackageCount Paketupdates installiert"
+        }
+      } else {
+        Write-ScriptLog "$manager auf ${Servername}: $installedPackageCount Paketupdates installiert"
+      }
       $packageTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $Servername -Manager $manager -Packages $managerPackages
       foreach ($tableLine in ($packageTable -split "`r?`n")) {
         if (-not $tableLine) { continue }
@@ -2352,32 +2397,6 @@ if ($ServerADList -ne $null) {
         $packageResults = @(Invoke-PackageManagerUpdates -Servername $Servername -AuthInfo $svcCredential -ExcludeWinGetIds $excludedWinGetIds -ExcludeChocolateyIds $excludedChocolateyIds)
         foreach ($packageResult in $packageResults) {
           $packages = @($packageResult.Packages)
-          if ($packageResult.Manager -eq 'Winget' -and -not $packageResult.Skipped) {
-            if (-not $packageResult.Available) {
-              Write-ScriptLog "WinGet auf ${Servername}: nicht verfügbar."
-            }
-            elseif ($packageResult.Success -and $packages.Count -eq 0) {
-              Write-ScriptLog "WinGet auf ${Servername}: keine Paketupdates im ausführenden Benutzerkontext verfügbar."
-            }
-            elseif ($packages.Count -gt 0) {
-              $wingetStatus = if ($packageResult.Success) { 'installiert' } else { 'nicht vollständig installiert' }
-              $interactiveUserProperty = $packageResult.PSObject.Properties['InteractiveUser']
-              $wingetScope = if ($interactiveUserProperty -and -not [string]::IsNullOrWhiteSpace([string]$interactiveUserProperty.Value)) {
-                " für Benutzer '$([string]$interactiveUserProperty.Value)'"
-              } else { '' }
-              Write-ScriptLog "WinGet auf ${Servername}${wingetScope}: $($packages.Count) Paketupdate(s) $wingetStatus."
-              $wingetTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $Servername -Manager Winget -Packages $packages
-              foreach ($tableLine in @($wingetTable -split "`r?`n")) {
-                if (-not [string]::IsNullOrWhiteSpace([string]$tableLine)) { Write-ScriptLog "  $tableLine" }
-              }
-              if (-not $packageResult.Success -and -not [string]::IsNullOrWhiteSpace([string]$packageResult.ActionOutput)) {
-                Write-ScriptLog "  WinGet-Details: $([string]$packageResult.ActionOutput)"
-              }
-            }
-            else {
-              Write-ScriptLog "WARNUNG: WinGet auf ${Servername} fehlgeschlagen; Details im Log."
-            }
-          }
           # Auch gefundene Pakete aus fehlgeschlagenen Installationen in den
           # Mailbericht aufnehmen. Bisher landeten hier nur erfolgreiche Updates;
           # dadurch fehlten erkannte WinGet-Pakete in der Paketübersicht.
