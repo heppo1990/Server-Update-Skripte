@@ -928,6 +928,11 @@ finally {
                         }
                     }
                     if ($InstallUpdates) {
+                        if (@($userQuery.Packages).Count -eq 0) {
+                            $queryOutput = [string]$userQuery.Output
+                            if ([string]::IsNullOrWhiteSpace($queryOutput)) { $queryOutput = '<keine Ausgabe>' }
+                            $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' lieferte 0 Paketzeilen (Exitcode $($userQuery.ExitCode)); Roh-Ausgabe: $queryOutput"
+                        }
                         $notes += "Benutzerbezogene WinGet-Installation als '$userName': $(@($userQuery.Packages | Where-Object Success).Count) erfolgreich, $(@($userQuery.Packages | Where-Object { -not $_.Success }).Count) fehlgeschlagen."
                     } else {
                         $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' erfolgreich."
