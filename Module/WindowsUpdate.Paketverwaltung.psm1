@@ -791,8 +791,13 @@ try {
         # Nur Zeilen innerhalb der eigentlichen WinGet-Tabelle werten. Vor
         # der Tabelle können Hinweise und Quellenabfragen dieselbe Spaltenform
         # haben und dürfen nicht als Paketupdates installiert werden.
-        $headerPattern = '^\s*(?:Name|SearchName)\s+(?:Id|SearchId)\s+(?:Version|SearchVersion)\s+(?:Available|Verfügbar)(?:\s+(?:Source|Quelle))?\s*$'
-        $packagePattern = '^\s*(?<Name>.+?)\s{2,}(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s{2,}(?<Installed>\S+)\s{2,}(?<Available>\S+)(?:\s{2,}(?<Source>\S+))?\s*$'
+        # Der Tabellenkopf kann durch die Windows-PowerShell-5.1-Ausgabeumleitung
+        # falsch dekodierte Umlaute enthalten (z. B. "Verf├╝gbar"). Die ersten
+        # drei Spaltennamen sind stabil; die Bezeichnung der vierten Spalte nicht.
+        $headerPattern = '^\s*(?:Name|SearchName)\s+(?:Id|SearchId)\s+(?:Version|SearchVersion)\s+\S+(?:\s+\S+)?\s*$'
+        # WinGet richtet Spalten mit variabler Breite aus. Zwischen ID und
+        # Versionswerten kann dabei nur ein Leerzeichen stehen.
+        $packagePattern = '^\s*(?<Name>.+?)\s{2,}(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)(?:\s+(?<Source>\S+))?\s*$'
         $tableHeaderSeen = $false
         $tableActive = $false
         foreach ($line in @($query.Output -split "`r?`n")) {
@@ -931,7 +936,7 @@ finally {
                         if (@($userQuery.Packages).Count -eq 0) {
                             $queryOutput = [string]$userQuery.Output
                             if ([string]::IsNullOrWhiteSpace($queryOutput)) { $queryOutput = '<keine Ausgabe>' }
-                            $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' lieferte 0 Paketzeilen (Exitcode $($userQuery.ExitCode)); Roh-Ausgabe: $queryOutput"
+                            $notes += "Benutzerbezogene WinGet-Abfrage als '$userName': Parser erkannte 0 Paketzeilen (Exitcode $($userQuery.ExitCode)); Roh-Ausgabe: $queryOutput"
                         }
                         $notes += "Benutzerbezogene WinGet-Installation als '$userName': $(@($userQuery.Packages | Where-Object Success).Count) erfolgreich, $(@($userQuery.Packages | Where-Object { -not $_.Success }).Count) fehlgeschlagen."
                     } else {
