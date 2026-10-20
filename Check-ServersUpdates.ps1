@@ -159,34 +159,6 @@ function Add-CheckExternalSetupNotice {
   Write-ScriptLog "HANDLUNGSBEDARF: $Target ($Area) – $Reason $nextStep" $true
 }
 
-function Test-CheckWinRmPort {
-  param(
-    [Parameter(Mandatory)][string]$ComputerName,
-    [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
-    [ValidateRange(250, 10000)][int]$TimeoutMilliseconds = 1500
-  )
-
-  $client = [System.Net.Sockets.TcpClient]::new()
-  $asyncResult = $null
-  try {
-    $asyncResult = $client.BeginConnect($ComputerName, $Port, $null, $null)
-    if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds, $false)) {
-      return $false
-    }
-    $client.EndConnect($asyncResult)
-    return $client.Connected
-  }
-  catch {
-    return $false
-  }
-  finally {
-    if ($asyncResult -and $asyncResult.AsyncWaitHandle) {
-      $asyncResult.AsyncWaitHandle.Close()
-    }
-    $client.Dispose()
-  }
-}
-
 function Get-CheckClientCertificate {
   $thumbprint = [string]$UpdateSettings.ClientCertThumbprint
   try {
@@ -772,22 +744,19 @@ if ($ServerADList -ne $null) {
         Write-ScriptLog "Starte Update-Check auf $targetTypeLabel $Servername..."
         $RepBody += "<div class='server-title'>Windows-Ziel: ${Servername}</div>"
 
-        # Ein ausgeschalteter Host soll nicht erst WinGet, PSWindowsUpdate,
-        # JEA und mehrere Authentifizierungsarten mit langen Remoting-Timeouts
-        # durchlaufen. Der TCP-Vorcheck entscheidet nur, ob der konfigurierte
-        # WinRM-Transport erreichbar ist; die eigentliche Anmeldung bleibt
-        # weiterhin der verbindliche Funktionstest.
-        $isNonAdWindowsTarget = [bool]($Server.IsAdditional -or $Server.IsHypervisor)
-        $winRmPort = if ($isNonAdWindowsTarget) { 5986 } else { 5985 }
-        if (-not (Test-CheckWinRmPort -ComputerName $Servername -Port $winRmPort)) {
+        # Beide WinRM-Transporte prüfen, bevor Module, Updatequellen oder
+        # Authentifizierungs-Fallbacks auf einem ausgeschalteten Ziel starten.
+        $winRmProbe = Test-WindowsUpdateWinRmPorts -ComputerName $Servername -Ports @(5985, 5986) -TimeoutMilliseconds 1500
+        if (-not $winRmProbe.Reachable) {
           $WindowsUnreachableHosts++
-          $skipMessage = "WinRM-Port $winRmPort ist nicht erreichbar; Ziel wird in diesem Lauf übersprungen (wahrscheinlich ausgeschaltet oder Netzwerk/WinRM nicht verfügbar)."
+          $skipMessage = 'WinRM über HTTP (5985) und HTTPS (5986) ist nicht erreichbar; Ziel wird in diesem Lauf übersprungen.'
           Write-ScriptLog "HINWEIS: $Servername – $skipMessage"
           $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
           $skipHtml = [System.Net.WebUtility]::HtmlEncode($skipMessage)
           $RepBody += "<div class='warning-box'><strong>Update-Check auf $serverHtml übersprungen.</strong> $skipHtml</div>"
           continue
         }
+        Write-ScriptLog "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' })." $true
 
         # Nicht-AD-Ziele erhalten TrustedHosts und Zertifikatsauthentifizierung
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.

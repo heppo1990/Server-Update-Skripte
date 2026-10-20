@@ -75,6 +75,7 @@ $UpdCount = 0
 $LinuxAvailableUpdateCount = 0
 $HAAvailableUpdateCount = 0
 $Anzahl = 0
+$WindowsUnreachableHosts = 0
 $LinuxCheckExecuted = $false
 $HACheckExecuted = $false
 $LinuxCheckAttempted = $false
@@ -266,6 +267,18 @@ if ($ServerADList -ne $null) {
         if ($index -gt 1) { Write-ScriptLog '' }
         Write-ScriptLog "Starte Update-Download auf AD-Server $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
+
+        $winRmProbe = Test-WindowsUpdateWinRmPorts -ComputerName $Servername -Ports @(5985, 5986) -TimeoutMilliseconds 1500
+        if (-not $winRmProbe.Reachable) {
+          $WindowsUnreachableHosts++
+          $skipMessage = 'WinRM über HTTP (5985) und HTTPS (5986) ist nicht erreichbar; Ziel wird in diesem Lauf übersprungen.'
+          Write-ScriptLog "HINWEIS: $Servername – $skipMessage"
+          $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
+          $skipHtml = [System.Net.WebUtility]::HtmlEncode($skipMessage)
+          $RepBody += "<div class='warning-box'><strong>Download auf $serverHtml übersprungen.</strong> $skipHtml</div>"
+          continue
+        }
+        Write-ScriptLog "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' })." $true
 
         $UpdResult = $null
 
@@ -514,7 +527,7 @@ if ($LinuxCheckAttempted -and $LinuxConfiguredHostCount -gt 0) { $processedSyste
 if ($HACheckAttempted) { $processedSystemParts += 'Home Assistant: 1' }
 $processedSystemBreakdown = $processedSystemParts -join ', '
 
-if ($UpdCount -eq 0) {
+if ($UpdCount -eq 0 -and $WindowsUnreachableHosts -eq 0) {
   $RepBody += @"
 <div class="summary">
     <p><strong>Ergebnis: Es wurden KEINE Updates heruntergeladen!</strong></p>
@@ -522,12 +535,18 @@ if ($UpdCount -eq 0) {
 </div>
 "@
 } else {
+  $downloadSummaryHeadline = if ($UpdCount -eq 0) { 'Ergebnis: Keine Updates heruntergeladen; nicht erreichbare Ziele wurden übersprungen.' } else { "Ergebnis: Es wurden $UpdCount Update(s) heruntergeladen!" }
+  $downloadSummaryDetail = if ($UpdCount -eq 0) { 'Die übersprungenen Systeme wurden nicht geprüft.' } else { 'Diese Updates können mit dem Install-ServersUpdates.ps1 Skript installiert werden.' }
   $RepBody += @"
 <div class="summary">
-    <p><strong>Ergebnis: Es wurden $UpdCount Update(s) heruntergeladen!</strong></p>
-    <p>Diese Updates können mit dem Install-ServersUpdates.ps1 Skript installiert werden.</p>
+    <p><strong>$downloadSummaryHeadline</strong></p>
+    <p>$downloadSummaryDetail</p>
 </div>
 "@
+}
+
+if ($WindowsUnreachableHosts -gt 0) {
+  $RepBody += "<div class='warning-box'><strong>Nicht erreichbar übersprungen:</strong> $WindowsUnreachableHosts Windows-Ziel(e). Diese Systeme wurden nicht auf Updates geprüft oder Updates heruntergeladen.</div>"
 }
 
 $RepBody += @"
@@ -556,7 +575,8 @@ if ($HACheckExecuted) {
   "Heruntergeladene Updates: $UpdCount",
   "Dauer: $ScriptDuration Minuten"
 )
-if ($LinuxCheckExecuted) { $downloadSummaryLines = $downloadSummaryLines[0..2] + "Linux-Updates verfügbar (nicht separat herunterladbar): $LinuxAvailableUpdateCount" + $downloadSummaryLines[3] }
+if ($WindowsUnreachableHosts -gt 0) { $downloadSummaryLines = $downloadSummaryLines[0..2] + "Nicht erreichbar übersprungen: $WindowsUnreachableHosts Windows-Ziel(e)" + $downloadSummaryLines[-1] }
+if ($LinuxCheckExecuted) { $downloadSummaryLines = $downloadSummaryLines[0..($downloadSummaryLines.Count - 2)] + "Linux-Updates verfügbar (nicht separat herunterladbar): $LinuxAvailableUpdateCount" + $downloadSummaryLines[-1] }
 if ($HACheckExecuted) { $downloadSummaryLines = $downloadSummaryLines[0..($downloadSummaryLines.Count - 2)] + "Home-Assistant-Updates verfügbar (nicht separat herunterladbar): $HAAvailableUpdateCount" + $downloadSummaryLines[-1] }
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-DOWNLOAD ZUSAMMENFASSUNG' -Lines $downloadSummaryLines -WriteLog { param($message) Write-ScriptLog $message }
 

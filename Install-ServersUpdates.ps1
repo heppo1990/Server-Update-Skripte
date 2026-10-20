@@ -99,6 +99,7 @@ $UpdateSettings = $null
 $MailSettings = $null
 $ComputerFQDN = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
 $UpdCount = 0
+$WindowsUnreachableHosts = 0
 $WindowsUpdateDetails = @()
 $PackageUpdateDetails = @()
 $PackageUpdateCount = 0
@@ -2423,6 +2424,18 @@ if ($ServerADList -ne $null) {
         Write-ScriptLog "Starte Update-Installation auf AD-Server $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
+        $winRmProbe = Test-WindowsUpdateWinRmPorts -ComputerName $Servername -Ports @(5985, 5986) -TimeoutMilliseconds 1500
+        if (-not $winRmProbe.Reachable) {
+          $WindowsUnreachableHosts++
+          $skipMessage = 'WinRM über HTTP (5985) und HTTPS (5986) ist nicht erreichbar; Ziel wird in diesem Lauf übersprungen.'
+          Write-ScriptLog "HINWEIS: $Servername – $skipMessage"
+          $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
+          $skipHtml = [System.Net.WebUtility]::HtmlEncode($skipMessage)
+          $RepBody += "<div class='warning-box'><strong>Installation auf $serverHtml übersprungen.</strong> $skipHtml</div>"
+          continue
+        }
+        Write-ScriptLog "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' })." $true
+
         # Nicht-AD-Ziele erhalten TrustedHosts und Zertifikatsauthentifizierung
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.
         $remoting = Initialize-WindowsUpdateRemoting -UpdateSettings $UpdateSettings -TargetComputer $Servername -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
@@ -2863,11 +2876,14 @@ if ($TotalUpdatesInstalled -eq 0 -and $DeferredUpdatesPlanned -gt 0) {
     <p>$DeferredUpdatesPlanned zurückgestellte Update(s) sind zur Nachinstallation eingeplant.</p>
 </div>
 "@
-} elseif ($TotalUpdatesInstalled -eq 0 -and $HASkippedHosts -gt 0) {
+} elseif ($TotalUpdatesInstalled -eq 0 -and ($HASkippedHosts -gt 0 -or $WindowsUnreachableHosts -gt 0)) {
+  $skippedDetails = @()
+  if ($HASkippedHosts -gt 0) { $skippedDetails += "$HASkippedHosts Home-Assistant-Instanz(en) wegen nicht erreichbarem SSH" }
+  if ($WindowsUnreachableHosts -gt 0) { $skippedDetails += "$WindowsUnreachableHosts Windows-Ziel(e) wegen nicht erreichbarem WinRM" }
   $RepBody += @"
 <div class="summary warning">
     <p><strong>Es wurden keine Updates installiert.</strong></p>
-    <p>$HASkippedHosts Home-Assistant-Instanz(en) wurden übersprungen, weil SSH nicht erreichbar war. Diese Instanzen wurden nicht auf verfügbare Updates geprüft.</p>
+    <p>Übersprungen: $($skippedDetails -join '; '). Diese Systeme wurden nicht auf Updates geprüft.</p>
 </div>
 "@
 } elseif ($TotalUpdatesInstalled -eq 0) {
@@ -2896,6 +2912,7 @@ $RepBody += @"
 
 if ($WindowsAdCount -gt 0) { $RepBody += "        <li>Windows-Server (AD): $WindowsAdCount</li>`n" }
 if ($WindowsNonAdCount -gt 0) { $RepBody += "        <li>Windows-Server (Nicht-AD): $WindowsNonAdCount</li>`n" }
+if ($WindowsUnreachableHosts -gt 0) { $RepBody += "        <li>Windows-Ziele nicht erreichbar/übersprungen: $WindowsUnreachableHosts</li>`n" }
 
 if ($LinuxServerCount -gt 0) {
   $RepBody += "        <li>Linux-Server: $LinuxServerCount</li>`n"
@@ -2965,6 +2982,7 @@ if ($PackageUpdateCount -gt 0) { $summaryLines += "  • Anwendungen: $PackageUp
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesInstalled" }
 if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesInstalled" }
 if ($HASkippedHosts -gt 0) { $summaryLines += "  • Home Assistant übersprungen: $HASkippedHosts (SSH nicht erreichbar; nicht auf Updates geprüft)" }
+if ($WindowsUnreachableHosts -gt 0) { $summaryLines += "  • Windows übersprungen: $WindowsUnreachableHosts (WinRM-Ports 5985/5986 nicht erreichbar; nicht auf Updates geprüft)" }
 $summaryLines += @('', "Fehler: $TotalUpdatesFailed", "  • Windows: $ErrorCount")
 if (@($ManualActions).Count -gt 0) { $summaryLines += "Manuelle Prüfung/Aktion erforderlich: $(@($ManualActions).Count)" }
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesFailed" }
