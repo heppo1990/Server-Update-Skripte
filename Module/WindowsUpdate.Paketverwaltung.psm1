@@ -1925,22 +1925,6 @@ finally {
             $retryReason = 'Zeitlimit erreicht; Quellenreset erforderlich'
             $firstDiagnostic = $_.Exception.ToString()
         }
-        catch {
-            $firstDiagnostic = $_.Exception.ToString()
-            $wsmanProviderHostFailure = $firstDiagnostic -match '(?i)(WSMan.{0,100}(Anbieterhostprozess|provider host process).{0,160}(korrekte Antwort|proper response)|(?:Anbieterhostprozess|provider host process).{0,160}(korrekte Antwort|proper response))'
-            if ($wsmanProviderHostFailure) {
-                # Der WSMan-Anbieterhost kann beim WinGet-Aufruf abbrechen,
-                # bevor der Remote-ScriptBlock sein strukturiertes Ergebnis
-                # zurückliefert. Das ist ein Remoting-Transportfehler, kein
-                # Quellenproblem: einmal mit einer frischen Verbindung
-                # wiederholen, ohne Quellenreset oder AppX-Änderungen.
-                $retryRequired = $true
-                $retryReason = 'WSMan-Anbieterhost lieferte keine gültige Antwort; frische Verbindung erforderlich'
-            }
-            else {
-                throw
-            }
-        }
 
         if ($retryRequired) {
             $retryDescription = if ($retryRequiresSourceReset) {
