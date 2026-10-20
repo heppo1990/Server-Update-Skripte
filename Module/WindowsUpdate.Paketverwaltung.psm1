@@ -803,7 +803,9 @@ try {
         foreach ($line in @($query.Output -split "`r?`n")) {
             if (-not $tableActive) {
                 if ($line -match $headerPattern) { $tableHeaderSeen = $true; continue }
-                if ($tableHeaderSeen -and $line -match '^\s*-{3,}(?:\s+-{2,})+\s*$') { $tableActive = $true; continue }
+                # WinGet kann die Trennlinie als einen durchgehenden Strichlauf
+                # oder in Spaltengruppen ausgeben.
+                if ($tableHeaderSeen -and $line -match '^\s*-{3,}(?:\s+-{2,})*\s*$') { $tableActive = $true; continue }
                 continue
             }
             if ([string]::IsNullOrWhiteSpace([string]$line)) { break }
