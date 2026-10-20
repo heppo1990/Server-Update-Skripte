@@ -846,9 +846,9 @@ try {
                 $installer.StandardInput.Close()
                 $stdoutTask = $installer.StandardOutput.ReadToEndAsync()
                 $stderrTask = $installer.StandardError.ReadToEndAsync()
-                if (-not $installer.WaitForExit(900000)) {
+                if (-not $installer.WaitForExit(1800000)) {
                     try { $installer.Kill() } catch { }
-                    throw "WinGet-Installation für $($package.Id) überschritt das Zeitlimit von 15 Minuten."
+                    throw "WinGet-Installation für $($package.Id) überschritt das Zeitlimit von 30 Minuten."
                 }
                 $installer.WaitForExit()
                 $package.ExitCode = [int]$installer.ExitCode
@@ -890,8 +890,8 @@ finally {
                     $taskRegistered = $true
                     $taskStartedAt = Get-Date
                     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                    # Benutzerinstallationen enthalten zusätzlich einzelne
-                    # Paketprozesse mit bis zu 15 Minuten Laufzeit.
+                    # Die Aufgabe erhält insgesamt 30 Minuten; auch ein
+                    # einzelner langsamer Paketprozess darf bis zu 30 Minuten laufen.
                     $taskTimeoutSeconds = if ($InstallUpdates) { 1800 } else { 300 }
                     $deadline = (Get-Date).AddSeconds($taskTimeoutSeconds)
                     while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
