@@ -1306,6 +1306,7 @@ finally {
             $wingetDiagnosticOutput = ''
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
+            $wingetQuerySources = @()
             if ($ExecutionMode -eq 'Check' -and $wingetPath) {
                 # Eine Check-Abfrage benötigt keine App-Installer-Registrierung.
                 # Auf Servern kann die neueste systemweit bereitgestellte
@@ -1392,6 +1393,7 @@ finally {
                     # nach Abschluss dieser Pakete in der interaktiven Sitzung.
                     $cliQueryResult = Invoke-WingetCliUpgradeQuery -Path $wingetPath -Scope machine
                     $availableOutput = [string]$cliQueryResult.Output
+                    $wingetQuerySources = @($cliQueryResult.Sources)
                     $wingetCliFallback = $true
                     $machineScopeSummary = "WinGet-Installationsabfrage auf Maschinen-Scope begrenzt; Quellen $(@($cliQueryResult.Sources) -join ', ')."
                     if (@($cliQueryResult.FailedSources).Count -gt 0) {
@@ -1482,6 +1484,83 @@ finally {
                 # Auswertbare Pakettreffer behalten, auch wenn eine andere
                 # Quelle im selben CLI-Lauf einen Fehler zurückliefert.
                 $packageLines = @(Get-WingetUpgradeLines -Output $availableOutput)
+                if ($ExecutionMode -eq 'Install' -and $sourceFailureLines.Count -gt 0 -and $packageLines.Count -gt 0) {
+                    $initialPackageLines = @($packageLines)
+                    $initialAvailableOutput = [string]$availableOutput
+                    $initialSourceFailures = @($sourceFailureLines)
+                    $initialFailureText = @($initialSourceFailures | ForEach-Object { Get-WingetCompactOutput -Text ([string]$_) }) -join ' '
+                    $sourcesToRefresh = @(
+                        foreach ($sourceName in $wingetQuerySources) {
+                            if ($initialFailureText -match [regex]::Escape([string]$sourceName)) { [string]$sourceName }
+                        }
+                    )
+                    $sourcesToRefresh = @($sourcesToRefresh | Select-Object -Unique)
+                    if ($sourcesToRefresh.Count -eq 0 -and $initialFailureText -match '(?i)winget') { $sourcesToRefresh = @('winget') }
+                    $refreshDiagnostics = @()
+                    $sourceUpdateSucceeded = $sourcesToRefresh.Count -gt 0
+                    foreach ($sourceName in $sourcesToRefresh) {
+                        try {
+                            $sourceUpdateResult = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source', 'update', '--name', $sourceName, '--disable-interactivity') -TimeoutSeconds 120
+                            $sourceUpdateOutput = Get-WingetCompactOutput -Text ([string]$sourceUpdateResult.Output) -MaximumLength 300
+                            $refreshDiagnostics += "Quelle '$sourceName' direkt aktualisiert (Exitcode $($sourceUpdateResult.ExitCode)): $sourceUpdateOutput"
+                            if ([int]$sourceUpdateResult.ExitCode -ne 0) { $sourceUpdateSucceeded = $false }
+                        }
+                        catch {
+                            $sourceUpdateSucceeded = $false
+                            $refreshDiagnostics += "Quelle '$sourceName' direktes Update fehlgeschlagen: $(([string]$_.Exception.Message -replace '\s+', ' ').Trim())"
+                        }
+                    }
+                    if ($sourceUpdateSucceeded) {
+                        try {
+                            $sourceRetryResult = Invoke-WingetCliUpgradeQuery -Path $wingetPath -Scope machine
+                            $sourceRetryOutput = [string]$sourceRetryResult.Output
+                            $sourceRetryFailures = @($sourceRetryOutput -split "`r?`n" | Where-Object {
+                                Test-WingetSourceFailureLine -Line ([string]$_)
+                            })
+                            $sourceRetryPackages = @(Get-WingetUpgradeLines -Output $sourceRetryOutput)
+                            $refreshDiagnostics += "WinGet-Suche nach Quellenaktualisierung erneut ausgeführt; Quellenfehler=$($sourceRetryFailures.Count), Paketupdates=$($sourceRetryPackages.Count)."
+                            $wingetDiagnosticOutput += "`r`nWinGet-Quellenwiederholung:`r`n$($refreshDiagnostics -join "`r`n")`r`n$([string]$sourceRetryResult.DiagnosticOutput)"
+                            if ($sourceRetryFailures.Count -eq 0) {
+                                $availableOutput = $sourceRetryOutput
+                                $sourceFailureLines = @()
+                                $packageLines = @($sourceRetryPackages)
+                                $wingetQuerySources = @($sourceRetryResult.Sources)
+                            }
+                            elseif ($sourceRetryPackages.Count -gt 0) {
+                                # Die Wiederholung hat weiterhin einen Quellenfehler,
+                                # aber verwertbare Treffer. Die gefundenen Pakete
+                                # werden trotzdem einzeln versucht; die unvollständige
+                                # Quelle bleibt anschließend als manuelle Prüfung offen.
+                                $availableOutput = $sourceRetryOutput
+                                $sourceFailureLines = @($sourceRetryFailures)
+                                $packageLines = @($sourceRetryPackages)
+                                $wingetQuerySources = @($sourceRetryResult.Sources)
+                            }
+                            else {
+                                # Bei weiterhin fehlerhafter Quelle die ursprünglich
+                                # eindeutig ermittelten Updates nicht verlieren.
+                                $availableOutput = $initialAvailableOutput
+                                $sourceFailureLines = @($initialSourceFailures) + @($sourceRetryFailures)
+                                $packageLines = @($initialPackageLines)
+                            }
+                        }
+                        catch {
+                            $refreshDiagnostics += "WinGet-Suche nach Quellenaktualisierung fehlgeschlagen: $(([string]$_.Exception.Message -replace '\s+', ' ').Trim())"
+                            $wingetDiagnosticOutput += "`r`nWinGet-Quellenwiederholung:`r`n$($refreshDiagnostics -join "`r`n")"
+                            # Die zuerst gefundenen Paketzeilen sind weiterhin
+                            # eindeutig; unten wird jedes Update einzeln geprüft.
+                            $availableOutput = $initialAvailableOutput
+                            $sourceFailureLines = @($initialSourceFailures)
+                            $packageLines = @($initialPackageLines)
+                        }
+                    }
+                    else {
+                        $wingetDiagnosticOutput += "`r`nWinGet-Quellenaktualisierung:`r`n$($refreshDiagnostics -join "`r`n")"
+                        $availableOutput = $initialAvailableOutput
+                        $sourceFailureLines = @($initialSourceFailures)
+                        $packageLines = @($initialPackageLines)
+                    }
+                }
                 $excludedIdList = @($ExcludedWinGetIds -split ',' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
                 if ($ExecutionMode -eq 'Install' -and $excludedIdList.Count -gt 0 -and $packageLines.Count -gt 0) {
                     $eligiblePackageLines = @()
@@ -1502,15 +1581,8 @@ finally {
                     }
                     $packageLines = @($eligiblePackageLines)
                 }
-                if ($sourceFailureLines.Count -gt 0) {
+                if ($sourceFailureLines.Count -gt 0 -and ($ExecutionMode -eq 'Check' -or $packageLines.Count -eq 0)) {
                     $sourceFailureText = @($sourceFailureLines | ForEach-Object { Get-WingetCompactOutput -Text ([string]$_) }) -join ' '
-                    if ($ExecutionMode -eq 'Install' -and $packageLines.Count -gt 0) {
-                        $result += [PSCustomObject]@{
-                            Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
-                            Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=''
-                            DiagnosticOutput=$wingetDiagnosticOutput
-                        }
-                    }
                     $result += [PSCustomObject]@{
                         Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=1
                         Packages=$(if ($ExecutionMode -eq 'Check') { $packageLines } else { @() }); AvailableOutput=$availableOutput; ActionOutput=$sourceFailureText
@@ -1692,6 +1764,17 @@ finally {
                                 ErrorSummary="Paket '$packageName' [$packageId] konnte nicht automatisch aktualisiert werden; manuelle Prüfung erforderlich. $packageException"
                                 DiagnosticOutput=$_.Exception.ToString(); RequiresManualAction=$true
                             }
+                        }
+                    }
+                    if ($sourceFailureLines.Count -gt 0) {
+                        $sourceFailureText = @($sourceFailureLines | ForEach-Object { Get-WingetCompactOutput -Text ([string]$_) }) -join ' '
+                        $result += [PSCustomObject]@{
+                            Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=1
+                            Packages=@($packageLines); AvailableOutput=$availableOutput
+                            ActionOutput="Die WinGet-Quelle konnte auch nach der einmaligen Aktualisierung nicht fehlerfrei abgefragt werden. Erkannte Pakete wurden einzeln versucht; die Suche kann unvollständig sein. Quellenfehler: $sourceFailureText"
+                            DiagnosticOutput=$wingetDiagnosticOutput
+                            RequiresManualAction=$true
+                            ManualActionText="WinGet-Quelle blieb trotz einmaligem Aktualisierungsversuch fehlerhaft. Erkannte Pakete wurden einzeln versucht; bitte die WinGet-Suche auf Vollständigkeit prüfen. Quellenfehler: $sourceFailureText"
                         }
                     }
                 }
