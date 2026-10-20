@@ -1200,21 +1200,67 @@ finally {
             $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
             $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
             $registrationChanged = $currentVersion -lt $targetVersion
+            $installedFromGitHub = $false
             if ($registrationChanged) {
                 $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
                 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
                     throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
                 }
-                Add-AppxPackage -Path $manifestPath -Register -DisableDevelopmentMode -ErrorAction Stop | Out-Null
+                try {
+                    Add-AppxPackage -Path $manifestPath -Register -DisableDevelopmentMode -ErrorAction Stop | Out-Null
+                }
+                catch {
+                    $registrationError = $_
+                    if ($registrationError.Exception.Message -notmatch '(?i)Microsoft\.WindowsAppRuntime|Framework.*nicht gefunden|0x80073CF3|0x80073D19') { throw }
+
+                    $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdate-WinGet-GitHub-' + [guid]::NewGuid().ToString('N'))
+                    $extractRoot = Join-Path $payloadRoot 'Dependencies'
+                    $bundlePath = Join-Path $payloadRoot 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+                    $dependenciesZip = Join-Path $payloadRoot 'DesktopAppInstaller_Dependencies.zip'
+                    try {
+                        New-Item -Path $extractRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                        $releaseBase = 'https://github.com/microsoft/winget-cli/releases/latest/download'
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        Invoke-WebRequest -Uri "$releaseBase/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" `
+                            -OutFile $bundlePath -UseBasicParsing -ErrorAction Stop
+                        Invoke-WebRequest -Uri "$releaseBase/DesktopAppInstaller_Dependencies.zip" `
+                            -OutFile $dependenciesZip -UseBasicParsing -ErrorAction Stop
+                        if ((Get-Item -LiteralPath $bundlePath).Length -le 0 -or (Get-Item -LiteralPath $dependenciesZip).Length -le 0) {
+                            throw 'Ein oder mehrere GitHub-Releasepakete sind leer.'
+                        }
+                        Expand-Archive -LiteralPath $dependenciesZip -DestinationPath $extractRoot -Force -ErrorAction Stop
+                        $dependencyPackages = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -ErrorAction Stop |
+                            Where-Object {
+                                $_.Extension -in '.appx', '.msix', '.appxbundle', '.msixbundle' -and
+                                $_.FullName -match '(?i)(x64|amd64|neutral)'
+                            } | Sort-Object FullName | ForEach-Object FullName)
+                        if ($dependencyPackages.Count -eq 0) {
+                            throw 'Das GitHub-Abhängigkeitenpaket enthält keine x64-/neutralen AppX-Abhängigkeiten.'
+                        }
+                        Add-AppxPackage -Path $bundlePath -DependencyPath $dependencyPackages `
+                            -ForceUpdateFromAnyVersion -ErrorAction Stop | Out-Null
+                        $registrationChanged = $true
+                        $installedFromGitHub = $true
+                    }
+                    catch {
+                        throw "App Installer konnte nicht aus dem offiziellen GitHub-Release einschließlich Abhängigkeiten bereitgestellt werden. Registrierungsfehler: $($registrationError.Exception.Message) GitHub-Fehler: $($_.Exception.Message)"
+                    }
+                    finally {
+                        Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
             }
 
             $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
-                Where-Object { [version]$_.Version -ge $targetVersion } |
                 Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
             if ($registeredPackage.Count -eq 0 -or [string]$registeredPackage[0].Status -ne 'Ok') {
                 throw "App Installer $targetVersion wurde für den aktuellen Benutzer nicht erfolgreich registriert."
             }
-            return [pscustomobject]@{ Version = [string]$registeredPackage[0].Version; RegistrationChanged = $registrationChanged }
+            return [pscustomobject]@{
+                Version = [string]$registeredPackage[0].Version
+                RegistrationChanged = $registrationChanged
+                InstalledFromGitHub = [bool]$installedFromGitHub
+            }
         }
 
         # Kein generisches .NET-List-Objekt: PowerShell 7 kann dieses beim
@@ -1319,6 +1365,9 @@ finally {
                     if ($appInstallerRegistration.RegistrationChanged) {
                         $wingetPath = Resolve-WingetExecutable
                         $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) für den aktuellen Remoting-Benutzer registriert; WinGet-Abfrage wird in einer neuen Verbindung fortgesetzt."
+                        if ($appInstallerRegistration.InstalledFromGitHub) {
+                            $wingetBootstrapMessage += ' App Installer und fehlende Abhängigkeiten wurden aus dem offiziellen WinGet-GitHub-Release bereitgestellt.'
+                        }
                         $wingetReconnectRequired = $true
                     } else {
                         $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) ist für den aktuellen Remoting-Benutzer bereits registriert."
@@ -1416,6 +1465,9 @@ finally {
                         $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
                         $registrationText = if ($appInstallerRegistration.RegistrationChanged) { 'für den aktuellen Benutzer registriert' } else { 'bereits für den aktuellen Benutzer registriert' }
                         $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) $registrationText."
+                        if ($appInstallerRegistration.InstalledFromGitHub) {
+                            $wingetBootstrapMessage += ' App Installer und fehlende Abhängigkeiten wurden aus dem offiziellen WinGet-GitHub-Release bereitgestellt.'
+                        }
                         $wingetPath = Resolve-WingetExecutable
                         $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
                         if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }

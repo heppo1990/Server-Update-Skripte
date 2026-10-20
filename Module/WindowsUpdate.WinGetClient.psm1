@@ -217,83 +217,99 @@ catch {
 }
 
 function Register-WindowsUpdateWinGetAppInstallerForCurrentUser {
-    <# Registriert eine neuere bereitgestellte App-Installer-Version für den aktuellen Benutzer. #>
+    <# Registriert App Installer für den aktuellen Benutzer und beschafft fehlende GitHub-Abhängigkeiten. #>
     [CmdletBinding()]
     param()
 
-    # Die AppX-/WinGet-COM-Aktivierung schlägt bei erhöhtem PowerShell 7 fehl,
-    # während derselbe Benutzer und dieselben Pakete unter Windows PowerShell
-    # 5.1 funktionieren. AppX-Registrierung deshalb aus PS7 immer in einem
-    # frischen Windows-PowerShell-Prozess ausführen.
-    if ($PSVersionTable.PSVersion.Major -ge 6) {
-        $registrationWorker = {
-            $ErrorActionPreference = 'Stop'
-            $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
-                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
-            $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
-                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
-            $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
-            if ($latestPackage.Count -eq 0) {
-                return [pscustomobject]@{ AppInstallerVersion = ''; RegistrationChanged = $false }
-            }
+    # Die AppX-/WinGet-COM-Aktivierung schlägt bei erhöhtem PowerShell 7 fehl;
+    # deshalb läuft die Registrierung dort wie bisher in Windows PowerShell 5.1.
+    # Fehlen dem Zielprofil AppX-Frameworks, wird das offizielle GitHub-Release
+    # samt x64-Abhängigkeiten installiert. Add-AppxPackage prüft Signatur und
+    # Paketintegrität beim Bereitstellen.
+    $registrationWorker = {
+        $ErrorActionPreference = 'Stop'
+        $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
+        $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
+        $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+        if ($latestPackage.Count -eq 0) {
+            return [pscustomobject]@{ AppInstallerVersion = ''; RegistrationChanged = $false; InstalledFromGitHub = $false }
+        }
 
-            $targetVersion = [version]$latestPackage[0].Version
-            $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
-            $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
-            $registrationChanged = $currentVersion -lt $targetVersion
-            if ($registrationChanged) {
-                $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
-                if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-                    throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
-                }
+        $targetVersion = [version]$latestPackage[0].Version
+        $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+        $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
+        $registrationChanged = $currentVersion -lt $targetVersion
+        $installedFromGitHub = $false
+        if ($registrationChanged) {
+            $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
+            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
+            }
+            try {
                 Add-AppxPackage -Path $manifestPath -Register -DisableDevelopmentMode -ErrorAction Stop | Out-Null
             }
+            catch {
+                $registrationError = $_
+                if ($registrationError.Exception.Message -notmatch '(?i)Microsoft\.WindowsAppRuntime|Framework.*nicht gefunden|0x80073CF3|0x80073D19') { throw }
 
-            $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
-                Where-Object { [version]$_.Version -ge $targetVersion } |
-                Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
-            if ($registeredPackage.Count -eq 0 -or [string]$registeredPackage[0].Status -ne 'Ok') {
-                throw "App Installer $targetVersion wurde für den aktuellen Benutzer nicht erfolgreich registriert."
+                $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdate-WinGet-GitHub-' + [guid]::NewGuid().ToString('N'))
+                $extractRoot = Join-Path $payloadRoot 'Dependencies'
+                $bundlePath = Join-Path $payloadRoot 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+                $dependenciesZip = Join-Path $payloadRoot 'DesktopAppInstaller_Dependencies.zip'
+                try {
+                    New-Item -Path $extractRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                    $releaseBase = 'https://github.com/microsoft/winget-cli/releases/latest/download'
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    Invoke-WebRequest -Uri "$releaseBase/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" `
+                        -OutFile $bundlePath -UseBasicParsing -ErrorAction Stop
+                    Invoke-WebRequest -Uri "$releaseBase/DesktopAppInstaller_Dependencies.zip" `
+                        -OutFile $dependenciesZip -UseBasicParsing -ErrorAction Stop
+                    if ((Get-Item -LiteralPath $bundlePath).Length -le 0 -or (Get-Item -LiteralPath $dependenciesZip).Length -le 0) {
+                        throw 'Ein oder mehrere GitHub-Releasepakete sind leer.'
+                    }
+                    Expand-Archive -LiteralPath $dependenciesZip -DestinationPath $extractRoot -Force -ErrorAction Stop
+                    $dependencyPackages = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -ErrorAction Stop |
+                        Where-Object {
+                            $_.Extension -in '.appx', '.msix', '.appxbundle', '.msixbundle' -and
+                            $_.FullName -match '(?i)(x64|amd64|neutral)'
+                        } | Sort-Object FullName | ForEach-Object FullName)
+                    if ($dependencyPackages.Count -eq 0) {
+                        throw 'Das GitHub-Abhängigkeitenpaket enthält keine x64-/neutralen AppX-Abhängigkeiten.'
+                    }
+                    Add-AppxPackage -Path $bundlePath -DependencyPath $dependencyPackages -ForceUpdateFromAnyVersion -ErrorAction Stop | Out-Null
+                    $installedFromGitHub = $true
+                    $registrationChanged = $true
+                }
+                catch {
+                    throw "App Installer konnte nicht aus dem offiziellen GitHub-Release einschließlich Abhängigkeiten bereitgestellt werden. Registrierungsfehler: $($registrationError.Exception.Message) GitHub-Fehler: $($_.Exception.Message)"
+                }
+                finally {
+                    Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
             }
-            [pscustomobject]@{ AppInstallerVersion = [string]$registeredPackage[0].Version; RegistrationChanged = $registrationChanged }
         }
 
+        $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+            Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+        if ($registeredPackage.Count -eq 0 -or [string]$registeredPackage[0].Status -ne 'Ok') {
+            throw "App Installer $targetVersion wurde für den aktuellen Benutzer nicht erfolgreich registriert."
+        }
+        [pscustomobject]@{
+            AppInstallerVersion = [string]$registeredPackage[0].Version
+            RegistrationChanged = $registrationChanged
+            InstalledFromGitHub = $installedFromGitHub
+        }
+    }
+
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
         $registrationResult = @(Invoke-WindowsUpdateLocalCommandWithTimeout -ScriptBlock $registrationWorker `
-            -TimeoutSeconds 300 -OperationName 'App-Installer-Registrierung unter Windows PowerShell 5.1')
-        if ($registrationResult.Count -eq 0) { throw 'Windows PowerShell 5.1 lieferte kein Ergebnis der App-Installer-Registrierung.' }
+            -TimeoutSeconds 900 -OperationName 'App-Installer-Bereitstellung aus dem WinGet-GitHub-Release')
+        if ($registrationResult.Count -eq 0) { throw 'Windows PowerShell 5.1 lieferte kein Ergebnis der App-Installer-Bereitstellung.' }
         return $registrationResult[-1]
     }
-
-    $ErrorActionPreference = 'Stop'
-    $allPackages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
-    $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
-    $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
-    if ($latestPackage.Count -eq 0) {
-        return [pscustomobject]@{ AppInstallerVersion = ''; RegistrationChanged = $false }
-    }
-
-    $targetVersion = [version]$latestPackage[0].Version
-    $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
-    $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
-    $registrationChanged = $currentVersion -lt $targetVersion
-    if ($registrationChanged) {
-        $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
-        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-            throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
-        }
-        Add-AppxPackage -Path $manifestPath -Register -DisableDevelopmentMode -ErrorAction Stop
-    }
-
-    $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
-        Where-Object { [version]$_.Version -ge $targetVersion } |
-        Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
-    if ($registeredPackage.Count -eq 0 -or [string]$registeredPackage[0].Status -ne 'Ok') {
-        throw "App Installer $targetVersion wurde für den aktuellen Benutzer nicht erfolgreich registriert."
-    }
-
-    return [pscustomobject]@{ AppInstallerVersion = [string]$registeredPackage[0].Version; RegistrationChanged = $registrationChanged }
+    & $registrationWorker
 }
 
 function Repair-WindowsUpdateWinGetPackageManager {
