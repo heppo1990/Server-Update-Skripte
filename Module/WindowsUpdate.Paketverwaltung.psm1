@@ -1712,7 +1712,6 @@ finally {
                     }
                     $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($sourceFailureLines.Count -eq 0); Skipped=$false; SkipReason=''; ExitCode=$(if ($sourceFailureLines.Count -gt 0) { 1 } else { 0 }); Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
                 }
-                }
                 if ($ExecutionMode -eq 'Install') {
                     $interactiveQuery = Get-WingetInteractiveUserUpgradeLines -InstallUpdates
                     foreach ($interactivePackage in @($interactiveQuery.Packages)) {
