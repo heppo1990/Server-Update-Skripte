@@ -98,6 +98,7 @@ $HAUpdateCount = 0
 $Anzahl = 0
 $LinuxCheckErrors = 0
 $HACheckErrors = 0
+$WindowsUnreachableHosts = 0
 $LinuxCheckExecuted = $false
 $HACheckExecuted = $false
 $LinuxCheckAttempted = $false
@@ -156,6 +157,34 @@ function Add-CheckExternalSetupNotice {
   }
   $script:CheckActionNotices += [pscustomobject]@{ Area=$Area; Target=$Target; Reason=$Reason; NextStep=$nextStep }
   Write-ScriptLog "HANDLUNGSBEDARF: $Target ($Area) – $Reason $nextStep" $true
+}
+
+function Test-CheckWinRmPort {
+  param(
+    [Parameter(Mandatory)][string]$ComputerName,
+    [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
+    [ValidateRange(250, 10000)][int]$TimeoutMilliseconds = 1500
+  )
+
+  $client = [System.Net.Sockets.TcpClient]::new()
+  $asyncResult = $null
+  try {
+    $asyncResult = $client.BeginConnect($ComputerName, $Port, $null, $null)
+    if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds, $false)) {
+      return $false
+    }
+    $client.EndConnect($asyncResult)
+    return $client.Connected
+  }
+  catch {
+    return $false
+  }
+  finally {
+    if ($asyncResult -and $asyncResult.AsyncWaitHandle) {
+      $asyncResult.AsyncWaitHandle.Close()
+    }
+    $client.Dispose()
+  }
 }
 
 function Get-CheckClientCertificate {
@@ -743,6 +772,23 @@ if ($ServerADList -ne $null) {
         Write-ScriptLog "Starte Update-Check auf $targetTypeLabel $Servername..."
         $RepBody += "<div class='server-title'>Windows-Ziel: ${Servername}</div>"
 
+        # Ein ausgeschalteter Host soll nicht erst WinGet, PSWindowsUpdate,
+        # JEA und mehrere Authentifizierungsarten mit langen Remoting-Timeouts
+        # durchlaufen. Der TCP-Vorcheck entscheidet nur, ob der konfigurierte
+        # WinRM-Transport erreichbar ist; die eigentliche Anmeldung bleibt
+        # weiterhin der verbindliche Funktionstest.
+        $isNonAdWindowsTarget = [bool]($Server.IsAdditional -or $Server.IsHypervisor)
+        $winRmPort = if ($isNonAdWindowsTarget) { 5986 } else { 5985 }
+        if (-not (Test-CheckWinRmPort -ComputerName $Servername -Port $winRmPort)) {
+          $WindowsUnreachableHosts++
+          $skipMessage = "WinRM-Port $winRmPort ist nicht erreichbar; Ziel wird in diesem Lauf übersprungen (wahrscheinlich ausgeschaltet oder Netzwerk/WinRM nicht verfügbar)."
+          Write-ScriptLog "HINWEIS: $Servername – $skipMessage"
+          $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
+          $skipHtml = [System.Net.WebUtility]::HtmlEncode($skipMessage)
+          $RepBody += "<div class='warning-box'><strong>Update-Check auf $serverHtml übersprungen.</strong> $skipHtml</div>"
+          continue
+        }
+
         # Nicht-AD-Ziele erhalten TrustedHosts und Zertifikatsauthentifizierung
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.
         $remoting = Initialize-WindowsUpdateRemoting -UpdateSettings $UpdateSettings -TargetComputer $Servername -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
@@ -1298,7 +1344,7 @@ if ($LinuxCheckAttempted -and $LinuxConfiguredHostCount -gt 0) { $checkedSystemP
 if ($HACheckAttempted) { $checkedSystemParts += 'Home Assistant: 1' }
 $checkedSystemBreakdown = $checkedSystemParts -join ', '
 
-if (($UpdCount + $PackageUpdateCount + $LinuxUpdateCount + $HAUpdateCount) -eq 0) {
+if (($UpdCount + $PackageUpdateCount + $LinuxUpdateCount + $HAUpdateCount) -eq 0 -and $WindowsUnreachableHosts -eq 0) {
   $RepBody += @"
 <div class="summary success">
     <p><strong>Ergebnis: Es sind insgesamt KEINE Updates verfügbar!</strong></p>
@@ -1306,12 +1352,27 @@ if (($UpdCount + $PackageUpdateCount + $LinuxUpdateCount + $HAUpdateCount) -eq 0
 </div>
 "@
 } else {
+  $summaryTotalUpdates = $UpdCount + $PackageUpdateCount + $LinuxUpdateCount + $HAUpdateCount
+  $summaryHeadline = if ($summaryTotalUpdates -eq 0) {
+    'Ergebnis: Auf den erreichbaren Systemen wurden keine Updates gefunden.'
+  } else {
+    "Ergebnis: Es sind insgesamt $summaryTotalUpdates Update(s) verfügbar!"
+  }
+  $summaryDetail = if ($summaryTotalUpdates -eq 0) {
+    'Nicht erreichbare Systeme konnten nicht geprüft werden.'
+  } else {
+    'Diese Updates können mit dem Install-ServersUpdates.ps1 Skript installiert werden.'
+  }
   $RepBody += @"
 <div class="summary warning">
-    <p><strong>Ergebnis: Es sind insgesamt $($UpdCount + $PackageUpdateCount + $LinuxUpdateCount + $HAUpdateCount) Update(s) verfügbar!</strong></p>
-    <p>Diese Updates können mit dem Install-ServersUpdates.ps1 Skript installiert werden.</p>
+    <p><strong>$summaryHeadline</strong></p>
+    <p>$summaryDetail</p>
 </div>
 "@
+}
+
+if ($WindowsUnreachableHosts -gt 0) {
+  $RepBody += "<div class='warning-box'><strong>Nicht erreichbar übersprungen:</strong> $WindowsUnreachableHosts Windows-Ziel(e). Diese Systeme wurden nicht auf Updates geprüft.</div>"
 }
 
 $RepBody += @"
@@ -1342,7 +1403,8 @@ $checkSummaryLines = @(
   "Verfügbare Anwendungsupdates: $PackageUpdateCount (Winget: $WingetUpdateCount, Chocolatey: $ChocolateyUpdateCount)",
   "Dauer: $ScriptDuration Minuten"
 )
-if ($LinuxCheckExecuted) { $checkSummaryLines = $checkSummaryLines[0..3] + "Verfügbare Linux-Updates: $LinuxUpdateCount" + $checkSummaryLines[4] }
+if ($WindowsUnreachableHosts -gt 0) { $checkSummaryLines = $checkSummaryLines[0..3] + "Nicht erreichbar übersprungen: $WindowsUnreachableHosts Windows-Ziel(e)" + $checkSummaryLines[4] }
+if ($LinuxCheckExecuted) { $checkSummaryLines = $checkSummaryLines[0..($checkSummaryLines.Count - 2)] + "Verfügbare Linux-Updates: $LinuxUpdateCount" + $checkSummaryLines[-1] }
 if ($HACheckExecuted) { $checkSummaryLines = $checkSummaryLines[0..($checkSummaryLines.Count - 2)] + "Verfügbare Home-Assistant-Updates: $HAUpdateCount" + $checkSummaryLines[-1] }
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-CHECK ZUSAMMENFASSUNG' -Lines $checkSummaryLines -WriteLog { param($message) Write-ScriptLog $message }
 
