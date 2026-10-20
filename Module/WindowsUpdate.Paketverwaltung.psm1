@@ -679,10 +679,29 @@ catch {
             # Benutzer (z. B. VS Code User). Die Zusatzabfrage läuft als
             # kurzlebige interaktive Aufgabe in deren vorhandener Sitzung.
             # Im Check wird nur gelesen; beim Installieren werden die gefundenen
-            # Pakete in genau diesem Benutzerkontext aktualisiert.
+            # Pakete in genau diesem Benutzerkontext aktualisiert. Auf Windows
+            # Servern wird diese Zusatzabfrage absichtlich ausgelassen: Dort
+            # sind keine benutzerbezogenen Serverpakete vorgesehen, und Aufgaben
+            # im angemeldeten interaktiven Benutzerkontext können hängen bleiben.
             $upgradeLines = @()
             $notes = @()
             $packageResults = @()
+            try {
+                $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+                $productType = [int]$operatingSystem.ProductType
+            }
+            catch {
+                return [pscustomobject]@{
+                    Lines = @()
+                    Notes = @("Benutzerbezogene WinGet-Prüfung vorsorglich ausgelassen: Windows-Produkttyp konnte nicht ermittelt werden ($($_.Exception.Message)).")
+                }
+            }
+            if ($productType -ne 1) {
+                return [pscustomobject]@{
+                    Lines = @()
+                    Notes = @("Benutzerbezogene WinGet-Prüfung und -Installation auf Windows Server ausgelassen (ProductType $productType). Maschinenweite WinGet-Updates und Chocolatey laufen weiter.")
+                }
+            }
             $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             $users = @{}
             try {
