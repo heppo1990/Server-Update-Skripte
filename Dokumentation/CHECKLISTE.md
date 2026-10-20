@@ -1,7 +1,8 @@
-# Offene Checkliste
+# Noch offene Prüfpunkte
 
-- [ ] Nachinstallationsaufgabe praktisch prüfen: Neustart, Wartungsfenster, Wiederholungen bis zum Abschluss und genau eine Abschlussmail.
-- [ ] WinGet-Kompatibilität praktisch prüfen: Auf einem Windows-Server vor Server 2019 (einschließlich SBS) muss WinGet übersprungen werden, während Windows Update und Chocolatey weiterlaufen; auf Server 2019 oder neuer muss WinGet wie konfiguriert funktionieren.
-- [ ] Check und Installation auf einem Ziel ohne NuGet-/PSGallery-Zugriff prüfen: aktuelle Module und NuGet-Provider zuerst zentral online beschaffen und offline übertragen; erst bei fehlendem Onlineabruf Offline-Fallback verwenden und Updateabfragen ohne rohe PackageManagement-Warnungen fortsetzen.
-- [ ] Modulpflege bei veralteten Versionen praktisch prüfen: Eine ältere PSWindowsUpdate-, Microsoft.WinGet.Client- oder NuGet-Version muss erkannt, zentral beschafft und auf dem Ziel aktualisiert werden.
-- [ ] Benutzerbezogene WinGet-Installation mit mehreren Updates praktisch prüfen: Das Gesamtzeitlimit muss 15 Minuten je erkanntem Paket betragen, höchstens 90 Minuten; Ergebnisse und Fehler aller Paketinstallationen müssen nachvollziehbar protokolliert werden.
+Die ursprünglichen Nummern bleiben erhalten, damit die Punkte mit den bisherigen Testnotizen abgeglichen werden können.
+
+- [ ] **2. Nachinstallationsaufgabe:** Neustart, Wartungsfenster, Wiederholungen bis zum Abschluss und genau eine Abschlussmail praktisch prüfen.
+- [ ] **3. WinGet auf älteren Servern:** Auf Windows-Servern vor Server 2019 einschließlich SBS muss WinGet übersprungen werden; Windows Update und Chocolatey müssen weiterlaufen.
+- [ ] **6. NuGet-/PSGallery-Ausfall:** Check und Installation ohne NuGet-/PSGallery-Zugriff praktisch prüfen. Pakete und NuGet-Provider sollen zuerst zentral online beschafft und offline übertragen werden; der reine Offline-Fallback greift erst, wenn der Onlineabruf scheitert. Keine interaktiven NuGet-Abfragen oder rohen PackageManagement-Warnungen.
+- [ ] **10. Mehrere Benutzerupdates:** Bei mehreren erkannten Benutzer-WinGet-Paketen die Laufzeitregel praktisch prüfen: 15 Minuten je Paket, höchstens 90 Minuten, mit nachvollziehbarem Protokoll der Ergebnisse und Fehler.
