@@ -2034,11 +2034,22 @@ $HAUpdatesInstalled = 0
 $HAUpdatesFailed = 0
 $LinuxScriptExecuted = $false
 $HAScriptExecuted = $false
+$IsWindowsOnlyRun = $TargetComputer -and $TargetComputer.Count -gt 0
+
+# Zielübersicht vor den plattformspezifischen Läufen ausgeben. So steht die
+# Gesamtliste als gemeinsame Überschrift über Linux-, HA- und Windows-Ausgaben.
+$ServerADList = Get-WindowsUpdateTargets `
+  -UpdateSettings $UpdateSettings `
+  -TargetComputers $TargetComputers `
+  -PowerShellMajor $psVersion `
+  -LinuxTargetCount $(if ($IsWindowsOnlyRun) { 0 } else { $LinuxConfiguredHostCount }) `
+  -HomeAssistantTargetCount $(if ($IsWindowsOnlyRun -or -not $HAConfigured) { 0 } else { 1 }) `
+  -IncludeAdditionalTargetCounts `
+  -WriteLog { param($message) Write-ScriptLog $message }
 
 # Linux-Updates Skript
 $LinuxUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Komponenten\Install-Linux Updates.ps1"
 $LinuxStatsFile = Join-Path (Join-Path $PSScriptRoot 'Logs') "linux_update_stats.json"
-$IsWindowsOnlyRun = $TargetComputer -and $TargetComputer.Count -gt 0
 if (-not $IsWindowsOnlyRun) {
   # Im Gesamtlauf zählen konfigurierte Linux- und HA-Ziele auch bei fehlender Statistikdatei.
   $LinuxServerCount = $LinuxConfiguredHostCount
@@ -2169,14 +2180,6 @@ if ($script:VMRebootIndex -gt 0) {
   }
 }
 
-$ServerADList = Get-WindowsUpdateTargets `
-  -UpdateSettings $UpdateSettings `
-  -TargetComputers $TargetComputers `
-  -PowerShellMajor $psVersion `
-  -LinuxTargetCount $(if ($IsWindowsOnlyRun) { 0 } else { $LinuxConfiguredHostCount }) `
-  -HomeAssistantTargetCount $(if ($IsWindowsOnlyRun -or -not $HAConfigured) { 0 } else { 1 }) `
-  -IncludeAdditionalTargetCounts `
-  -WriteLog { param($message) Write-ScriptLog $message }
 # Ein gezielter Testlauf verändert die allgemeine Serverliste nicht, sondern filtert sie nur für diesen Start.
 if ($TargetComputer -and $TargetComputer.Count -gt 0) {
   $requestedNames = @($TargetComputer | ForEach-Object { $_.Trim() } | Where-Object { $_ })
