@@ -2435,7 +2435,7 @@ if ($ServerADList -ne $null) {
           $RepBody += "<div class='warning-box'><strong>Installation auf $serverHtml übersprungen.</strong> $skipHtml</div>"
           continue
         }
-        Write-ScriptLog "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' })." $true
+        Write-ScriptLog -Message "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' })." -LogOnly
 
         # Nicht-AD-Ziele erhalten TrustedHosts und Zertifikatsauthentifizierung
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.
