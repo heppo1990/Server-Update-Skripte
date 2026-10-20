@@ -2992,8 +2992,16 @@ if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesFaile
 $summaryLines += @('', "Dauer: $ScriptDuration Minuten")
 foreach ($manualAction in @($ManualActions)) {
   $manualPackages = @($manualAction.Packages | ForEach-Object {
-    $packageName = [string]$_.Name
-    if ([string]::IsNullOrWhiteSpace($packageName)) { $packageName = [string]$_.Id }
+    if ($null -eq $_) { continue }
+    $packageName = ''
+    if ($_ -is [string]) {
+      $packageName = ([string]$_).Trim()
+    } else {
+      $nameProperty = $_.PSObject.Properties['Name']
+      $idProperty = $_.PSObject.Properties['Id']
+      if ($nameProperty) { $packageName = [string]$nameProperty.Value }
+      if ([string]::IsNullOrWhiteSpace($packageName) -and $idProperty) { $packageName = [string]$idProperty.Value }
+    }
     if (-not [string]::IsNullOrWhiteSpace($packageName)) { $packageName }
   } | Select-Object -Unique)
   $packageLabel = if ($manualPackages.Count -gt 0) { $manualPackages -join ', ' } else { 'Paket nicht eindeutig ermittelt' }
