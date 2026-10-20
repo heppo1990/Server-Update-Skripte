@@ -2940,6 +2940,19 @@ if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesFailed" 
 if ($LinuxRebootScheduleFailures -gt 0) { $summaryLines += "  • Linux-Neustartplanung offen: $LinuxRebootScheduleFailures" }
 if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesFailed" }
 $summaryLines += @('', "Dauer: $ScriptDuration Minuten")
+foreach ($manualAction in @($ManualActions)) {
+  $manualPackages = @($manualAction.Packages | ForEach-Object {
+    $packageName = [string]$_.Name
+    if ([string]::IsNullOrWhiteSpace($packageName)) { $packageName = [string]$_.Id }
+    if (-not [string]::IsNullOrWhiteSpace($packageName)) { $packageName }
+  } | Select-Object -Unique)
+  $packageLabel = if ($manualPackages.Count -gt 0) { $manualPackages -join ', ' } else { 'Paket nicht eindeutig ermittelt' }
+  $reasonLines = @([string]$manualAction.Text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object {
+    $_ -match '(?i)(hash|fehlgeschlagen|abgebrochen|abbruch|verwendet|zugriff verweigert|nicht unterstützt|nicht gefunden|error|failed|canceled|cancelled)'
+  } | Select-Object -Unique | Select-Object -First 2)
+  $reason = if ($reasonLines.Count -gt 0) { $reasonLines -join ' ' } else { 'Update bitte manuell prüfen; Details stehen in der Warnung bzw. im Laufprotokoll.' }
+  $summaryLines += "  • $($manualAction.Server) / $($manualAction.Manager) / $packageLabel — $reason"
+}
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-INSTALLATION ZUSAMMENFASSUNG' -Lines $summaryLines -WriteLog { param($message) Write-ScriptLog $message }
 # E-Mail versenden
 # SendMail und Subject direkt hier auswerten - sicher in PS5.1 und PS7
