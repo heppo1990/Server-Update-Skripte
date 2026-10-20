@@ -242,15 +242,8 @@ $script:BootstrapCredentials = @{}
 function Get-TargetBootstrapCredential {
     param([Parameter(Mandatory)][string]$Servername)
 
-    $suggestedUser = "$Servername\Administrator"
-    $message = "Einmalige WinRM-Einrichtung für $Servername. Bei einem anderen lokalen Administratorkonto den Benutzernamen im Dialog anpassen."
-    $credentialCommand = Get-Command -Name Get-Credential -ErrorAction Stop
-    if ($credentialCommand.Parameters.ContainsKey('UserName')) {
-        return Get-Credential -UserName $suggestedUser -Message $message
-    }
-
-    # Windows PowerShell 5.1 kann den Benutzernamen nicht im Dialog vorbelegen.
-    return Get-Credential -Message "$message Benutzername: $suggestedUser"
+    $message = "Einmalige WinRM-Einrichtung für $Servername. Bitte den tatsächlichen lokalen Administratorkontonamen eingeben, z. B. $Servername\Konto oder .\Konto."
+    return Get-Credential -Message $message
 }
 
 function Add-TrustedWinRMServerCertificate {
