@@ -2078,6 +2078,17 @@ finally {
             $sourceResetPerformed = $false
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
+                if ($retryReason -match '(?i)WinGet nach Reparatur oder App-Installer-Registrierung') {
+                    # Nach einer AppX-Registrierung meldet Add-AppxPackage den
+                    # Vorgang synchron als abgeschlossen, während App Installer
+                    # und WinGet-Quelle im Remoting-Kontext noch kurz den neuen
+                    # Paketstatus übernehmen. Ein sofortiger neuer WinRM-Job
+                    # kann dann hängen; ein nachfolgender Check funktioniert,
+                    # sobald die Registrierung vollständig sichtbar ist.
+                    $appxSettleDelaySeconds = 15
+                    Write-CommonLog $WriteLog "AppX-Registrierung auf $ComputerName wurde geändert; warte $appxSettleDelaySeconds Sekunden vor der WinGet-Wiederholung in neuer Verbindung."
+                    Start-Sleep -Seconds $appxSettleDelaySeconds
+                }
                 if ($retryRequiresSourceReset) {
                     if ($isLocalTarget) {
                         $null = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds $wingetTimeoutSeconds -WriteLog $WriteLog
