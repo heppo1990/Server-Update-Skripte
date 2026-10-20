@@ -731,6 +731,7 @@ catch {
                     continue
                 }
                 $resultPath = Join-Path $userTempPath "$taskName.json"
+                $progressPath = Join-Path $userTempPath "$taskName.progress.json"
                 $powershellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
                 if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
                     $notes += "Abfrage für '$userName' übersprungen: Windows PowerShell fehlt."
@@ -738,9 +739,11 @@ catch {
                 }
 
                 $resultPathJson = ConvertTo-Json -InputObject $resultPath -Compress
+                $progressPathJson = ConvertTo-Json -InputObject $progressPath -Compress
                 $queryScript = @'
 $ErrorActionPreference = 'Stop'
 $resultPath = __RESULT_PATH__
+$progressPath = __PROGRESS_PATH__
 $query = [ordered]@{ Success = $false; Output = ''; ExitCode = -1; Error = ''; Packages = @() }
 try {
     $app = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
@@ -800,6 +803,7 @@ try {
         $packagePattern = '^\s*(?<Name>.+?)\s{2,}(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)(?:\s+(?<Source>\S+))?\s*$'
         $tableHeaderSeen = $false
         $tableActive = $false
+        $packagesToInstall = @()
         foreach ($line in @($query.Output -split "`r?`n")) {
             if (-not $tableActive) {
                 if ($line -match $headerPattern) { $tableHeaderSeen = $true; continue }
@@ -811,7 +815,7 @@ try {
             if ([string]::IsNullOrWhiteSpace([string]$line)) { break }
             $match = [regex]::Match([string]$line, $packagePattern)
             if (-not $match.Success) { continue }
-            $package = [ordered]@{
+            $packagesToInstall += [ordered]@{
                 Name = $match.Groups['Name'].Value.Trim()
                 Id = $match.Groups['Id'].Value
                 InstalledVersion = $match.Groups['Installed'].Value
@@ -821,6 +825,16 @@ try {
                 ExitCode = -1
                 Output = ''
             }
+        }
+        $progress = [ordered]@{
+            PackageCount = @($packagesToInstall).Count
+            DetectedAtUtc = [DateTime]::UtcNow.ToString('o')
+        }
+        $temporaryProgressPath = "$progressPath.tmp"
+        [IO.File]::WriteAllText($temporaryProgressPath, ($progress | ConvertTo-Json -Compress), [Text.Encoding]::UTF8)
+        if (Test-Path -LiteralPath $progressPath -PathType Leaf) { Remove-Item -LiteralPath $progressPath -Force }
+        [IO.File]::Move($temporaryProgressPath, $progressPath)
+        foreach ($package in $packagesToInstall) {
             $arguments = @(
                 'upgrade', '--id', $package.Id, '--exact', '--source', $package.Source,
                 '--version', $package.AvailableVersion, '--silent',
@@ -846,9 +860,9 @@ try {
                 $installer.StandardInput.Close()
                 $stdoutTask = $installer.StandardOutput.ReadToEndAsync()
                 $stderrTask = $installer.StandardError.ReadToEndAsync()
-                if (-not $installer.WaitForExit(1800000)) {
+                if (-not $installer.WaitForExit(900000)) {
                     try { $installer.Kill() } catch { }
-                    throw "WinGet-Installation für $($package.Id) überschritt das Zeitlimit von 30 Minuten."
+                    throw "WinGet-Installation für $($package.Id) überschritt das Zeitlimit von 15 Minuten."
                 }
                 $installer.WaitForExit()
                 $package.ExitCode = [int]$installer.ExitCode
@@ -878,23 +892,45 @@ finally {
 }
 '@
                 $queryScript = $queryScript.Replace('__RESULT_PATH__', $resultPathJson)
+                $queryScript = $queryScript.Replace('__PROGRESS_PATH__', $progressPathJson)
                 $installUpdatesLiteral = if ($InstallUpdates) { '$true' } else { '$false' }
                 $queryScript = $queryScript.Replace('__INSTALL_UPDATES__', $installUpdatesLiteral)
                 $encodedQuery = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($queryScript))
                 $taskRegistered = $false
                 try {
                     Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
                     $action = New-ScheduledTaskAction -Execute $powershellPath -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedQuery"
                     $principal = New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
                     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
                     $taskRegistered = $true
                     $taskStartedAt = Get-Date
                     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                    # Die Aufgabe erhält insgesamt 30 Minuten; auch ein
-                    # einzelner langsamer Paketprozess darf bis zu 30 Minuten laufen.
-                    $taskTimeoutSeconds = if ($InstallUpdates) { 1800 } else { 300 }
-                    $deadline = (Get-Date).AddSeconds($taskTimeoutSeconds)
+                    # Die Paketabfrage erhält fünf Minuten. Danach bekommt die
+                    # Aufgabe 15 Minuten je erkanntem Paket, insgesamt höchstens 90 Minuten.
+                    $taskTimeoutSeconds = 300
+                    $deadline = $taskStartedAt.AddSeconds($taskTimeoutSeconds)
+                    $maximumDeadline = $taskStartedAt.AddMinutes(90)
+                    $progressApplied = $false
                     while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
+                        if ($InstallUpdates -and -not $progressApplied -and (Test-Path -LiteralPath $progressPath -PathType Leaf)) {
+                            try {
+                                $progress = Get-Content -LiteralPath $progressPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+                                $packageCount = [Math]::Max(0, [int]$progress.PackageCount)
+                                $detectedAt = [DateTime]::Parse([string]$progress.DetectedAtUtc).ToLocalTime()
+                                if ($packageCount -gt 0) {
+                                    $packageBudgetSeconds = [Math]::Min(5400, $packageCount * 900)
+                                    $packageDeadline = $detectedAt.AddSeconds($packageBudgetSeconds)
+                                    $deadline = if ($packageDeadline -lt $maximumDeadline) { $packageDeadline } else { $maximumDeadline }
+                                    $taskTimeoutSeconds = [Math]::Max(0, [int][Math]::Ceiling(($deadline - $taskStartedAt).TotalSeconds))
+                                    $notes += "Benutzerbezogene WinGet-Installation für '$userName': $packageCount Paket(e), 15 Minuten je Paket; berechnetes Gesamtzeitlimit $([Math]::Round(($deadline - $taskStartedAt).TotalMinutes, 1)) Minuten (maximal 90)."
+                                }
+                                $progressApplied = $true
+                            } catch {
+                                $notes += "Zeitlimit für die Benutzeraufgabe von '$userName' konnte nicht aus der Paketanzahl berechnet werden: $($_.Exception.Message)"
+                                $progressApplied = $true
+                            }
+                        }
                         $taskState = $null
                         $taskInfo = $null
                         try {
@@ -958,6 +994,8 @@ finally {
                 finally {
                     if ($taskRegistered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
                     Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath "$progressPath.tmp" -Force -ErrorAction SilentlyContinue
                 }
             }
             [pscustomobject]@{ Lines = @($upgradeLines); Notes = @($notes); Packages = @($packageResults) }
