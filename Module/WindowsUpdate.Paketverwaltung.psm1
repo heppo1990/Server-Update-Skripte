@@ -702,7 +702,35 @@ catch {
                 $userName = [string]$users[$userSid]
                 $taskPurpose = if ($InstallUpdates) { 'Install' } else { 'Check' }
                 $taskName = "WindowsUpdateAdm-WinGet$taskPurpose-" + [guid]::NewGuid().ToString('N')
-                $resultPath = Join-Path $env:windir "Temp\$taskName.json"
+                # Die Aufgabe läuft mit dem normalen Benutzerkonto. C:\Windows\Temp
+                # ist je nach ACL nicht zuverlässig beschreibbar; dann blieb die
+                # Rückgabedatei aus und der Aufrufer wartete unnötig fünf Minuten.
+                $userProfile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$userSid'" -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                if (-not $userProfile -or [string]::IsNullOrWhiteSpace([string]$userProfile.LocalPath)) {
+                    $notes += "Benutzerbezogene WinGet-Abfrage für '$userName' nicht möglich: Benutzerprofil wurde nicht gefunden."
+                    if ($InstallUpdates) {
+                        $packageResults += [pscustomobject]@{
+                            Name = 'WinGet-Benutzerupdates'; Id = ''; InstalledVersion = ''
+                            AvailableVersion = ''; Source = 'winget'; UserName = $userName
+                            Success = $false; ExitCode = 1; Output = 'Benutzerprofil wurde nicht gefunden.'
+                        }
+                    }
+                    continue
+                }
+                $userTempPath = Join-Path ([string]$userProfile.LocalPath) 'AppData\Local\Temp'
+                if (-not (Test-Path -LiteralPath $userTempPath -PathType Container)) {
+                    $notes += "Benutzerbezogene WinGet-Abfrage für '$userName' nicht möglich: Profil-Tempverzeichnis fehlt."
+                    if ($InstallUpdates) {
+                        $packageResults += [pscustomobject]@{
+                            Name = 'WinGet-Benutzerupdates'; Id = ''; InstalledVersion = ''
+                            AvailableVersion = ''; Source = 'winget'; UserName = $userName
+                            Success = $false; ExitCode = 1; Output = 'Profil-Tempverzeichnis fehlt.'
+                        }
+                    }
+                    continue
+                }
+                $resultPath = Join-Path $userTempPath "$taskName.json"
                 $powershellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
                 if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
                     $notes += "Abfrage für '$userName' übersprungen: Windows PowerShell fehlt."
@@ -746,6 +774,9 @@ try {
             throw 'winget.exe überschritt das Zeitlimit von viereinhalb Minuten.'
         }
         $process.WaitForExit()
+        if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask), 10000)) {
+            throw 'winget.exe wurde beendet, aber seine Ausgabekanäle wurden nicht geschlossen; die Benutzerabfrage wird als Fehler zurückgegeben.'
+        }
         $query.ExitCode = [int]$process.ExitCode
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
@@ -831,7 +862,12 @@ try {
 }
 catch { $query.Error = $_.Exception.ToString() }
 finally {
-    try { [IO.File]::WriteAllText($resultPath, ($query | ConvertTo-Json -Compress), [Text.Encoding]::UTF8) } catch { }
+    try {
+        $temporaryResultPath = "$resultPath.tmp"
+        [IO.File]::WriteAllText($temporaryResultPath, ($query | ConvertTo-Json -Compress), [Text.Encoding]::UTF8)
+        if (Test-Path -LiteralPath $resultPath -PathType Leaf) { Remove-Item -LiteralPath $resultPath -Force }
+        [IO.File]::Move($temporaryResultPath, $resultPath)
+    } catch { }
 }
 '@
                 $queryScript = $queryScript.Replace('__RESULT_PATH__', $resultPathJson)
@@ -845,13 +881,28 @@ finally {
                     $principal = New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
                     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
                     $taskRegistered = $true
+                    $taskStartedAt = Get-Date
                     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                    $deadline = (Get-Date).AddSeconds(300)
+                    # Benutzerinstallationen enthalten zusätzlich einzelne
+                    # Paketprozesse mit bis zu 15 Minuten Laufzeit.
+                    $taskTimeoutSeconds = if ($InstallUpdates) { 1800 } else { 300 }
+                    $deadline = (Get-Date).AddSeconds($taskTimeoutSeconds)
                     while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
+                        $taskState = $null
+                        $taskInfo = $null
+                        try {
+                            $taskState = (Get-ScheduledTask -TaskName $taskName -ErrorAction Stop).State
+                            $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+                        } catch { }
+                        if ($taskState -eq 'Ready' -and $taskInfo -and $taskInfo.LastRunTime -ge $taskStartedAt) {
+                            throw "Benutzeraufgabe für '$userName' wurde beendet, ohne eine Ergebnisdatei zu schreiben (LastTaskResult=$($taskInfo.LastTaskResult))."
+                        }
                         Start-Sleep -Milliseconds 500
                     }
                     if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
-                        throw "Keine Rückgabe innerhalb von 300 Sekunden für '$userName'."
+                        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+                        $taskResult = if ($taskInfo) { "; LastTaskResult=$($taskInfo.LastTaskResult)" } else { '' }
+                        throw "Benutzerbezogene WinGet-Aufgabe für '$userName' blieb $taskTimeoutSeconds Sekunden ohne Rückgabe$taskResult."
                     }
                     $userQuery = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
                     if (-not $userQuery.Success) {

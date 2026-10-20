@@ -187,8 +187,8 @@ function Invoke-PackageManagerUpdates {
     # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
     $successfulPackagesByManager = @{}
     $manualPackageCount = 0
-    $wingetNoUpdatesFound = $false
-    $wingetManualAction = $false
+    $noUpdatesFoundByManager = @{}
+    $managerHadFailure = @{}
     foreach ($result in $results) {
       if ($result.Skipped) {
         $skipReason = if ([string]::IsNullOrWhiteSpace([string]$result.SkipReason)) { 'ohne Angabe eines Grundes' } else { [string]$result.SkipReason }
@@ -200,15 +200,28 @@ function Invoke-PackageManagerUpdates {
         continue
       }
       if (-not $result.Success) {
-        if ($result.Manager -eq 'Winget') { $wingetManualAction = $true }
+        $managerHadFailure[[string]$result.Manager] = $true
         $manualActionProperty = $result.PSObject.Properties['RequiresManualAction']
         $requiresManualAction = $manualActionProperty -and [bool]$manualActionProperty.Value
         if ($requiresManualAction) {
           $failedPackageCount = @($result.Packages).Count
           $manualPackageCount += [Math]::Max(1, $failedPackageCount)
+        }
+        $manualTextProperty = $result.PSObject.Properties['ManualActionText']
+        $errorSummaryProperty = $result.PSObject.Properties['ErrorSummary']
+        $errorSummary = if ($manualTextProperty -and -not [string]::IsNullOrWhiteSpace([string]$manualTextProperty.Value)) {
+          [string]$manualTextProperty.Value
+        } elseif ($errorSummaryProperty -and -not [string]::IsNullOrWhiteSpace([string]$errorSummaryProperty.Value)) {
+          [string]$errorSummaryProperty.Value
         } else {
-          $errorSummaryProperty = $result.PSObject.Properties['ErrorSummary']
-          $errorSummary = if ($errorSummaryProperty -and -not [string]::IsNullOrWhiteSpace([string]$errorSummaryProperty.Value)) { [string]$errorSummaryProperty.Value } else { [string]$result.ActionOutput }
+          [string]$result.ActionOutput
+        }
+        if ([string]::IsNullOrWhiteSpace($errorSummary)) {
+          $errorSummary = "Update konnte nicht automatisch abgeschlossen werden (Exitcode: $($result.ExitCode)). Details im Laufprotokoll."
+        }
+        if ($requiresManualAction) {
+          Write-ScriptLog "WARNUNG: Manuelle Prüfung/Aktion bei $($result.Manager) auf ${Servername} erforderlich: $errorSummary"
+        } else {
           Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $errorSummary"
         }
         $diagnosticProperty = $result.PSObject.Properties['DiagnosticOutput']
@@ -222,7 +235,7 @@ function Invoke-PackageManagerUpdates {
 
       $packageCount = @($result.Packages).Count
       if ($packageCount -eq 0) {
-        if ($result.Manager -eq 'Winget' -and $result.Available -and $result.Success) { $wingetNoUpdatesFound = $true }
+        if ($result.Available -and $result.Success) { $noUpdatesFoundByManager[[string]$result.Manager] = $true }
         continue
       }
 
@@ -235,8 +248,10 @@ function Invoke-PackageManagerUpdates {
         $debugActionOutput -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-ScriptLog "  $_" -IsDebug }
       }
     }
-    if ($wingetNoUpdatesFound -and -not $wingetManualAction -and -not $successfulPackagesByManager.ContainsKey('Winget')) {
-      Write-ScriptLog "WinGet auf ${Servername}: keine Paketupdates verfügbar."
+    foreach ($manager in @($noUpdatesFoundByManager.Keys | Sort-Object)) {
+      if (-not $managerHadFailure.ContainsKey([string]$manager) -and -not $successfulPackagesByManager.ContainsKey([string]$manager)) {
+        Write-ScriptLog "$manager auf ${Servername}: keine Paketupdates verfügbar."
+      }
     }
     $managerOutputWritten = $false
     foreach ($manager in $successfulPackagesByManager.Keys) {
