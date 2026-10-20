@@ -1307,6 +1307,7 @@ finally {
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
             $wingetQuerySources = @()
+            $wingetModuleUseAllowed = $true
             if ($ExecutionMode -eq 'Check' -and $wingetPath) {
                 # Eine Check-Abfrage benötigt keine App-Installer-Registrierung.
                 # Auf Servern kann die neueste systemweit bereitgestellte
@@ -1345,6 +1346,50 @@ finally {
                 }
             }
             if ($ExecutionMode -eq 'Check' -and $serverCaption -match 'Windows Server (2019|2022)') {
+                # Microsoft.WinGet.Client 1.29.380+ benötigt für Aufrufe in
+                # erhöhten Sitzungen auch einen App-Installer derselben
+                # Mindestgeneration. Bei einem älteren DesktopAppInstaller
+                # kann winrtact.dll den wsmprovhost-Prozess zum Absturz bringen;
+                # der Fehler ist dann nicht mehr per PowerShell-Catch fangbar.
+                $clientModule = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
+                    Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
+                    Select-Object -First 1)
+                $currentAppInstaller = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                    Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
+                    Select-Object -First 1)
+                $minimumElevatedAppInstallerVersion = [version]'1.29.380.0'
+                $clientModuleVersion = if ($clientModule.Count -gt 0) { try { [version]$clientModule[0].Version } catch { [version]'0.0' } } else { [version]'0.0' }
+                $appInstallerVersion = if ($currentAppInstaller.Count -gt 0) { try { [version]$currentAppInstaller[0].Version } catch { [version]'0.0' } } else { [version]'0.0' }
+
+                if ($clientModuleVersion -ge $minimumElevatedAppInstallerVersion -and
+                    $appInstallerVersion -lt $minimumElevatedAppInstallerVersion) {
+                    $wingetBootstrapMessage += " Versionskonflikt erkannt: Microsoft.WinGet.Client $clientModuleVersion benötigt für erhöhte Abfragen App Installer $minimumElevatedAppInstallerVersion oder neuer; registriert ist $appInstallerVersion."
+                    try {
+                        Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
+                        $null = Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+                        $currentAppInstaller = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                            Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
+                            Select-Object -First 1)
+                        $appInstallerVersion = if ($currentAppInstaller.Count -gt 0) { try { [version]$currentAppInstaller[0].Version } catch { [version]'0.0' } } else { [version]'0.0' }
+                        if ($appInstallerVersion -lt $minimumElevatedAppInstallerVersion) {
+                            throw "App-Installer-Reparatur abgeschlossen, aber registrierte Version $appInstallerVersion bleibt unter der benötigten Version $minimumElevatedAppInstallerVersion."
+                        }
+                        $wingetPath = Resolve-WingetExecutable
+                        $wingetBootstrapMessage += " App Installer wurde auf Version $appInstallerVersion repariert; WinGet-Abfrage wird in einer neuen Verbindung fortgesetzt."
+                        $wingetReconnectRequired = $true
+                    }
+                    catch {
+                        # Die WinGet-CLI kann weiterhin korrekt abfragen, auch
+                        # wenn der PowerShell-Client nicht zur AppX-Version
+                        # passt. Den inkompatiblen nativen Modulaufruf deshalb
+                        # unterlassen und den Reparaturfehler nachvollziehbar
+                        # protokollieren, statt den WSMan-Host abstürzen zu lassen.
+                        $wingetModuleUseAllowed = $false
+                        $wingetBootstrapMessage += ' App-Installer-Reparatur nicht abgeschlossen; PowerShell-Modulabfrage wird ausgelassen und die WinGet-CLI verwendet.'
+                        $wingetDiagnosticOutput += "WinGet-Komponentenreparatur:`r`n$($_.Exception.ToString())`r`n"
+                    }
+                }
+
                 $wingetHealth = Test-WingetExecutable -Path $wingetPath
                 if (-not $wingetHealth.Works) {
                     $healthProblems = @()
@@ -1400,6 +1445,21 @@ finally {
                         $machineScopeSummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
                     }
                     $wingetDiagnosticOutput = "$machineScopeSummary`r`n$([string]$cliQueryResult.DiagnosticOutput)"
+                }
+                elseif (-not $wingetModuleUseAllowed) {
+                    # Bei bekannt inkompatiblen Modul-/AppX-Versionen ist der
+                    # PowerShell-Aufruf nicht sicher: winrtact.dll kann den
+                    # gesamten WSMan-Anbieterhost beenden. Die CLI bleibt der
+                    # native, versionsgebundene WinGet-Einstiegspunkt.
+                    $cliQueryResult = Invoke-WingetCliUpgradeQuery -Path $wingetPath
+                    $availableOutput = [string]$cliQueryResult.Output
+                    $wingetQuerySources = @($cliQueryResult.Sources)
+                    $wingetCliFallback = $true
+                    $cliCompatibilitySummary = "WinGet-CLI-Abfrage statt PowerShell-Modul wegen Versionskonflikt; Quellen $(@($cliQueryResult.Sources) -join ', ')."
+                    if (@($cliQueryResult.FailedSources).Count -gt 0) {
+                        $cliCompatibilitySummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
+                    }
+                    $wingetDiagnosticOutput = "$cliCompatibilitySummary`r`n$([string]$cliQueryResult.DiagnosticOutput)"
                 }
                 else {
                 try {
