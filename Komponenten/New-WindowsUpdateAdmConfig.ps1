@@ -689,31 +689,45 @@ try {
                     return $null
                 }
                 $mappingSubject = "$($clientCert.Subject.Replace('CN=',''))@localhost"
-                $subjectMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                $allMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue)
+                $subjectMappings = @($allMappings |
                     Where-Object {
                         (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject') -eq $mappingSubject
                     })
+                # Der Issuerwert ist bei unserem selbstsignierten Clientzertifikat
+                # dessen Thumbprint. Alte Wildcard- oder anders benannte Einträge
+                # mit derselben Zertifikatidentität können eine neue Zuordnung
+                # überlagern und WinRM mit HTTP 12186 ablehnen lassen.
+                $issuerMappings = @($allMappings | Where-Object {
+                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
+                })
                 $currentMapping = @($subjectMappings | Where-Object {
                     (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
                 })
                 $certificateMappingConfirmed = $false
 
                 if ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
-                    $certificateMappingConfirmed = $true
-                    Write-SetupLog "Zertifikatverbindung wurde vor dem Setup bestätigt; Mapping für den aktuellen Thumbprint bleibt erhalten." "SUCCESS"
-                    if ($currentMapping.Count -gt 0) {
-                        foreach ($staleMapping in $subjectMappings | Where-Object {
-                            (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -ne $clientCert.Thumbprint
-                        }) {
-                            Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
-                        }
+                    if ($currentMapping.Count -ne 1) {
+                        throw "Zertifikatsmapping konnte nicht eindeutig erhalten werden (passende Einträge: $($currentMapping.Count))."
                     }
+                    Write-SetupLog "Zertifikatverbindung wurde vor dem Setup bestätigt; Mapping für den aktuellen Thumbprint bleibt erhalten." "SUCCESS"
+                    $staleMappings = @($subjectMappings + $issuerMappings | Where-Object {
+                        $_.PSPath -ne $currentMapping[0].PSPath
+                    } | Sort-Object -Property PSPath -Unique)
+                    foreach ($staleMapping in $staleMappings) {
+                        Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
+                    }
+                    $certificateMappingConfirmed = $true
                 } elseif ($currentMapping.Count -gt 0 -and -not $CertificateMappingCredential -and -not $ForceUpdate) {
                     # Ohne Einrichtungsdaten kann ein vorhandener Eintrag nicht
                     # erneuert werden. Die Verteilung bestätigt die Verbindung
                     # normalerweise vorher und setzt dann PreserveExisting... .
-                    $certificateMappingConfirmed = $true
-                    Write-SetupLog "Zertifikat-Mapping für den aktuellen Thumbprint ist vorhanden; keine Einrichtungsdaten zum Erneuern übergeben." "SUCCESS"
+                    if ($currentMapping.Count -eq 1 -and $issuerMappings.Count -eq 1) {
+                        $certificateMappingConfirmed = $true
+                        Write-SetupLog "Eindeutiges Zertifikat-Mapping für den aktuellen Thumbprint ist vorhanden; keine Einrichtungsdaten zum Erneuern übergeben." "SUCCESS"
+                    } else {
+                        throw "Zertifikatsmapping ist mehrdeutig (passende Subject/Issuer-Einträge: $($currentMapping.Count); alle Einträge mit Zertifikat-Issuer: $($issuerMappings.Count)); Einrichtungsdaten zum Bereinigen und Erneuern fehlen."
+                    }
                 } elseif (-not $CertificateMappingCredential) {
                     throw "Für ein neues oder zu erneuerndes Zertifikat-Mapping wurden keine Einrichtungs-Administrator-Anmeldedaten übergeben."
                 } else {
@@ -726,10 +740,12 @@ try {
                     try {
                         # Diese Anmeldedaten wurden vom Aufrufer verwendet, wenn
                         # die Client-Zertifikatsverbindung nicht funktioniert hat.
-                        # Daher alle Einträge genau dieses Zertifikat-Subjects
-                        # ersetzen, auch wenn Thumbprint und Subject schon passen:
-                        # das gespeicherte WinRM-Passwort kann veraltet sein.
-                        foreach ($staleMapping in $subjectMappings) {
+                        # Daher alle Einträge dieses Zertifikats (Issuer-Thumbprint)
+                        # und alle kollidierenden Subject-Einträge ersetzen, auch
+                        # wenn Subject und Issuer schon passen: das gespeicherte
+                        # WinRM-Passwort kann veraltet oder die Zuordnung mehrdeutig sein.
+                        $staleMappings = @($subjectMappings + $issuerMappings | Sort-Object -Property PSPath -Unique)
+                        foreach ($staleMapping in $staleMappings) {
                             Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
                         }
                         New-Item -Path WSMan:\localhost\ClientCertificate `
@@ -741,8 +757,21 @@ try {
                                 $CertificateMappingCredential.Password
                             )) `
                             -Force -ErrorAction Stop | Out-Null
+                        $verifiedMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                            Where-Object {
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject') -eq $mappingSubject -and
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint -and
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'UserName') -ieq $localUser
+                            })
+                        $remainingIssuerMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                            Where-Object {
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
+                            })
+                        if ($verifiedMappings.Count -ne 1 -or $remainingIssuerMappings.Count -ne 1) {
+                            throw "Zertifikatsmapping ist nach dem Anlegen nicht eindeutig (gültige Zuordnungen: $($verifiedMappings.Count); Einträge für Zertifikat: $($remainingIssuerMappings.Count))."
+                        }
                         $certificateMappingConfirmed = $true
-                        Write-SetupLog "Zertifikat mit Account '$localUser' verknüpft." "SUCCESS"
+                        Write-SetupLog "Zertifikat mit Account '$localUser' eindeutig verknüpft und verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)')." "SUCCESS"
                     }
                     catch {
                         Write-SetupLog 'Zertifikat-Mapping fehlgeschlagen; Details im Setup-Protokoll.' 'WARN'
@@ -809,7 +838,15 @@ try {
         if (-not (Test-Path -LiteralPath $localPowerShell)) {
             throw "Windows PowerShell 5.1 wurde nicht gefunden: $localPowerShell"
         }
-        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA -ResumeLogPath "{1}"' -f $PSCommandPath, $script:SetupLogPath
+        # Die SYSTEM-Finalisierung erhält denselben Sollwert wie der
+        # Remote-Prozess. Sie soll die Version nicht aus einem eventuell
+        # anders aufgelösten Modulpfad ableiten.
+        $taskDeploymentVersion = if (-not [string]::IsNullOrWhiteSpace($DeploymentVersion)) {
+            $DeploymentVersion
+        } else {
+            Get-WindowsUpdateAdmDeploymentVersion
+        }
+        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA -DeploymentVersion "{1}" -ResumeLogPath "{2}"' -f $PSCommandPath, $taskDeploymentVersion, $script:SetupLogPath
         if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
             # Die SYSTEM-Finalisierung muss dieselbe eingeschränkte JEA-Rolle
             # für den Verwaltungsserver registrieren wie der ursprüngliche Lauf.
