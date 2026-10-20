@@ -2352,6 +2352,32 @@ if ($ServerADList -ne $null) {
         $packageResults = @(Invoke-PackageManagerUpdates -Servername $Servername -AuthInfo $svcCredential -ExcludeWinGetIds $excludedWinGetIds -ExcludeChocolateyIds $excludedChocolateyIds)
         foreach ($packageResult in $packageResults) {
           $packages = @($packageResult.Packages)
+          if ($packageResult.Manager -eq 'Winget' -and -not $packageResult.Skipped) {
+            if (-not $packageResult.Available) {
+              Write-ScriptLog "WinGet auf ${Servername}: nicht verfügbar."
+            }
+            elseif ($packageResult.Success -and $packages.Count -eq 0) {
+              Write-ScriptLog "WinGet auf ${Servername}: keine Paketupdates im ausführenden Benutzerkontext verfügbar."
+            }
+            elseif ($packages.Count -gt 0) {
+              $wingetStatus = if ($packageResult.Success) { 'installiert' } else { 'nicht vollständig installiert' }
+              $interactiveUserProperty = $packageResult.PSObject.Properties['InteractiveUser']
+              $wingetScope = if ($interactiveUserProperty -and -not [string]::IsNullOrWhiteSpace([string]$interactiveUserProperty.Value)) {
+                " für Benutzer '$([string]$interactiveUserProperty.Value)'"
+              } else { '' }
+              Write-ScriptLog "WinGet auf ${Servername}${wingetScope}: $($packages.Count) Paketupdate(s) $wingetStatus."
+              $wingetTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $Servername -Manager Winget -Packages $packages
+              foreach ($tableLine in @($wingetTable -split "`r?`n")) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$tableLine)) { Write-ScriptLog "  $tableLine" }
+              }
+              if (-not $packageResult.Success -and -not [string]::IsNullOrWhiteSpace([string]$packageResult.ActionOutput)) {
+                Write-ScriptLog "  WinGet-Details: $([string]$packageResult.ActionOutput)"
+              }
+            }
+            else {
+              Write-ScriptLog "WARNUNG: WinGet auf ${Servername} fehlgeschlagen; Details im Log."
+            }
+          }
           # Auch gefundene Pakete aus fehlgeschlagenen Installationen in den
           # Mailbericht aufnehmen. Bisher landeten hier nur erfolgreiche Updates;
           # dadurch fehlten erkannte WinGet-Pakete in der Paketübersicht.

@@ -669,13 +669,16 @@ catch {
         }
 
         function Get-WingetInteractiveUserUpgradeLines {
+            param([switch]$InstallUpdates)
             # WinGet läuft im WinRM-Aufruf unter dem Remoting-Konto. Dadurch
             # fehlen benutzerbezogene Installationen anderer angemeldeter
             # Benutzer (z. B. VS Code User). Die Zusatzabfrage läuft als
-            # kurzlebige interaktive Aufgabe in deren vorhandener Sitzung und
-            # liest nur die Upgrade-Liste; sie installiert nichts.
+            # kurzlebige interaktive Aufgabe in deren vorhandener Sitzung.
+            # Im Check wird nur gelesen; beim Installieren werden die gefundenen
+            # Pakete in genau diesem Benutzerkontext aktualisiert.
             $upgradeLines = @()
             $notes = @()
+            $packageResults = @()
             $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             $users = @{}
             try {
@@ -697,7 +700,8 @@ catch {
 
             foreach ($userSid in @($users.Keys)) {
                 $userName = [string]$users[$userSid]
-                $taskName = 'WindowsUpdateAdm-WinGetCheck-' + [guid]::NewGuid().ToString('N')
+                $taskPurpose = if ($InstallUpdates) { 'Install' } else { 'Check' }
+                $taskName = "WindowsUpdateAdm-WinGet$taskPurpose-" + [guid]::NewGuid().ToString('N')
                 $resultPath = Join-Path $env:windir "Temp\$taskName.json"
                 $powershellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
                 if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
@@ -709,7 +713,7 @@ catch {
                 $queryScript = @'
 $ErrorActionPreference = 'Stop'
 $resultPath = __RESULT_PATH__
-$query = [ordered]@{ Success = $false; Output = ''; ExitCode = -1; Error = '' }
+$query = [ordered]@{ Success = $false; Output = ''; ExitCode = -1; Error = ''; Packages = @() }
 try {
     $app = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
         Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
@@ -747,6 +751,64 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($stderr)) { $outputParts += $stderr.Trim() }
     $query.Output = ($outputParts -join [Environment]::NewLine).Trim()
     $query.Success = ($query.ExitCode -eq 0 -or $query.Output -match '(?i)(no installed package found|es wurde kein installiertes paket gefunden|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar)')
+    if (__INSTALL_UPDATES__ -and $query.Success) {
+        $packagePattern = '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$'
+        foreach ($line in @($query.Output -split "`r?`n")) {
+            $match = [regex]::Match([string]$line, $packagePattern)
+            if (-not $match.Success) { continue }
+            $package = [ordered]@{
+                Name = $match.Groups['Name'].Value.Trim()
+                Id = $match.Groups['Id'].Value
+                InstalledVersion = $match.Groups['Installed'].Value
+                AvailableVersion = $match.Groups['Available'].Value
+                Source = $match.Groups['Source'].Value
+                Success = $false
+                ExitCode = -1
+                Output = ''
+            }
+            $arguments = @(
+                'upgrade', '--id', $package.Id, '--exact', '--source', $package.Source,
+                '--version', $package.AvailableVersion, '--silent',
+                '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity'
+            )
+            $quotedArguments = foreach ($argument in $arguments) {
+                $value = [string]$argument
+                if ($value -match '[\s"]') { '"' + $value.Replace('"', '\\"') + '"' } else { $value }
+            }
+            $installInfo = [Diagnostics.ProcessStartInfo]::new()
+            $installInfo.FileName = $winget
+            $installInfo.Arguments = $quotedArguments -join ' '
+            $installInfo.UseShellExecute = $false
+            $installInfo.CreateNoWindow = $false
+            $installInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Normal
+            $installInfo.RedirectStandardOutput = $true
+            $installInfo.RedirectStandardError = $true
+            $installer = [Diagnostics.Process]::new()
+            try {
+                $installer.StartInfo = $installInfo
+                if (-not $installer.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
+                $stdoutTask = $installer.StandardOutput.ReadToEndAsync()
+                $stderrTask = $installer.StandardError.ReadToEndAsync()
+                if (-not $installer.WaitForExit(900000)) {
+                    try { $installer.Kill() } catch { }
+                    throw "WinGet-Installation für $($package.Id) überschritt das Zeitlimit von 15 Minuten."
+                }
+                $installer.WaitForExit()
+                $package.ExitCode = [int]$installer.ExitCode
+                $installOutput = @($stdoutTask.GetAwaiter().GetResult(), $stderrTask.GetAwaiter().GetResult()) |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+                $package.Output = ($installOutput -join [Environment]::NewLine).Trim()
+                $package.Success = ($package.ExitCode -eq 0 -and $package.Output -notmatch '(?i)(Installation fehlgeschlagen|installation failed|abgebrochen|cancelled)')
+            }
+            catch {
+                $package.Output = $_.Exception.Message
+                if ($package.ExitCode -lt 0) { $package.ExitCode = 1 }
+                $package.Success = $false
+            }
+            finally { $installer.Dispose() }
+            $query.Packages += $package
+        }
+    }
 }
 catch { $query.Error = $_.Exception.ToString() }
 finally {
@@ -754,6 +816,8 @@ finally {
 }
 '@
                 $queryScript = $queryScript.Replace('__RESULT_PATH__', $resultPathJson)
+                $installUpdatesLiteral = if ($InstallUpdates) { '$true' } else { '$false' }
+                $queryScript = $queryScript.Replace('__INSTALL_UPDATES__', $installUpdatesLiteral)
                 $encodedQuery = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($queryScript))
                 $taskRegistered = $false
                 try {
@@ -783,17 +847,38 @@ finally {
                             $match.Groups['Id'].Value, $match.Groups['Installed'].Value,
                             $match.Groups['Available'].Value, $match.Groups['Source'].Value)
                     }
-                    $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' erfolgreich."
+                    foreach ($package in @($userQuery.Packages)) {
+                        $packageResults += [pscustomobject]@{
+                            Name = [string]$package.Name; Id = [string]$package.Id
+                            InstalledVersion = [string]$package.InstalledVersion
+                            AvailableVersion = [string]$package.AvailableVersion
+                            Source = [string]$package.Source; UserName = $userName
+                            Success = [bool]$package.Success; ExitCode = [int]$package.ExitCode
+                            Output = [string]$package.Output
+                        }
+                    }
+                    if ($InstallUpdates) {
+                        $notes += "Benutzerbezogene WinGet-Installation als '$userName': $(@($userQuery.Packages | Where-Object Success).Count) erfolgreich, $(@($userQuery.Packages | Where-Object { -not $_.Success }).Count) fehlgeschlagen."
+                    } else {
+                        $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' erfolgreich."
+                    }
                 }
                 catch {
                     $notes += "Benutzerbezogene WinGet-Abfrage für '$userName' nicht möglich: $($_.Exception.Message)"
+                    if ($InstallUpdates) {
+                        $packageResults += [pscustomobject]@{
+                            Name = 'WinGet-Benutzerupdates'; Id = ''; InstalledVersion = ''
+                            AvailableVersion = ''; Source = 'winget'; UserName = $userName
+                            Success = $false; ExitCode = 1; Output = [string]$_.Exception.Message
+                        }
+                    }
                 }
                 finally {
                     if ($taskRegistered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
                     Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
                 }
             }
-            [pscustomobject]@{ Lines = @($upgradeLines); Notes = @($notes) }
+            [pscustomobject]@{ Lines = @($upgradeLines); Notes = @($notes); Packages = @($packageResults) }
         }
 
         function Invoke-WingetCliPackageUpdate {
@@ -1219,14 +1304,13 @@ finally {
                     }
                     $wingetDiagnosticOutput = "$emptyVerificationSummary`r`nModulausgabe:`r`n$moduleEmptyOutput`r`nCLI-Gegenprüfung:`r`n$([string]$cliQueryResult.DiagnosticOutput)"
                 }
-                # Die normale WinGet-Abfrage läuft im Remoting-Benutzerkontext.
-                # Ergänze im Check benutzerbezogene Updates angemeldeter
-                # interaktiver Benutzer, z. B. VS Code User. Installationsläufe
-                # bleiben auf den bisherigen ausführenden Kontext beschränkt.
-                if ($ExecutionMode -eq 'Check') {
-                    $interactiveQuery = Get-WingetInteractiveUserUpgradeLines
+                # Ergänze benutzerbezogene Updates angemeldeter interaktiver
+                # Benutzer. Beim Installationslauf werden sie in derselben
+                # Benutzersitzung aktualisiert, in der der Check sie gefunden hat.
+                if ($ExecutionMode -in @('Check', 'Install')) {
+                    $interactiveQuery = Get-WingetInteractiveUserUpgradeLines -InstallUpdates:($ExecutionMode -eq 'Install')
                     $interactiveLines = @($interactiveQuery.Lines)
-                    if ($interactiveLines.Count -gt 0) {
+                    if ($ExecutionMode -eq 'Check' -and $interactiveLines.Count -gt 0) {
                         $knownPackages = @{}
                         foreach ($existingLine in @(Get-WingetUpgradeLines -Output $availableOutput)) {
                             $existingMatch = [regex]::Match([string]$existingLine, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
@@ -1245,6 +1329,29 @@ finally {
                         }
                         if (@($additionalLines).Count -gt 0) {
                             $availableOutput = (@($availableOutput, @($additionalLines)) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join [Environment]::NewLine
+                        }
+                    }
+                    if ($ExecutionMode -eq 'Install') {
+                        foreach ($interactivePackage in @($interactiveQuery.Packages)) {
+                            $displayName = "[$($interactivePackage.UserName)] $($interactivePackage.Name)"
+                            $packageRow = [pscustomobject]@{
+                                Name = $displayName; Id = $interactivePackage.Id
+                                InstalledVersion = $interactivePackage.InstalledVersion
+                                AvailableVersion = $interactivePackage.AvailableVersion
+                                Source = $interactivePackage.Source
+                            }
+                            $packageOutput = [string]$interactivePackage.Output
+                            $manualAction = -not [bool]$interactivePackage.Success
+                            $manualText = if ($manualAction) {
+                                "Benutzerbezogenes WinGet-Update '$($interactivePackage.Name)' für '$($interactivePackage.UserName)' fehlgeschlagen (Exitcode $($interactivePackage.ExitCode)). $packageOutput"
+                            } else { '' }
+                            $result += [pscustomobject]@{
+                                Manager='Winget'; Available=$true; Success=([bool]$interactivePackage.Success)
+                                Skipped=$false; SkipReason=''; ExitCode=[int]$interactivePackage.ExitCode
+                                Packages=@($packageRow); AvailableOutput=''; ActionOutput=$packageOutput
+                                RequiresManualAction=$manualAction; ManualActionText=$manualText
+                                InteractiveUser=[string]$interactivePackage.UserName
+                            }
                         }
                     }
                     if (@($interactiveQuery.Notes).Count -gt 0) {
