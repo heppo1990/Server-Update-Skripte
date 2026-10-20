@@ -1307,20 +1307,15 @@ finally {
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
             if ($ExecutionMode -eq 'Check' -and $wingetPath) {
-                try {
-                    $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
-                    if ($appInstallerRegistration.RegistrationChanged) {
-                        $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) für den aktuellen Benutzer registriert."
-                        $wingetPath = Resolve-WingetExecutable
-                        $wingetReconnectRequired = $true
-                    }
-                }
-                catch {
-                    $registrationError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-                    if ($registrationError.Length -gt 250) { $registrationError = $registrationError.Substring(0, 247) + '...' }
-                    $wingetBootstrapMessage += ' App-Installer-Registrierung fehlgeschlagen; Details im Log.'
-                    $wingetDiagnosticOutput += "App-Installer-Registrierung:`r`n$($_.Exception.ToString())`r`n"
-                }
+                # Eine Check-Abfrage benötigt keine App-Installer-Registrierung.
+                # Auf Servern kann die neueste systemweit bereitgestellte
+                # Version für den Remoting-Benutzer noch nicht registrierbar
+                # sein (z. B. fehlende Windows-App-Runtime-Abhängigkeit). Das
+                # Registrieren per Add-AppxPackage kann den WinRM-Anbieterhost
+                # beschädigen. Die vorhandene winget.exe reicht für den CLI-
+                # Fallback aus; App Installer selbst bleibt als normales
+                # WinGet-Paket auffindbar und aktualisierbar.
+                $wingetBootstrapMessage += ' Vorhandene App-Installer-Registrierung bleibt für die Update-Abfrage unverändert.'
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
                 try {
