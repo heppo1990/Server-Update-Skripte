@@ -1309,15 +1309,27 @@ finally {
             $wingetQuerySources = @()
             $wingetModuleUseAllowed = $true
             if ($ExecutionMode -eq 'Check' -and $wingetPath) {
-                # Eine Check-Abfrage benötigt keine App-Installer-Registrierung.
-                # Auf Servern kann die neueste systemweit bereitgestellte
-                # Version für den Remoting-Benutzer noch nicht registrierbar
-                # sein (z. B. fehlende Windows-App-Runtime-Abhängigkeit). Das
-                # Registrieren per Add-AppxPackage kann den WinRM-Anbieterhost
-                # beschädigen. Die vorhandene winget.exe reicht für den CLI-
-                # Fallback aus; App Installer selbst bleibt als normales
-                # WinGet-Paket auffindbar und aktualisierbar.
-                $wingetBootstrapMessage += ' Vorhandene App-Installer-Registrierung bleibt für die Update-Abfrage unverändert.'
+                # WinGet.Client benötigt für seine COM-Abfrage eine AppX-
+                # Registrierung im tatsächlich ausführenden Benutzerkonto.
+                # Eine winget.exe im WindowsApps-Verzeichnis allein reicht
+                # nicht: ein Paket, das nur für einen anderen Benutzer oder
+                # nur für SYSTEM gestaged ist, lässt den Modulaufruf scheitern.
+                try {
+                    $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
+                    if ($appInstallerRegistration.RegistrationChanged) {
+                        $wingetPath = Resolve-WingetExecutable
+                        $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) für den aktuellen Remoting-Benutzer registriert; WinGet-Abfrage wird in einer neuen Verbindung fortgesetzt."
+                        $wingetReconnectRequired = $true
+                    } else {
+                        $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) ist für den aktuellen Remoting-Benutzer bereits registriert."
+                    }
+                }
+                catch {
+                    $wingetPreparationSucceeded = $false
+                    $wingetModuleUseAllowed = $false
+                    $wingetBootstrapMessage += ' App Installer konnte für den aktuellen Remoting-Benutzer nicht registriert werden; WinGet-Modulabfrage wird nicht gestartet.'
+                    $wingetDiagnosticOutput += "App-Installer-Registrierung:`r`n$($_.Exception.ToString())`r`n"
+                }
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
                 try {
