@@ -187,6 +187,7 @@ function Invoke-PackageManagerUpdates {
     # Erfolgreiche Pakete erst sammeln und danach je Manager kompakt ausgeben.
     $successfulPackagesByManager = @{}
     $manualPackageCount = 0
+    $manualPackageActions = [System.Collections.Generic.List[object]]::new()
     $noUpdatesFoundByManager = @{}
     $managerHadFailure = @{}
     foreach ($result in $results) {
@@ -220,7 +221,11 @@ function Invoke-PackageManagerUpdates {
           $errorSummary = "Update konnte nicht automatisch abgeschlossen werden (Exitcode: $($result.ExitCode)). Details im Laufprotokoll."
         }
         if ($requiresManualAction) {
-          Write-ScriptLog "WARNUNG: Manuelle Prüfung/Aktion bei $($result.Manager) auf ${Servername} erforderlich: $errorSummary"
+          $manualPackageActions.Add([pscustomobject]@{
+            Manager = [string]$result.Manager
+            Packages = @($result.Packages)
+            Text = $errorSummary
+          })
         } else {
           Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $errorSummary"
         }
@@ -307,7 +312,18 @@ function Invoke-PackageManagerUpdates {
     if ($successfulPackagesByManager.Count -eq 0 -and $manualPackageCount -eq 0) { Write-ScriptLog '' }
     if ($manualPackageCount -gt 0) {
       $manualPackageLabel = if ($manualPackageCount -eq 1) { 'Paket' } else { 'Pakete' }
-      Write-ScriptLog "Manuelles Eingreifen bei $manualPackageCount $manualPackageLabel auf ${Servername} erforderlich."
+      Write-ScriptLog "Manuelle Aktion erforderlich: $manualPackageCount $manualPackageLabel auf ${Servername}."
+      foreach ($manualAction in $manualPackageActions) {
+        $manualRows = @($manualAction.Packages)
+        $manualPackageName = if ($manualRows.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$manualRows[0].Name)) {
+          [string]$manualRows[0].Name
+        } elseif ($manualRows.Count -gt 0) {
+          [string]$manualRows[0].Id
+        } else {
+          [string]$manualAction.Manager
+        }
+        Write-ScriptLog "  $manualPackageName`: $($manualAction.Text)"
+      }
       Write-ScriptLog ''
     }
     return $results
