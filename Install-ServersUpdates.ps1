@@ -2032,6 +2032,7 @@ $LinuxUpdatesFailed = 0
 $LinuxRebootScheduleFailures = 0
 $HAUpdatesInstalled = 0
 $HAUpdatesFailed = 0
+$HASkippedHosts = 0
 $LinuxScriptExecuted = $false
 $HAScriptExecuted = $false
 $IsWindowsOnlyRun = $TargetComputer -and $TargetComputer.Count -gt 0
@@ -2146,6 +2147,9 @@ if ($IsWindowsOnlyRun) {
       } else {
         $HAUpdatesFailed = 0
       }
+      if ($HAStats.PSObject.Properties.Name -contains 'SkippedHosts') {
+        $HASkippedHosts = [int]$HAStats.SkippedHosts
+      }
       
       if ($HAStats.PSObject.Properties.Name -contains 'HostStatus') {
         $HAUpdateDetails = $HAStats.HostStatus
@@ -2156,7 +2160,7 @@ if ($IsWindowsOnlyRun) {
         $script:VMRebootIndex += [int]$HAStats.VMRebootsScheduled
       }
       
-      Write-ScriptLog "HA-Stats: $HAServerCount Instanz(en), $HAUpdatesInstalled Update(s) installiert, $HAUpdatesFailed fehlgeschlagen"
+      Write-ScriptLog "HA-Stats: $HAServerCount Instanz(en), $HAUpdatesInstalled Update(s) installiert, $HAUpdatesFailed fehlgeschlagen, $HASkippedHosts übersprungen"
       
       Remove-Item $HAStatsFile -Force -ErrorAction SilentlyContinue
       Write-ScriptLog "HA-Stats-Datei gelöscht: $HAStatsFile"
@@ -2757,8 +2761,11 @@ if ($HAScriptExecuted) {
   if ($HAUpdateDetails -and $HAUpdateDetails.Count -gt 0) {
     foreach ($hostInfo in $HAUpdateDetails) {
       $RepBody += "<div class='server-title'>Instanz: $($hostInfo.Host)</div>"
-      
-      if ($hostInfo.UpdateCount -gt 0 -or $hostInfo.Status -eq "Erfolgreich") {
+
+      if ($hostInfo.Status -eq 'Übersprungen') {
+        $skipDetailsHtml = [System.Net.WebUtility]::HtmlEncode([string]$hostInfo.Details)
+        $RepBody += "<div class='info-box'><p><strong>Status:</strong> Übersprungen</p><p>$skipDetailsHtml</p></div>"
+      } elseif ($hostInfo.UpdateCount -gt 0 -or $hostInfo.Status -eq "Erfolgreich") {
         $RepBody += "<p><strong>Status:</strong> $($hostInfo.Status)</p>"
         
         if ($hostInfo.UpdateCount) {
@@ -2838,6 +2845,13 @@ if ($TotalUpdatesInstalled -eq 0 -and $DeferredUpdatesPlanned -gt 0) {
 <div class="summary warning">
     <p><strong>✅ Im Hauptlauf wurden keine Updates installiert.</strong></p>
     <p>$DeferredUpdatesPlanned zurückgestellte Update(s) sind zur Nachinstallation eingeplant.</p>
+</div>
+"@
+} elseif ($TotalUpdatesInstalled -eq 0 -and $HASkippedHosts -gt 0) {
+  $RepBody += @"
+<div class="summary warning">
+    <p><strong>Es wurden keine Updates installiert.</strong></p>
+    <p>$HASkippedHosts Home-Assistant-Instanz(en) wurden übersprungen, weil SSH nicht erreichbar war. Diese Instanzen wurden nicht auf verfügbare Updates geprüft.</p>
 </div>
 "@
 } elseif ($TotalUpdatesInstalled -eq 0) {
@@ -2934,6 +2948,7 @@ $summaryLines += @('', "Updates installiert: $TotalUpdatesInstalled", "  • Win
 if ($PackageUpdateCount -gt 0) { $summaryLines += "  • Anwendungen: $PackageUpdateCount (Winget: $WingetUpdateCount, Chocolatey: $ChocolateyUpdateCount)" }
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesInstalled" }
 if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesInstalled" }
+if ($HASkippedHosts -gt 0) { $summaryLines += "  • Home Assistant übersprungen: $HASkippedHosts (SSH nicht erreichbar; nicht auf Updates geprüft)" }
 $summaryLines += @('', "Fehler: $TotalUpdatesFailed", "  • Windows: $ErrorCount")
 if (@($ManualActions).Count -gt 0) { $summaryLines += "Manuelle Prüfung/Aktion erforderlich: $(@($ManualActions).Count)" }
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesFailed" }

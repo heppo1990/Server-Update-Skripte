@@ -126,6 +126,64 @@ function Write-HostLog {
     }
 }
 
+function Test-HAEndpointAvailable {
+    param(
+        [Parameter(Mandatory)][string]$RemoteHost,
+        [Parameter(Mandatory)][int]$RemotePort,
+        [ValidateRange(100, 30000)][int]$TimeoutMilliseconds = 3000
+    )
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    $connectResult = $null
+    try {
+        $connectResult = $client.BeginConnect($RemoteHost, $RemotePort, $null, $null)
+        if (-not $connectResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds, $false)) { return $false }
+        $client.EndConnect($connectResult)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($connectResult -and $connectResult.AsyncWaitHandle) { $connectResult.AsyncWaitHandle.Close() }
+        $client.Close()
+    }
+}
+
+# SSH ist auf Home Assistant im Normalbetrieb ausgeschaltet. Wenn der Host
+# deshalb nicht erreichbar ist, überspringen wir den HA-Zweig ohne Passwort-
+# oder Key-Setup-Versuch und melden den Status ausdrücklich als übersprungen.
+if (-not $CheckOnly -and -not $ConnectionOnly -and -not (Test-HAEndpointAvailable -RemoteHost $HAHost -RemotePort $Port)) {
+    $skipReason = "SSH-Port $Port auf $HAHost ist nicht erreichbar; Home-Assistant-Updates wurden übersprungen. SSH für einen HA-Update-Lauf einschalten."
+    Write-HostLog -Message $skipReason -RemoteHost $HAHost -LogFile $LogFile -Level Info
+
+    $skippedHost = [PSCustomObject]@{
+        Host = $HAHost
+        Status = 'Übersprungen'
+        UpdateCount = 0
+        Summary = $skipReason
+        Details = $skipReason
+        LogFile = $LogFile
+    }
+    $skippedStats = @{
+        TotalHosts = 1
+        SuccessfulUpdates = 0
+        FailedUpdates = 0
+        SkippedHosts = 1
+        ComponentsUpdated = @{ Core = $false; Supervisor = $false; OS = $false; Addons = 0 }
+        TotalComponentsUpdated = 0
+        BackupCreated = $false
+        RebootPerformed = $false
+        RebootScheduled = $false
+        VMRebootsScheduled = 0
+        PendingPhysicalReboot = $null
+        ErrorCount = 0
+        HostStatus = @($skippedHost)
+    }
+    $skippedStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $LogDir 'ha_update_stats.json') -Encoding utf8
+    return
+}
+
 Write-HostLog -Message "Starte Update-Installation auf Home-Assistant-Server $HAHost..." -RemoteHost $HAHost -LogFile $LogFile -Level Info
 
 function Get-NextHARebootTime {
