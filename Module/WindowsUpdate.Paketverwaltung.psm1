@@ -453,12 +453,15 @@ catch {
         }
 
         function Invoke-WingetCliUpgradeQuery {
-            param([Parameter(Mandatory)][string]$Path)
+            param(
+                [Parameter(Mandatory)][string]$Path,
+                [ValidateSet('machine', 'user')][string]$Scope
+            )
             if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
                 throw 'winget.exe wurde für den CLI-Fallback nicht gefunden.'
             }
-            $cliResult = Invoke-WingetRunspaceWithTimeout -ArgumentList @($Path) -TimeoutSeconds 210 -ScriptBlock {
-                param([string]$WingetPath)
+            $cliResult = Invoke-WingetRunspaceWithTimeout -ArgumentList @($Path, $Scope) -TimeoutSeconds 210 -ScriptBlock {
+                param([string]$WingetPath, [string]$QueryScope)
                 $ErrorActionPreference = 'Stop'
                 $runtimeContext = [pscustomobject]@{
                     Executable = $WingetPath
@@ -573,6 +576,7 @@ catch {
                         'list', '--upgrade-available',
                         '--accept-source-agreements', '--disable-interactivity'
                     )
+                    if (-not [string]::IsNullOrWhiteSpace($QueryScope)) { $arguments += @('--scope', $QueryScope) }
                     if ($queryDefinition.Explicit) { $arguments += @('--source', $sourceName) }
                     try {
                         $queryResult = Invoke-WingetCliHidden -Executable $WingetPath -Arguments $arguments
@@ -758,7 +762,7 @@ try {
     # Die Benutzerabfrage beschränkt sich auf die WinGet-Communityquelle.
     # msstore kann trotz NonInteractive-Option eine interaktive Zustimmung
     # anfordern und dadurch die geplante Aufgabe bis zum Timeout blockieren.
-    $startInfo.Arguments = 'list --upgrade-available --source winget --accept-source-agreements --disable-interactivity'
+    $startInfo.Arguments = 'list --upgrade-available --scope user --source winget --accept-source-agreements --disable-interactivity'
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $false
     $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Normal
@@ -836,7 +840,7 @@ try {
         [IO.File]::Move($temporaryProgressPath, $progressPath)
         foreach ($package in $packagesToInstall) {
             $arguments = @(
-                'upgrade', '--id', $package.Id, '--exact', '--source', $package.Source,
+                'upgrade', '--id', $package.Id, '--exact', '--scope', 'user', '--source', $package.Source,
                 '--version', $package.AvailableVersion, '--silent',
                 '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity'
             )
@@ -1006,13 +1010,18 @@ finally {
                 [Parameter(Mandatory)][string]$Path,
                 [Parameter(Mandatory)][string]$Id,
                 [Parameter(Mandatory)][string]$Source,
-                [Parameter(Mandatory)][string]$Version
+                [Parameter(Mandatory)][string]$Version,
+                [ValidateSet('machine', 'user')][string]$Scope
             )
             try {
                 $arguments = @(
                     'upgrade', '--id', $Id, '--exact', '--source', $Source, '--version', $Version,
                     '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity'
                 )
+                if (-not [string]::IsNullOrWhiteSpace($Scope)) {
+                    $arguments = @('upgrade', '--id', $Id, '--exact', '--scope', $Scope, '--source', $Source, '--version', $Version,
+                        '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+                }
                 $output = (& $Path @arguments 2>&1 | Out-String -Width 1200).Trim()
                 $exitCode = $LASTEXITCODE
                 $summary = if ([string]::IsNullOrWhiteSpace($output)) { "winget.exe upgrade endete mit Exitcode $exitCode." } else { $output }
@@ -1382,6 +1391,20 @@ finally {
                 try {
                 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
                 $wingetCliFallback = $false
+                if ($ExecutionMode -eq 'Install') {
+                    # Im Installationslauf wird der Maschinen-Scope zuerst
+                    # gezielt abgefragt. Die Benutzer-Scope-Abfrage folgt erst
+                    # nach Abschluss dieser Pakete in der interaktiven Sitzung.
+                    $cliQueryResult = Invoke-WingetCliUpgradeQuery -Path $wingetPath -Scope machine
+                    $availableOutput = [string]$cliQueryResult.Output
+                    $wingetCliFallback = $true
+                    $machineScopeSummary = "WinGet-Installationsabfrage auf Maschinen-Scope begrenzt; Quellen $(@($cliQueryResult.Sources) -join ', ')."
+                    if (@($cliQueryResult.FailedSources).Count -gt 0) {
+                        $machineScopeSummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
+                    }
+                    $wingetDiagnosticOutput = "$machineScopeSummary`r`n$([string]$cliQueryResult.DiagnosticOutput)"
+                }
+                else {
                 try {
                     $availableOutput = Get-WingetModuleUpdateOutput
                 }
@@ -1424,13 +1447,15 @@ finally {
                     }
                     $wingetDiagnosticOutput = "$emptyVerificationSummary`r`nModulausgabe:`r`n$moduleEmptyOutput`r`nCLI-Gegenprüfung:`r`n$([string]$cliQueryResult.DiagnosticOutput)"
                 }
-                # Ergänze benutzerbezogene Updates angemeldeter interaktiver
-                # Benutzer. Beim Installationslauf werden sie in derselben
-                # Benutzersitzung aktualisiert, in der der Check sie gefunden hat.
-                if ($ExecutionMode -in @('Check', 'Install')) {
-                    $interactiveQuery = Get-WingetInteractiveUserUpgradeLines -InstallUpdates:($ExecutionMode -eq 'Install')
+                }
+                # Im Check werden benutzerbezogene Updates zusätzlich ermittelt.
+                # Bei der Installation folgt diese Abfrage erst nach den
+                # maschinenweiten Paketen, damit gemeinsame Installer wie MSI
+                # nicht gleichzeitig aus beiden Benutzerkontexten gestartet werden.
+                if ($ExecutionMode -eq 'Check') {
+                    $interactiveQuery = Get-WingetInteractiveUserUpgradeLines
                     $interactiveLines = @($interactiveQuery.Lines)
-                    if ($ExecutionMode -eq 'Check' -and $interactiveLines.Count -gt 0) {
+                    if ($interactiveLines.Count -gt 0) {
                         $knownPackages = @{}
                         foreach ($existingLine in @(Get-WingetUpgradeLines -Output $availableOutput)) {
                             $existingMatch = [regex]::Match([string]$existingLine, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
@@ -1449,29 +1474,6 @@ finally {
                         }
                         if (@($additionalLines).Count -gt 0) {
                             $availableOutput = (@($availableOutput, @($additionalLines)) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join [Environment]::NewLine
-                        }
-                    }
-                    if ($ExecutionMode -eq 'Install') {
-                        foreach ($interactivePackage in @($interactiveQuery.Packages)) {
-                            $displayName = "[$($interactivePackage.UserName)] $($interactivePackage.Name)"
-                            $packageRow = [pscustomobject]@{
-                                Name = $displayName; Id = $interactivePackage.Id
-                                InstalledVersion = $interactivePackage.InstalledVersion
-                                AvailableVersion = $interactivePackage.AvailableVersion
-                                Source = $interactivePackage.Source
-                            }
-                            $packageOutput = [string]$interactivePackage.Output
-                            $manualAction = -not [bool]$interactivePackage.Success
-                            $manualText = if ($manualAction) {
-                                "Benutzerbezogenes WinGet-Update '$($interactivePackage.Name)' für '$($interactivePackage.UserName)' fehlgeschlagen (Exitcode $($interactivePackage.ExitCode)). $packageOutput"
-                            } else { '' }
-                            $result += [pscustomobject]@{
-                                Manager='Winget'; Available=$true; Success=([bool]$interactivePackage.Success)
-                                Skipped=$false; SkipReason=''; ExitCode=[int]$interactivePackage.ExitCode
-                                Packages=@($packageRow); AvailableOutput=''; ActionOutput=$packageOutput
-                                RequiresManualAction=$manualAction; ManualActionText=$manualText
-                                InteractiveUser=[string]$interactivePackage.UserName
-                            }
                         }
                     }
                     if (@($interactiveQuery.Notes).Count -gt 0) {
@@ -1595,12 +1597,12 @@ finally {
                         $packageActionOutput = ''
                         try {
                             if ($wingetCliFallback) {
-                                $moduleUpdate = Invoke-WingetCliPackageUpdate -Path $wingetPath -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
+                                $moduleUpdate = Invoke-WingetCliPackageUpdate -Path $wingetPath -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value -Scope machine
                             } else {
                                 $moduleUpdate = Invoke-WingetModulePackageUpdate -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
                                 if (-not $moduleUpdate.Success) {
                                     $moduleFailureOutput = [string]$moduleUpdate.Output
-                                    $cliUpdate = Invoke-WingetCliPackageUpdate -Path $wingetPath -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
+                                    $cliUpdate = Invoke-WingetCliPackageUpdate -Path $wingetPath -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value -Scope machine
                                     if ($cliUpdate.Success) {
                                         $moduleUpdate = $cliUpdate
                                     }
@@ -1632,7 +1634,7 @@ finally {
                                 }
                                 $packageActionOutput += "`nGezieltes Aktualisieren der WinGet-Quelle nach HTTP-404 (ExitCode $sourceUpdateExitCode):`n$($sourceUpdateOutput.Trim())"
                                 if ($sourceUpdateExitCode -eq 0) {
-                                    $retryResult = Invoke-WingetModulePackageUpdate -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value
+                                    $retryResult = Invoke-WingetCliPackageUpdate -Path $wingetPath -Id $packageId -Source $packageSource -Version $packageMatch.Groups['AvailableVersion'].Value -Scope machine
                                     $packageExitCode = [int]$retryResult.ExitCode
                                     $packageActionOutput += "`nErneuter Paketversuch nach Quellenaktualisierung:`n$([string]$retryResult.Output)"
                                 }
@@ -1709,6 +1711,34 @@ finally {
                         $actionOutput = $wingetFailureDetails -join ' '
                     }
                     $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($sourceFailureLines.Count -eq 0); Skipped=$false; SkipReason=''; ExitCode=$(if ($sourceFailureLines.Count -gt 0) { 1 } else { 0 }); Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
+                }
+                }
+                if ($ExecutionMode -eq 'Install') {
+                    $interactiveQuery = Get-WingetInteractiveUserUpgradeLines -InstallUpdates
+                    foreach ($interactivePackage in @($interactiveQuery.Packages)) {
+                        $displayName = "[$($interactivePackage.UserName)] $($interactivePackage.Name)"
+                        $packageRow = [pscustomobject]@{
+                            Name = $displayName; Id = $interactivePackage.Id
+                            InstalledVersion = $interactivePackage.InstalledVersion
+                            AvailableVersion = $interactivePackage.AvailableVersion
+                            Source = $interactivePackage.Source
+                        }
+                        $packageOutput = [string]$interactivePackage.Output
+                        $manualAction = -not [bool]$interactivePackage.Success
+                        $manualText = if ($manualAction) {
+                            "Benutzerbezogenes WinGet-Update '$($interactivePackage.Name)' für '$($interactivePackage.UserName)' fehlgeschlagen (Exitcode $($interactivePackage.ExitCode)). $packageOutput"
+                        } else { '' }
+                        $result += [pscustomobject]@{
+                            Manager='Winget'; Available=$true; Success=([bool]$interactivePackage.Success)
+                            Skipped=$false; SkipReason=''; ExitCode=[int]$interactivePackage.ExitCode
+                            Packages=@($packageRow); AvailableOutput=''; ActionOutput=$packageOutput
+                            RequiresManualAction=$manualAction; ManualActionText=$manualText
+                            InteractiveUser=[string]$interactivePackage.UserName
+                        }
+                    }
+                    if (@($interactiveQuery.Notes).Count -gt 0) {
+                        $wingetDiagnosticOutput += "`r`nAbfrage angemeldeter Benutzer nach maschinenweiten Updates:`r`n$(@($interactiveQuery.Notes) -join "`r`n")"
+                    }
                 }
                 }
                 catch {
