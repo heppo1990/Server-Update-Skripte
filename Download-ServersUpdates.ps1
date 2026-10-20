@@ -273,6 +273,7 @@ if ($ServerADList -ne $null) {
           $WindowsUnreachableHosts++
           $skipMessage = 'WinRM über HTTP (5985) und HTTPS (5986) ist nicht erreichbar; Ziel wird in diesem Lauf übersprungen.'
           Write-ScriptLog "HINWEIS: $Servername – $skipMessage"
+          Write-WindowsUpdateConsoleLine -Message '  [Übersprungen] WinRM-Ports 5985/5986 nicht erreichbar.' -AlreadyFiltered
           $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
           $skipHtml = [System.Net.WebUtility]::HtmlEncode($skipMessage)
           $RepBody += "<div class='warning-box'><strong>Download auf $serverHtml übersprungen.</strong> $skipHtml</div>"
