@@ -712,6 +712,33 @@ catch {
             }
             $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+            # Entferne verwaiste, nicht mehr laufende Aufgaben aus abgebrochenen
+            # WinGet-Benutzerläufen. Aktive Aufgaben bleiben unangetastet, damit
+            # parallele Installationsläufe nicht unterbrochen werden.
+            try {
+                $orphanedTasks = @(Get-ScheduledTask -ErrorAction Stop |
+                    Where-Object { $_.TaskName -like 'WindowsUpdateAdm-WinGetCheck-*' -or $_.TaskName -like 'WindowsUpdateAdm-WinGetInstall-*' })
+                $removedTaskCount = 0
+                $activeTaskCount = 0
+                foreach ($orphanedTask in $orphanedTasks) {
+                    if ([string]$orphanedTask.State -eq 'Running') {
+                        $activeTaskCount++
+                        continue
+                    }
+                    try {
+                        Unregister-ScheduledTask -TaskName $orphanedTask.TaskName -TaskPath $orphanedTask.TaskPath -Confirm:$false -ErrorAction Stop
+                        $removedTaskCount++
+                    } catch {
+                        $notes += "Verwaiste WinGet-Aufgabe '$($orphanedTask.TaskPath)$($orphanedTask.TaskName)' konnte nicht entfernt werden: $($_.Exception.Message)"
+                    }
+                }
+                if ($removedTaskCount -gt 0) { $notes += "$removedTaskCount verwaiste, nicht laufende WinGet-Benutzeraufgabe(n) aus früheren Läufen entfernt." }
+                if ($activeTaskCount -gt 0) { $notes += "$activeTaskCount aktive WinGet-Benutzeraufgabe(n) aus früheren oder parallelen Läufen bleiben unangetastet." }
+            } catch {
+                $notes += "Verwaiste WinGet-Benutzeraufgaben konnten nicht geprüft werden: $($_.Exception.Message)"
+            }
+
             $users = @{}
             $explorerProcesses = @()
             try {
@@ -1035,7 +1062,19 @@ finally {
                     }
                 }
                 finally {
-                    if ($taskRegistered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
+                    if ($taskRegistered) {
+                        try {
+                            $registeredTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                            if ([string]$registeredTask.State -eq 'Running' -and -not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                                Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                                $notes += "Nicht abgeschlossene WinGet-Benutzeraufgabe '$taskName' für '$userName' nach Fehler/Timeout gestoppt."
+                            }
+                            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+                            $notes += "Temporäre WinGet-Benutzeraufgabe '$taskName' für '$userName' entfernt."
+                        } catch {
+                            $notes += "Temporäre WinGet-Benutzeraufgabe '$taskName' für '$userName' konnte nicht vollständig bereinigt werden: $($_.Exception.Message)"
+                        }
+                    }
                     Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
                     Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
                     Remove-Item -LiteralPath "$progressPath.tmp" -Force -ErrorAction SilentlyContinue
