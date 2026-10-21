@@ -57,6 +57,87 @@ function Invoke-WindowsUpdatePackageManagers {
     $packageScript = {
         param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true)
 
+        function Invoke-WinGetCurrentUserAppxTask {
+            param(
+                [Parameter(Mandatory)][string]$ScriptText,
+                [ValidateRange(30, 1800)][int]$TimeoutSeconds = 600,
+                [Parameter(Mandatory)][string]$Purpose
+            )
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $userName = [string]$identity.Name
+            if ([string]::IsNullOrWhiteSpace($userName) -or $userName -match '^NT AUTHORITY\\SYSTEM$') {
+                throw "AppX-Benutzeraufgabe für '$Purpose' benötigt ein konkretes Benutzerkonto; erkannt: '$userName'."
+            }
+
+            $taskName = 'WindowsUpdateAdm-WinGetAppX-' + [guid]::NewGuid().ToString('N')
+            $taskRoot = Join-Path ([IO.Path]::GetTempPath()) $taskName
+            $resultPath = Join-Path $taskRoot 'result.json'
+            $taskScriptPath = Join-Path $taskRoot 'worker.ps1'
+            $taskRegistered = $false
+            try {
+                New-Item -Path $taskRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject @{
+                    ScriptText = $ScriptText
+                    ResultPath = $resultPath
+                })))
+                $worker = @'
+$ErrorActionPreference = 'Stop'
+$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
+$response = [ordered]@{ Success = $false; Output = ''; Error = '' }
+try {
+    $captured = @(& ([scriptblock]::Create([string]$payload.ScriptText)) *>&1)
+    $response.Output = ($captured | Out-String -Width 300).Trim()
+    $response.Success = $true
+} catch {
+    $response.Error = $_.Exception.ToString()
+    $response.Output = (@($response.Output, ($_.ErrorDetails.Message), ($_.Exception.Message)) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join [Environment]::NewLine
+}
+try {
+    [IO.File]::WriteAllText([string]$payload.ResultPath, ($response | ConvertTo-Json -Compress -Depth 4), [Text.UTF8Encoding]::new($false))
+} catch { exit 2 }
+if (-not $response.Success) { exit 1 }
+'@ -replace '__PAYLOAD__', $payload
+                [IO.File]::WriteAllText($taskScriptPath, $worker, [Text.UTF8Encoding]::new($false))
+                $powershellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                $action = New-ScheduledTaskAction -Execute $powershellPath -Argument ('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $taskScriptPath)
+
+                # Wenn das Remoting-Konto angemeldet ist, muss AppX im interaktiven
+                # Profil registrieren (der auf SRVTS01 nachgewiesene PLM-Fall).
+                # Ohne Sitzung wird dieselbe Identität als S4U-Aufgabe verwendet;
+                # die Nutzlast liegt lokal, daher braucht die Aufgabe keinen Netzzugriff.
+                $hasInteractiveSession = $false
+                try {
+                    $processes = @(Get-Process -Name explorer -IncludeUserName -ErrorAction Stop)
+                    $hasInteractiveSession = @($processes | Where-Object { [string]$_.UserName -ieq $userName }).Count -gt 0
+                } catch { }
+                $logonType = if ($hasInteractiveSession) { 'Interactive' } else { 'S4U' }
+                $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType $logonType -RunLevel Highest
+                $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSeconds) -StartWhenAvailable
+                Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+                $taskRegistered = $true
+                Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf) -and (Get-Date) -lt $deadline) {
+                    Start-Sleep -Milliseconds 500
+                }
+                if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                    $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+                    $lastResult = if ($taskInfo) { "; LastTaskResult=$($taskInfo.LastTaskResult)" } else { '' }
+                    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                    throw "AppX-Aufgabe '$Purpose' unter '$userName' (Anmeldetyp $logonType) lieferte nach $TimeoutSeconds Sekunden kein Ergebnis$lastResult."
+                }
+                $response = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+                if (-not $response.Success) {
+                    throw "AppX-Aufgabe '$Purpose' unter '$userName' (Anmeldetyp $logonType) fehlgeschlagen: $([string]$response.Error) $([string]$response.Output)"
+                }
+                return [pscustomobject]@{ UserName = $userName; LogonType = $logonType; Output = [string]$response.Output }
+            }
+            finally {
+                if ($taskRegistered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
+                if (Test-Path -LiteralPath $taskRoot -PathType Container) { Remove-Item -LiteralPath $taskRoot -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+        }
+
         function Invoke-WindowsUpdateHiddenProcess {
             param(
                 [Parameter(Mandatory)][string]$Path,
@@ -200,94 +281,66 @@ function Invoke-WindowsUpdatePackageManagers {
 
         function Ensure-WinGetSourcePackageForCurrentUser {
             param([switch]$Refresh)
-            # Die WinGet-Communityquelle wird als benutzerbezogenes AppX-Paket
-            # bereitgestellt. In nicht interaktiven WinRM-Sitzungen kann WinGet
-            # den Index zwar herunterladen, aber nicht zuverlässig registrieren.
-            # Deshalb fehlt er später trotz erreichbarer Quelle im Benutzerprofil.
-            # Ein Quellenreset kann einen veralteten Zustand allein nicht beheben.
-            # Ein vorhandenes Paket wird aber nur ersetzt, wenn das heruntergeladene
-            # MSIX tatsächlich neuer ist. Eine erneute AppX-Registrierung derselben
-            # Version kann auf Servern mit aktivem Paketprofil an PLM scheitern.
-            $bootstrapScript = @'
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$refreshSource = __REFRESH_SOURCE__
-$sourcePath = $null
-$sourceChanged = $false
-$sourceRefreshed = $false
-try {
-    $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
-        Where-Object { $_.Status -eq 'Ok' })
-    if ($registered.Count -eq 0 -or $refreshSource) {
-        $sourceWasRegistered = $registered.Count -gt 0
-        $sourcePath = Join-Path $env:TEMP ('winget-source-{0}.msix' -f [guid]::NewGuid().ToString('N'))
-        Invoke-WebRequest -Uri 'https://cdn.winget.microsoft.com/cache/source2.msix' `
-            -OutFile $sourcePath -UseBasicParsing -ErrorAction Stop
-
-        $shouldRegister = -not $sourceWasRegistered
-        if ($sourceWasRegistered) {
-            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
-            $archive = [System.IO.Compression.ZipFile]::OpenRead($sourcePath)
-            try {
-                $manifestEntry = $archive.GetEntry('AppxManifest.xml')
-                if (-not $manifestEntry) { throw 'Das WinGet-Quellenpaket enthält kein AppxManifest.xml.' }
-                $manifestReader = [System.IO.StreamReader]::new($manifestEntry.Open())
-                try { $manifest = [xml]$manifestReader.ReadToEnd() }
-                finally { $manifestReader.Dispose() }
-                $downloadVersion = [version]$manifest.Package.Identity.Version
-            }
-            finally { $archive.Dispose() }
-
-            $installedVersion = @($registered | Sort-Object { [version]$_.Version } -Descending |
-                Select-Object -First 1)[0].Version
-            $shouldRegister = $downloadVersion -gt [version]$installedVersion
-        }
-
-        if ($shouldRegister) {
-            $sourceChanged = $true
-            Add-AppxPackage -Path $sourcePath -ErrorAction Stop
+            # Quelle online im Remoting-Kontext beschaffen, AppX danach aber
+            # in einer kurzlebigen Aufgabe unter demselben Benutzer registrieren.
+            # So wird der auf SRVTS01 beobachtete PLM-Zugriff aus wsmprovhost vermieden.
             $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
-                Where-Object { $_.Status -eq 'Ok' })
-            if ($registered.Count -eq 0) {
-                throw 'Das WinGet-Quellenpaket wurde nach Add-AppxPackage im aktuellen Benutzerprofil nicht gefunden.'
+                Where-Object { $_.Status -eq 'Ok' } | Sort-Object { [version]$_.Version } -Descending)
+            $sourcePath = $null
+            $sourceChanged = $false
+            $sourceRefreshed = $false
+            $registrationTaskResult = $null
+            try {
+                if ($registered.Count -eq 0 -or $Refresh) {
+                    $sourceWasRegistered = $registered.Count -gt 0
+                    $sourcePath = Join-Path $env:TEMP ('winget-source-{0}.msix' -f [guid]::NewGuid().ToString('N'))
+                    Invoke-WebRequest -Uri 'https://cdn.winget.microsoft.com/cache/source2.msix' `
+                        -OutFile $sourcePath -UseBasicParsing -ErrorAction Stop
+
+                    $shouldRegister = -not $sourceWasRegistered
+                    if ($sourceWasRegistered) {
+                        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+                        $archive = [System.IO.Compression.ZipFile]::OpenRead($sourcePath)
+                        try {
+                            $manifestEntry = $archive.GetEntry('AppxManifest.xml')
+                            if (-not $manifestEntry) { throw 'Das WinGet-Quellenpaket enthält kein AppxManifest.xml.' }
+                            $manifestReader = [System.IO.StreamReader]::new($manifestEntry.Open())
+                            try { $manifest = [xml]$manifestReader.ReadToEnd() }
+                            finally { $manifestReader.Dispose() }
+                            $downloadVersion = [version]$manifest.Package.Identity.Version
+                        } finally { $archive.Dispose() }
+                        $installedVersion = [version]$registered[0].Version
+                        $shouldRegister = $downloadVersion -gt $installedVersion
+                    }
+
+                    if ($shouldRegister) {
+                        $quotedSourcePath = "'" + $sourcePath.Replace("'", "''") + "'"
+                        $registrationTaskResult = Invoke-WinGetCurrentUserAppxTask -Purpose 'WinGet-Quellenpaket registrieren' -ScriptText @"
+`$ErrorActionPreference = 'Stop'
+Add-AppxPackage -Path $quotedSourcePath -ErrorAction Stop
+"@
+                        $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
+                            Where-Object { $_.Status -eq 'Ok' } | Sort-Object { [version]$_.Version } -Descending)
+                        if ($registered.Count -eq 0) { throw 'Quellenpaket wurde nach der Benutzeraufgabe nicht registriert.' }
+                        $sourceChanged = $true
+                        $sourceRefreshed = $sourceWasRegistered
+                    }
+                }
+                if ($registered.Count -eq 0) { throw 'WinGet-Quellenpaket ist für den Remoting-Benutzer nicht registriert.' }
+                $marker = '__WINGETSOURCE__SUCCESS|{0}|{1}|{2}' -f [string]$registered[0].Version, $sourceChanged, $sourceRefreshed
             }
-            $sourceRefreshed = $sourceWasRegistered
-        }
-    }
-    [Console]::Out.WriteLine('__WINGETSOURCE__SUCCESS|{0}|{1}|{2}', [string]$registered[-1].Version, $sourceChanged, $sourceRefreshed)
-}
-catch {
-    [Console]::Error.WriteLine($_.Exception.ToString())
-    exit 1
-}
-finally {
-    if ($sourcePath -and (Test-Path -LiteralPath $sourcePath)) {
-        Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
-    }
-}
-'@
-            $refreshSourceLiteral = if ($Refresh) { '$true' } else { '$false' }
-            $bootstrapScript = $bootstrapScript.Replace('__REFRESH_SOURCE__', $refreshSourceLiteral)
-            $shellPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            if (-not (Test-Path -LiteralPath $shellPath -PathType Leaf)) {
-                throw 'Windows PowerShell 5.1 wurde für die WinGet-Quellenregistrierung nicht gefunden.'
+            finally {
+                if ($sourcePath -and (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                    Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+                }
             }
-            $encodedScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrapScript))
-            $processResult = Invoke-WindowsUpdateHiddenProcess -Path $shellPath -Arguments @(
-                '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedScript
-            )
-            $output = [string]$processResult.Output
-            $exitCode = [int]$processResult.ExitCode
-            $successLine = @($output -split "`r?`n" | Where-Object { $_ -match '^__WINGETSOURCE__SUCCESS\|' } | Select-Object -Last 1)
-            if ($exitCode -ne 0 -or $successLine.Count -eq 0) {
-                throw "Registrierung des WinGet-Quellenpakets fehlgeschlagen (Exitcode $exitCode): $output"
-            }
-            $successFields = $successLine[0] -split '\|', 4
             return [pscustomobject]@{
-                Changed = [bool]::Parse($successFields[2]) -and -not [bool]::Parse($successFields[3])
-                Version = $successFields[1]
-                Refreshed = [bool]::Parse($successFields[3])
-                Output = $output
+                Changed = $sourceChanged
+                Version = [string]$registered[0].Version
+                Refreshed = $sourceRefreshed
+                Output = $marker
+                UserName = if ($registrationTaskResult) { [string]$registrationTaskResult.UserName } else { [string][Security.Principal.WindowsIdentity]::GetCurrent().Name }
+                LogonType = if ($registrationTaskResult) { [string]$registrationTaskResult.LogonType } else { '' }
             }
         }
 
@@ -1293,13 +1346,77 @@ finally {
             $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
             $registrationChanged = $currentVersion -lt $targetVersion
             $installedFromGitHub = $false
+            $appxTaskRuns = @()
+
+            # Bei einem WinGet.Client/App-Installer-Versionskonflikt kann dessen
+            # COM-Reparatur selbst scheitern. In diesem Fall die aktuelle offizielle
+            # GitHub-Version dynamisch beziehen und im Benutzerkontext bereitstellen;
+            # keine feste Paketversion oder Hashwerte voraussetzen.
+            $clientModule = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue |
+                Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending | Select-Object -First 1)
+            $moduleVersion = if ($clientModule.Count -gt 0) { try { [version]$clientModule[0].Version } catch { [version]'0.0' } } else { [version]'0.0' }
+            $minimumAppInstallerVersion = if ($moduleVersion.Build -ge 0) {
+                [version]::new($moduleVersion.Major, $moduleVersion.Minor, $moduleVersion.Build, [Math]::Max(0, $moduleVersion.Revision))
+            } else { $moduleVersion }
+            if ($currentVersion -lt $minimumAppInstallerVersion) {
+                $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdate-WinGet-GitHub-' + [guid]::NewGuid().ToString('N'))
+                $extractRoot = Join-Path $payloadRoot 'Dependencies'
+                $bundlePath = Join-Path $payloadRoot 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+                $dependenciesZip = Join-Path $payloadRoot 'DesktopAppInstaller_Dependencies.zip'
+                try {
+                    New-Item -Path $extractRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                    $releaseBase = 'https://github.com/microsoft/winget-cli/releases/latest/download'
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    Invoke-WebRequest -Uri "$releaseBase/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" `
+                        -OutFile $bundlePath -UseBasicParsing -ErrorAction Stop
+                    Invoke-WebRequest -Uri "$releaseBase/DesktopAppInstaller_Dependencies.zip" `
+                        -OutFile $dependenciesZip -UseBasicParsing -ErrorAction Stop
+                    if ((Get-Item -LiteralPath $bundlePath).Length -le 0 -or (Get-Item -LiteralPath $dependenciesZip).Length -le 0) {
+                        throw 'Ein oder mehrere GitHub-Releasepakete sind leer.'
+                    }
+                    Expand-Archive -LiteralPath $dependenciesZip -DestinationPath $extractRoot -Force -ErrorAction Stop
+                    $dependencyPackages = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -ErrorAction Stop |
+                        Where-Object { $_.Extension -in '.appx', '.msix', '.appxbundle', '.msixbundle' -and $_.FullName -match '(?i)(x64|amd64|neutral)' } |
+                        Sort-Object FullName | ForEach-Object FullName)
+                    if ($dependencyPackages.Count -eq 0) { throw 'GitHub-Abhängigkeitenpaket enthält keine passenden AppX-Abhängigkeiten.' }
+                    $quotedBundlePath = "'" + $bundlePath.Replace("'", "''") + "'"
+                    $quotedDependencyList = @($dependencyPackages | ForEach-Object { "'" + ([string]$_).Replace("'", "''") + "'" }) -join ', '
+                    $appxTaskResult = Invoke-WinGetCurrentUserAppxTask -Purpose 'aktuelle App-Installer-Version aus GitHub bereitstellen' -ScriptText @"
+`$ErrorActionPreference = 'Stop'
+`$dependencies = @($quotedDependencyList)
+Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpdateFromAnyVersion -ErrorAction Stop | Out-Null
+"@
+                    $appxTaskRuns += $appxTaskResult
+                    $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+                        Where-Object { $_.Status -eq 'Ok' } | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+                    if ($registeredPackage.Count -eq 0 -or [version]$registeredPackage[0].Version -lt $minimumAppInstallerVersion) {
+                        $actualVersion = if ($registeredPackage.Count -gt 0) { [string]$registeredPackage[0].Version } else { 'nicht registriert' }
+                        throw "GitHub-Bereitstellung ergab App Installer $actualVersion; benötigt wird mindestens $minimumAppInstallerVersion."
+                    }
+                    $targetVersion = [version]$registeredPackage[0].Version
+                    $currentVersion = $targetVersion
+                    $registrationChanged = $true
+                    $installedFromGitHub = $true
+                }
+                catch {
+                    throw "App Installer ist für Microsoft.WinGet.Client $minimumAppInstallerVersion zu alt ($currentVersion); Bereitstellung aus dem offiziellen GitHub-Release fehlgeschlagen: $($_.Exception.ToString())"
+                }
+                finally {
+                    Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
             if ($registrationChanged) {
                 $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
-                if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                if (-not $installedFromGitHub -and -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
                     throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
                 }
-                try {
-                    Add-AppxPackage -Path $manifestPath -Register -DisableDevelopmentMode -ErrorAction Stop | Out-Null
+                if (-not $installedFromGitHub) { try {
+                    $quotedManifestPath = "'" + $manifestPath.Replace("'", "''") + "'"
+                    $appxTaskResult = Invoke-WinGetCurrentUserAppxTask -Purpose 'App Installer registrieren' -ScriptText @"
+`$ErrorActionPreference = 'Stop'
+Add-AppxPackage -Path $quotedManifestPath -Register -DisableDevelopmentMode -ErrorAction Stop | Out-Null
+"@
+                    $appxTaskRuns += $appxTaskResult
                 }
                 catch {
                     $registrationError = $_
@@ -1329,8 +1446,14 @@ finally {
                         if ($dependencyPackages.Count -eq 0) {
                             throw 'Das GitHub-Abhängigkeitenpaket enthält keine x64-/neutralen AppX-Abhängigkeiten.'
                         }
-                        Add-AppxPackage -Path $bundlePath -DependencyPath $dependencyPackages `
-                            -ForceUpdateFromAnyVersion -ErrorAction Stop | Out-Null
+                        $quotedBundlePath = "'" + $bundlePath.Replace("'", "''") + "'"
+                        $quotedDependencyList = @($dependencyPackages | ForEach-Object { "'" + ([string]$_).Replace("'", "''") + "'" }) -join ', '
+                        $appxTaskResult = Invoke-WinGetCurrentUserAppxTask -Purpose 'App Installer aus GitHub-Paket bereitstellen' -ScriptText @"
+`$ErrorActionPreference = 'Stop'
+`$dependencies = @($quotedDependencyList)
+Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpdateFromAnyVersion -ErrorAction Stop | Out-Null
+"@
+                        $appxTaskRuns += $appxTaskResult
                         $registrationChanged = $true
                         $installedFromGitHub = $true
                     }
@@ -1340,7 +1463,7 @@ finally {
                     finally {
                         Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
                     }
-                }
+                } }
             }
 
             $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
@@ -1352,6 +1475,7 @@ finally {
                 Version = [string]$registeredPackage[0].Version
                 RegistrationChanged = $registrationChanged
                 InstalledFromGitHub = [bool]$installedFromGitHub
+                TaskRuns = @($appxTaskRuns)
             }
         }
 
@@ -1516,6 +1640,7 @@ finally {
             $wingetInteractiveUserDiagnosticOutput = ''
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
+            $appInstallerRegistrationChanged = $false
             $wingetQuerySources = @()
             $wingetModuleUseAllowed = $true
             if ($ExecutionMode -eq 'Check' -and $wingetPath) {
@@ -1527,8 +1652,12 @@ finally {
                 try {
                     $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
                     if ($appInstallerRegistration.RegistrationChanged) {
+                        $appInstallerRegistrationChanged = $true
                         $wingetPath = Resolve-WingetExecutable
                         $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) für den aktuellen Remoting-Benutzer registriert; WinGet-Abfrage wird in einer neuen Verbindung fortgesetzt."
+                        foreach ($taskRun in @($appInstallerRegistration.TaskRuns)) {
+                            $wingetBootstrapMessage += " AppX-Aufgabe: Konto=$($taskRun.UserName); Anmeldetyp=$($taskRun.LogonType)."
+                        }
                         if ($appInstallerRegistration.InstalledFromGitHub) {
                             $wingetBootstrapMessage += ' App Installer und fehlende Abhängigkeiten wurden aus dem offiziellen WinGet-GitHub-Release bereitgestellt.'
                         }
@@ -1555,7 +1684,33 @@ finally {
                             $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer verfügbar (Version $($sourcePackageRegistration.Version))."
                         }
                     }
-                    if ($sourcePackageRegistration.Changed) {
+                    if ($sourcePackageRegistration.Changed -or $appInstallerRegistrationChanged) {
+                        # Nach einer Registrierung im Benutzerprofil Quellen
+                        # neu initialisieren, wie beim nachgewiesenen SRVTS01-Fix.
+                        # Kundeneigene Quellen werden vor dem Reset geschützt.
+                        $wingetPath = Resolve-WingetExecutable
+                        $sourceListResult = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source', 'list', '--disable-interactivity')
+                        if ($sourceListResult.ExitCode -ne 0) {
+                            throw "WinGet-Quellenliste vor dem Benutzerquellen-Reset fehlgeschlagen (Exitcode $($sourceListResult.ExitCode)): $($sourceListResult.Output)"
+                        }
+                        $sourceNames = @(
+                            foreach ($sourceLine in ([string]$sourceListResult.Output -split "`r?`n")) {
+                                if ($sourceLine -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name }
+                            }
+                        )
+                        $customSourceNames = @($sourceNames | Where-Object { $_ -notin @('msstore', 'winget', 'winget-font') } | Select-Object -Unique)
+                        if ($customSourceNames.Count -gt 0) {
+                            throw "WinGet-Quellenpaket wurde registriert, aber Quellenreset wegen kundeneigener Quelle(n) ausgelassen: $($customSourceNames -join ', ')."
+                        }
+                        $sourceResetResult = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source', 'reset', '--force', '--disable-interactivity')
+                        if ($sourceResetResult.ExitCode -ne 0) {
+                            throw "WinGet-Quellenreset nach Benutzerregistrierung fehlgeschlagen (Exitcode $($sourceResetResult.ExitCode)): $($sourceResetResult.Output)"
+                        }
+                        $sourceUpdateResult = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source', 'update', '--name', 'winget', '--disable-interactivity')
+                        if ($sourceUpdateResult.ExitCode -ne 0) {
+                            throw "WinGet-Quelle konnte nach Benutzerregistrierung nicht aktualisiert werden (Exitcode $($sourceUpdateResult.ExitCode)): $($sourceUpdateResult.Output)"
+                        }
+                        $wingetBootstrapMessage += " WinGet-Quellen im Benutzerkontext nach AppX-Komponentenänderung zurückgesetzt und Quelle 'winget' aktualisiert; Abfrage wird in einer frischen Verbindung wiederholt."
                         if ($refreshSourcePackage) {
                             $wingetBootstrapMessage += ' WinGet-Quellenpaket wurde im aktuellen Remoting-Kontext ergänzt.'
                         } else {
