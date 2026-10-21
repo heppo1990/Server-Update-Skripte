@@ -1138,13 +1138,68 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
         if ($ManagementComputerSid -notmatch '^S-1-5-21-(?:\d+-){3}\d+$') {
             throw "Ungültige oder fehlende SID für das Verwaltungsserver-Computerkonto '$ManagementComputerAccount': '$ManagementComputerSid'. Die SID muss zentral aus AD übergeben werden."
         }
-        $escapedManagementComputerAccount = $ManagementComputerAccount.Replace("'", "''")
+
+        # Windows PowerShell 5.1 versucht beim Registrieren einer PSSC,
+        # RoleDefinitions-Schlüssel selbst per NTAccount in SIDs umzuwandeln.
+        # Bei einem defekten/gestörten Domänen-Trust scheitert das selbst dann,
+        # wenn eine explizite Endpoint-SDDL mit der bereits bekannten SID
+        # übergeben wird. Deshalb wird die Rolle an eine lokale Gruppe gebunden
+        # und die vom Verwaltungsserver zentral gelesene SID direkt als
+        # Gruppenmitglied eingetragen (ohne Namensauflösung).
+        $checkGroupName = 'WindowsUpdateAdmCheck'
+        $localComputerEntry = [ADSI]("WinNT://$env:COMPUTERNAME,computer")
+        try {
+            $checkGroup = $localComputerEntry.Children.Find($checkGroupName, 'group')
+        }
+        catch {
+            $checkGroup = $localComputerEntry.Create('group', $checkGroupName)
+            $checkGroup.SetInfo()
+            Write-SetupLog "Lokale JEA-Gruppe erstellt: $checkGroupName" "SUCCESS"
+        }
+
+        $nativeClassName = 'WUAdmNetApi_' + [guid]::NewGuid().ToString('N')
+        $nativeSource = @"
+using System;
+using System.Runtime.InteropServices;
+public static class $nativeClassName
+{
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    public static extern int NetLocalGroupAddMembers(string servername, string groupname, int level, IntPtr buffer, int totalentries);
+}
+"@
+        $nativeType = Add-Type -TypeDefinition $nativeSource -PassThru -ErrorAction Stop
+        $managerSidObject = [System.Security.Principal.SecurityIdentifier]::new($ManagementComputerSid)
+        $managerSidBytes = New-Object byte[] $managerSidObject.BinaryLength
+        $managerSidObject.GetBinaryForm($managerSidBytes, 0)
+        $sidPointer = [IntPtr]::Zero
+        $memberInfoPointer = [IntPtr]::Zero
+        try {
+            $sidPointer = [Runtime.InteropServices.Marshal]::AllocHGlobal($managerSidBytes.Length)
+            [Runtime.InteropServices.Marshal]::Copy($managerSidBytes, 0, $sidPointer, $managerSidBytes.Length)
+            $memberInfoPointer = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
+            [Runtime.InteropServices.Marshal]::WriteIntPtr($memberInfoPointer, $sidPointer)
+            $addMemberMethod = $nativeType.GetMethod('NetLocalGroupAddMembers')
+            $addMemberResult = $addMemberMethod.Invoke($null, [object[]]@($null, $checkGroupName, 0, $memberInfoPointer, 1))
+            if ($addMemberResult -notin 0, 1378) {
+                throw "Verwaltungsserver-SID konnte nicht zur lokalen JEA-Gruppe hinzugefügt werden (NetLocalGroupAddMembers: $addMemberResult)."
+            }
+        }
+        finally {
+            if ($memberInfoPointer -ne [IntPtr]::Zero) {
+                [Runtime.InteropServices.Marshal]::FreeHGlobal($memberInfoPointer)
+            }
+            if ($sidPointer -ne [IntPtr]::Zero) {
+                [Runtime.InteropServices.Marshal]::FreeHGlobal($sidPointer)
+            }
+        }
+
+        $escapedCheckRolePrincipal = ("$env:COMPUTERNAME\$checkGroupName").Replace("'", "''")
         $checkRoleDefinition = @"
-    '$escapedManagementComputerAccount' = @{
+    '$escapedCheckRolePrincipal' = @{
         RoleCapabilities = 'WindowsUpdateCheckRole'
     }
 "@
-        Write-SetupLog "SYSTEM-Checkzugriff wird ausschließlich für $ManagementComputerAccount mit der eingeschränkten Abfrage-Rolle freigeschaltet." "INFO"
+        Write-SetupLog "Verwaltungsserver $ManagementComputerAccount (SID $ManagementComputerSid) ist Mitglied der lokalen JEA-Gruppe $checkGroupName; diese erhält ausschließlich die eingeschränkte Abfrage-Rolle." "INFO"
     }
 
     $RoleDefinitionsBlock = @"
