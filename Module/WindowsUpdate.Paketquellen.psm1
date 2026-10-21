@@ -11,10 +11,10 @@ function Reset-WindowsUpdateRemoteWinGetSources {
 
     $resetScript = {
         $ErrorActionPreference = 'Stop'
-        # winget-font ist eine optionale, explizite Zusatzquelle und wird von
-        # `source reset --force` nicht zwingend wieder angelegt. Für eine
-        # gültige Standardkonfiguration müssen nur msstore und winget existieren.
-        $knownDefaultSources = @('msstore', 'winget')
+        # winget-font ist eine integrierte, optionale Quelle. Sie darf beim
+        # Reset nicht als kundeneigene Quelle gelten und ist danach nicht Pflicht.
+        $knownDefaultSources = @('msstore', 'winget', 'winget-font')
+        $requiredDefaultSources = @('msstore', 'winget')
 
         function Invoke-WinGetCliWithoutWindow {
             param([Parameter(Mandatory)][string]$Executable, [string[]]$Arguments = @())
@@ -94,7 +94,7 @@ function Reset-WindowsUpdateRemoteWinGetSources {
                 if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name }
             }
         )
-        $missingDefaults = @($knownDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
+        $missingDefaults = @($requiredDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
         if ($missingDefaults.Count -gt 0) { throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')." }
 
         $stateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $env:ProgramData } else { $env:LOCALAPPDATA }

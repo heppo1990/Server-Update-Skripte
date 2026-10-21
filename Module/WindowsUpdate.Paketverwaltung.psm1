@@ -407,7 +407,7 @@ catch {
         function Test-WingetNonPackageOutputLine {
             param([AllowNull()][string]$Line)
             if ([string]::IsNullOrWhiteSpace($Line)) { return $true }
-            return $Line -match '(?i)([\u2580-\u259F]|\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)|\b\d{1,3}%\b|Terms of Transaction|terms of use|Nutzungsbedingungen|Vereinbarungen der Quelle|Vereinbarungen vor der Verwendung|geographic region|geografische Region|two-letter region|zwei Buchstaben.*Region|accept.*agreement|Zustimmung.*Vereinbarung|no installed package found|es wurde kein installiertes Paket gefunden|no available upgrade|no upgrades available|keine Paketupdates verfügbar|keine Aktualisierungen verfügbar|failed when searching|Fehler beim Durchsuchen der Quelle|Ergebnisse werden nicht einbezogen|results? (?:are )?not included|Store terms|Store-Bedingungen)'
+            return $Line -match '(?i)([\u2580-\u259F]|\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)|\b\d{1,3}%\b|Terms of Transaction|terms of use|Nutzungsbedingungen|Vereinbarungen der Quelle|Vereinbarungen vor der Verwendung|geographic region|geografische Region|two-letter region|zwei Buchstaben.*Region|accept.*agreement|Zustimmung.*Vereinbarung|no installed package found|es wurde kein installiertes Paket gefunden|no available upgrade|no upgrades available|keine Paketupdates verfügbar|keine Aktualisierungen verfügbar|failed when searching|Fehler beim Durchsuchen der Quelle|Ergebnisse werden nicht einbezogen|results? (?:are )?not included|(?:packages?|pakete)\s+(?:have|verfügen über)\s+pins?|pins?\s+(?:prevent|verhindern)\s+(?:an?\s+)?upgrade|Store terms|Store-Bedingungen)'
         }
 
         function Get-WingetCompactOutput {
@@ -1226,9 +1226,10 @@ finally {
 
         function Reset-WingetDefaultSources {
             param([Parameter(Mandatory)][string]$Path)
-            # winget-font ist eine optionale, explizite Zusatzquelle und wird von
-            # `source reset --force` nicht zwingend wieder angelegt.
-            $knownDefaultSources = @('msstore', 'winget')
+            # winget-font ist eine integrierte, optionale Quelle. Sie darf beim
+            # Reset nicht als kundeneigene Quelle gelten und ist danach nicht Pflicht.
+            $knownDefaultSources = @('msstore', 'winget', 'winget-font')
+            $requiredDefaultSources = @('msstore', 'winget')
             $configuredResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'list', '--disable-interactivity')
             $configuredOutput = [string]$configuredResult.Output
             $configuredExitCode = [int]$configuredResult.ExitCode
@@ -1265,7 +1266,7 @@ finally {
                     if ($line -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name }
                 }
             )
-            $missingDefaults = @($knownDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
+            $missingDefaults = @($requiredDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
             if ($missingDefaults.Count -gt 0) {
                 throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')."
             }

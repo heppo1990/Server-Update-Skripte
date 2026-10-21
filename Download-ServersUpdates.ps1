@@ -271,15 +271,15 @@ if ($ServerADList -ne $null) {
         $winRmProbe = Test-WindowsUpdateWinRmPorts -ComputerName $Servername -Ports @(5985, 5986) -TimeoutMilliseconds 1500
         if (-not $winRmProbe.Reachable) {
           $WindowsUnreachableHosts++
-          $skipMessage = 'WinRM über HTTP (5985) und HTTPS (5986) ist nicht erreichbar; Ziel wird in diesem Lauf übersprungen.'
+          $skipMessage = "WinRM über HTTP (5985) und HTTPS (5986) ist nach $($winRmProbe.AttemptsPerformed) Prüfversuch(en) nicht erreichbar; Ziel wird in diesem Lauf übersprungen."
           Write-ScriptLog "HINWEIS: $Servername – $skipMessage"
-          Write-WindowsUpdateConsoleLine -Message '  [Übersprungen] WinRM-Ports 5985/5986 nicht erreichbar.' -AlreadyFiltered
+          Write-WindowsUpdateConsoleLine -Message "  [Übersprungen] WinRM-Ports 5985/5986 auch nach $($winRmProbe.AttemptsPerformed) Prüfversuchen nicht erreichbar." -AlreadyFiltered
           $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
           $skipHtml = [System.Net.WebUtility]::HtmlEncode($skipMessage)
           $RepBody += "<div class='warning-box'><strong>Download auf $serverHtml übersprungen.</strong> $skipHtml</div>"
           continue
         }
-        Write-ScriptLog "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' })." $true
+        Write-ScriptLog "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); erfolgreich nach $($winRmProbe.AttemptsPerformed) Prüfversuch(en)." $true
 
         $UpdResult = $null
 

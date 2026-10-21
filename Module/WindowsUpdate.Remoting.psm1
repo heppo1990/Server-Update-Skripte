@@ -35,62 +35,70 @@ function Test-WindowsUpdateWinRmPorts {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
         [int[]]$Ports = @(5985, 5986),
-        [ValidateRange(250, 10000)][int]$TimeoutMilliseconds = 1500
+        [ValidateRange(250, 10000)][int]$TimeoutMilliseconds = 1500,
+        [ValidateRange(1, 5)][int]$Attempts = 3,
+        [ValidateRange(0, 5000)][int]$RetryDelayMilliseconds = 500
     )
 
-    $attempts = [System.Collections.Generic.List[object]]::new()
-    $openPorts = [System.Collections.Generic.List[int]]::new()
-    $allClients = [System.Collections.Generic.List[System.Net.Sockets.TcpClient]]::new()
-    try {
-        foreach ($port in ($Ports | Select-Object -Unique)) {
-            $client = [System.Net.Sockets.TcpClient]::new()
-            $allClients.Add($client)
-            try {
-                $asyncResult = $client.BeginConnect($ComputerName, [int]$port, $null, $null)
-                $attempts.Add([pscustomobject]@{
-                    Port = [int]$port
-                    Client = $client
-                    AsyncResult = $asyncResult
-                })
+    $uniquePorts = @($Ports | Select-Object -Unique)
+    for ($attemptNumber = 1; $attemptNumber -le $Attempts; $attemptNumber++) {
+        $pendingConnections = [System.Collections.Generic.List[object]]::new()
+        $openPorts = [System.Collections.Generic.List[int]]::new()
+        $allClients = [System.Collections.Generic.List[System.Net.Sockets.TcpClient]]::new()
+        try {
+            foreach ($port in $uniquePorts) {
+                $client = [System.Net.Sockets.TcpClient]::new()
+                $allClients.Add($client)
+                try {
+                    $asyncResult = $client.BeginConnect($ComputerName, [int]$port, $null, $null)
+                    $pendingConnections.Add([pscustomobject]@{
+                        Port = [int]$port
+                        Client = $client
+                        AsyncResult = $asyncResult
+                    })
+                }
+                catch { $client.Dispose() }
             }
-            catch {
-                $client.Dispose()
+
+            $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+            while ($pendingConnections.Count -gt 0) {
+                $waitHandles = [System.Threading.WaitHandle[]]@(
+                    $pendingConnections | ForEach-Object { $_.AsyncResult.AsyncWaitHandle }
+                )
+                $remainingMilliseconds = [int][Math]::Max(0, [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds))
+                $completedIndex = [System.Threading.WaitHandle]::WaitAny($waitHandles, $remainingMilliseconds)
+                if ($completedIndex -eq [System.Threading.WaitHandle]::WaitTimeout) { break }
+
+                $pending = $pendingConnections[$completedIndex]
+                try {
+                    $pending.Client.EndConnect($pending.AsyncResult)
+                    if ($pending.Client.Connected) { $openPorts.Add([int]$pending.Port) }
+                }
+                catch { }
+                $pending.AsyncResult.AsyncWaitHandle.Close()
+                $pendingConnections.RemoveAt($completedIndex)
+            }
+
+            if ($openPorts.Count -gt 0 -or $attemptNumber -ge $Attempts) {
+                return [pscustomobject]@{
+                    ComputerName = $ComputerName
+                    Ports = $uniquePorts
+                    OpenPorts = @($openPorts.ToArray())
+                    Reachable = ($openPorts.Count -gt 0)
+                    AttemptsPerformed = $attemptNumber
+                }
+            }
+        }
+        finally {
+            foreach ($pending in $pendingConnections) {
+                try { $pending.AsyncResult.AsyncWaitHandle.Close() } catch { }
+            }
+            foreach ($client in $allClients) {
+                try { $client.Dispose() } catch { }
             }
         }
 
-        $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
-        while ($attempts.Count -gt 0) {
-            $waitHandles = [System.Threading.WaitHandle[]]@(
-                $attempts | ForEach-Object { $_.AsyncResult.AsyncWaitHandle }
-            )
-            $remainingMilliseconds = [int][Math]::Max(0, [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds))
-            $completedIndex = [System.Threading.WaitHandle]::WaitAny($waitHandles, $remainingMilliseconds)
-            if ($completedIndex -eq [System.Threading.WaitHandle]::WaitTimeout) { break }
-
-            $attempt = $attempts[$completedIndex]
-            try {
-                $attempt.Client.EndConnect($attempt.AsyncResult)
-                if ($attempt.Client.Connected) { $openPorts.Add([int]$attempt.Port) }
-            }
-            catch { }
-            $attempt.AsyncResult.AsyncWaitHandle.Close()
-            $attempts.RemoveAt($completedIndex)
-        }
-
-        return [pscustomobject]@{
-            ComputerName = $ComputerName
-            Ports = @($Ports | Select-Object -Unique)
-            OpenPorts = @($openPorts.ToArray())
-            Reachable = ($openPorts.Count -gt 0)
-        }
-    }
-    finally {
-        foreach ($attempt in $attempts) {
-            try { $attempt.AsyncResult.AsyncWaitHandle.Close() } catch { }
-        }
-        foreach ($client in $allClients) {
-            try { $client.Dispose() } catch { }
-        }
+        if ($RetryDelayMilliseconds -gt 0) { Start-Sleep -Milliseconds $RetryDelayMilliseconds }
     }
 }
 
