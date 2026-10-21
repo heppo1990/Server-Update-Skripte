@@ -44,7 +44,10 @@
 
 
 [CmdletBinding()]
-param([switch]$TestMail)
+param(
+  [switch]$TestMail,
+  [switch]$SkipWingetUserUpdates
+)
 
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
 $scriptUpdatePath = Join-Path $PSScriptRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
@@ -1103,7 +1106,7 @@ if ($ServerADList -ne $null) {
           if ($script:IsLocalSystemRun) {
             $packageResults = @()
           } else {
-            $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $targetEnableWinget -EnableChocolatey $enableChocolateyUpdates -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
+            $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $targetEnableWinget -EnableChocolatey $enableChocolateyUpdates -IncludeInteractiveUserUpdates (-not $SkipWingetUserUpdates) -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
             if (-not $targetEnableWinget -and $skipWingetReason) {
               $packageResults = @($packageResults | Where-Object { $_.Manager -ne 'Winget' })
             }
@@ -1129,6 +1132,14 @@ if ($ServerADList -ne $null) {
           if (-not $packageResult.Available) { continue }
           if ($packageOutputWritten) { Write-ScriptLog '' }
           $packageOutputWritten = $true
+          $userDiagnosticProperty = $packageResult.PSObject.Properties['InteractiveUserDiagnosticOutput']
+          if ($userDiagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$userDiagnosticProperty.Value)) {
+            foreach ($diagnosticLine in ([string]$userDiagnosticProperty.Value -split "`r?`n")) {
+              if (-not [string]::IsNullOrWhiteSpace($diagnosticLine)) {
+                Write-ScriptLog "[WinGet-Benutzerprüfung][$Servername] $diagnosticLine" $true
+              }
+            }
+          }
           $packages = @($packageResult.Packages)
           if (-not $packageResult.Success) {
             $hasPackageResults = $packageResult.Manager -eq 'Winget' -and $packages.Count -gt 0

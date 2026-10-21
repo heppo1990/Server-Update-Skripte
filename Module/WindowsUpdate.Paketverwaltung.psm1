@@ -45,6 +45,7 @@ function Invoke-WindowsUpdatePackageManagers {
         [ValidateSet('Check', 'Install')][string]$Mode = 'Check',
         [bool]$EnableWinget = $true,
         [bool]$EnableChocolatey = $true,
+        [bool]$IncludeInteractiveUserUpdates = $true,
         [string[]]$ExcludeWinGetIds = @(),
         [string[]]$ExcludeChocolateyIds = @(),
         [scriptblock]$WriteLog
@@ -54,7 +55,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false)
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true)
 
         function Invoke-WindowsUpdateHiddenProcess {
             param(
@@ -686,6 +687,13 @@ catch {
             $upgradeLines = @()
             $notes = @()
             $packageResults = @()
+            if (-not $IncludeInteractiveUserUpdates) {
+                return [pscustomobject]@{
+                    Lines = @()
+                    Notes = @('Benutzerbezogene WinGet-Zusatzprüfung wurde für diesen Lauf per -SkipWingetUserUpdates deaktiviert.')
+                    Packages = @()
+                }
+            }
             try {
                 $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
                 $productType = [int]$operatingSystem.ProductType
@@ -703,7 +711,9 @@ catch {
                 }
             }
             $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
             $users = @{}
+            $explorerProcesses = @()
             try {
                 $explorerProcesses = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop)
                 foreach ($process in $explorerProcesses) {
@@ -721,8 +731,12 @@ catch {
                 return [pscustomobject]@{ Lines = @(); Notes = @("Abfrage angemeldeter Benutzer nicht möglich: $($_.Exception.Message)") }
             }
 
+            $notes += "Benutzerbezogene WinGet-Prüfung gestartet: Remoting-Konto='$currentIdentity'; interaktive Explorer-Sitzungen=$($explorerProcesses.Count); andere Benutzerprofile=$($users.Count); Modus=$(if ($InstallUpdates) { 'Install' } else { 'Check' })."
+
             foreach ($userSid in @($users.Keys)) {
                 $userName = [string]$users[$userSid]
+                $userCheckStartedAt = Get-Date
+                $notes += "Benutzerabfrage vorbereitet: Konto='$userName'; SID='$userSid'; LogonType=Interactive; Quelle=winget; Scope=user."
                 $taskPurpose = if ($InstallUpdates) { 'Install' } else { 'Check' }
                 $taskName = "WindowsUpdateAdm-WinGet$taskPurpose-" + [guid]::NewGuid().ToString('N')
                 # Die Aufgabe läuft mit dem normalen Benutzerkonto. C:\Windows\Temp
@@ -975,7 +989,8 @@ finally {
                         $detail = if ($userQuery.Error) { [string]$userQuery.Error } else { "WinGet-Exitcode $($userQuery.ExitCode): $($userQuery.Output)" }
                         throw $detail
                     }
-                    foreach ($row in @(Get-WingetUpgradeLines -Output ([string]$userQuery.Output))) {
+                    $parsedUserLines = @(Get-WingetUpgradeLines -Output ([string]$userQuery.Output))
+                    foreach ($row in $parsedUserLines) {
                         $match = [regex]::Match([string]$row, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
                         if (-not $match.Success) { continue }
                         $displayName = "[$userName] $($match.Groups['Name'].Value.Trim())"
@@ -1001,11 +1016,11 @@ finally {
                         }
                         $notes += "Benutzerbezogene WinGet-Installation als '$userName': $(@($userQuery.Packages | Where-Object Success).Count) erfolgreich, $(@($userQuery.Packages | Where-Object { -not $_.Success }).Count) fehlgeschlagen."
                     } else {
-                        $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' erfolgreich."
+                        $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' erfolgreich: Exitcode $($userQuery.ExitCode); erkannte Updatezeilen=$($parsedUserLines.Count); Laufzeit=$([Math]::Round(((Get-Date) - $userCheckStartedAt).TotalSeconds, 1)) Sekunden."
                     }
                 }
                 catch {
-                    $notes += "Benutzerbezogene WinGet-Abfrage für '$userName' nicht möglich: $($_.Exception.Message)"
+                    $notes += "Benutzerbezogene WinGet-Abfrage für '$userName' fehlgeschlagen nach $([Math]::Round(((Get-Date) - $userCheckStartedAt).TotalSeconds, 1)) Sekunden: $($_.Exception.Message)"
                     if ($InstallUpdates) {
                         $packageResults += [pscustomobject]@{
                             Name = 'WinGet-Benutzerupdates'; Id = ''; InstalledVersion = ''
@@ -1369,6 +1384,7 @@ finally {
             $wingetPath = Resolve-WingetExecutable
             $wingetBootstrapMessage = ''
             $wingetDiagnosticOutput = ''
+            $wingetInteractiveUserDiagnosticOutput = ''
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
             $wingetQuerySources = @()
@@ -1594,6 +1610,7 @@ finally {
                 # nicht gleichzeitig aus beiden Benutzerkontexten gestartet werden.
                 if ($ExecutionMode -eq 'Check') {
                     $interactiveQuery = Get-WingetInteractiveUserUpgradeLines
+                    $wingetInteractiveUserDiagnosticOutput = @($interactiveQuery.Notes) -join "`r`n"
                     $interactiveLines = @($interactiveQuery.Lines)
                     if ($interactiveLines.Count -gt 0) {
                         $knownPackages = @{}
@@ -1935,6 +1952,7 @@ finally {
                 }
                 if ($ExecutionMode -eq 'Install') {
                     $interactiveQuery = Get-WingetInteractiveUserUpgradeLines -InstallUpdates
+                    $wingetInteractiveUserDiagnosticOutput = @($interactiveQuery.Notes) -join "`r`n"
                     foreach ($interactivePackage in @($interactiveQuery.Packages)) {
                         $displayName = "[$($interactivePackage.UserName)] $($interactivePackage.Name)"
                         $packageRow = [pscustomobject]@{
@@ -1982,6 +2000,11 @@ finally {
                     }
                 }
             }
+            if (-not [string]::IsNullOrWhiteSpace($wingetInteractiveUserDiagnosticOutput)) {
+                foreach ($wingetResult in @($result | Where-Object { $_.Manager -eq 'Winget' })) {
+                    Add-Member -InputObject $wingetResult -NotePropertyName InteractiveUserDiagnosticOutput -NotePropertyValue $wingetInteractiveUserDiagnosticOutput -Force
+                }
+            }
             if (-not [string]::IsNullOrWhiteSpace($wingetBootstrapMessage)) {
                 foreach ($wingetResult in @($result | Where-Object { $_.Manager -eq 'Winget' })) {
                     Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue $wingetBootstrapMessage -Force
@@ -1998,14 +2021,14 @@ finally {
 
     if (-not $EnableWinget) {
         $packageResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ',')) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Paketmanager-Prüfung auf $ComputerName")
     }
     else {
         # Chocolatey und WinGet getrennt ausführen. So bleiben Chocolatey-
         # Ergebnisse erhalten, auch wenn WinGet hängen bleibt oder wiederholt wird.
         $baseResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ',')) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Chocolatey-Prüfung auf $ComputerName")
         $packageResults += @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
 
@@ -2026,7 +2049,7 @@ finally {
                 ComputerName = $ComputerName
                 AuthInfo = $AuthInfo
                 ScriptBlock = $packageScript
-                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false)
+                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates)
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
                 WriteLog = $WriteLog
@@ -2104,7 +2127,7 @@ finally {
                     ComputerName = $ComputerName
                     AuthInfo = $AuthInfo
                     ScriptBlock = $packageScript
-                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed)
+                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates)
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
                     WriteLog = $WriteLog
