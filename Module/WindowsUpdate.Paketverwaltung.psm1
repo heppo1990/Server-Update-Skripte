@@ -808,8 +808,12 @@ catch {
 $ErrorActionPreference = 'Stop'
 $resultPath = __RESULT_PATH__
 $progressPath = __PROGRESS_PATH__
-$query = [ordered]@{ Success = $false; Output = ''; ExitCode = -1; Error = ''; Packages = @() }
+$query = [ordered]@{ Success = $false; Output = ''; ExitCode = -1; Error = ''; Packages = @(); AccountIsAdministratorMember = $false; TokenIsElevated = $false }
 try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $adminGroupSid = 'S-1-5-32-544'
+    $query.AccountIsAdministratorMember = @($identity.Groups | ForEach-Object { $_.Value }) -contains $adminGroupSid
+    $query.TokenIsElevated = ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $app = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
         Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
         Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
@@ -1037,6 +1041,8 @@ finally {
                             AvailableVersion = [string]$package.AvailableVersion
                             Source = [string]$package.Source; UserName = $userName
                             Success = [bool]$package.Success; ExitCode = [int]$package.ExitCode
+                            AccountIsAdministratorMember = [bool]$userQuery.AccountIsAdministratorMember
+                            TokenIsElevated = [bool]$userQuery.TokenIsElevated
                             Output = [string]$package.Output
                         }
                     }
@@ -1046,6 +1052,7 @@ finally {
                             if ([string]::IsNullOrWhiteSpace($queryOutput)) { $queryOutput = '<keine Ausgabe>' }
                             $notes += "Benutzerbezogene WinGet-Abfrage als '$userName': Parser erkannte 0 Paketzeilen (Exitcode $($userQuery.ExitCode)); Roh-Ausgabe: $queryOutput"
                         }
+                        $notes += "Berechtigungsstatus für '$userName': Mitglied der lokalen Administratoren=$([bool]$userQuery.AccountIsAdministratorMember); aktueller Aufgabentoken erhöht=$([bool]$userQuery.TokenIsElevated)."
                         $notes += "Benutzerbezogene WinGet-Installation als '$userName': $(@($userQuery.Packages | Where-Object Success).Count) erfolgreich, $(@($userQuery.Packages | Where-Object { -not $_.Success }).Count) fehlgeschlagen."
                     } else {
                         $notes += "Benutzerbezogene WinGet-Abfrage als '$userName' erfolgreich: Exitcode $($userQuery.ExitCode); erkannte Updatezeilen=$($parsedUserLines.Count); Laufzeit=$([Math]::Round(((Get-Date) - $userCheckStartedAt).TotalSeconds, 1)) Sekunden."
@@ -2007,8 +2014,15 @@ finally {
                         }
                         $packageOutput = [string]$interactivePackage.Output
                         $manualAction = -not [bool]$interactivePackage.Success
+                        $adminMembershipKnown = $null -ne $interactivePackage.PSObject.Properties['AccountIsAdministratorMember']
+                        $tokenElevationKnown = $null -ne $interactivePackage.PSObject.Properties['TokenIsElevated']
+                        $privilegeHint = if ($manualAction -and $adminMembershipKnown -and -not [bool]$interactivePackage.AccountIsAdministratorMember) {
+                            'Das Konto ist kein Mitglied der lokalen Administratoren. Wenn der Installer erhöhte Rechte verlangt, kann dieser automatische Lauf keine UAC-Genehmigung oder Administratorkennwörter bereitstellen.'
+                        } elseif ($manualAction -and $tokenElevationKnown -and -not [bool]$interactivePackage.TokenIsElevated) {
+                            'Der Benutzeraufgaben-Token ist nicht erhöht. Wenn der Installer erhöhte Rechte verlangt, kann dieser automatische Lauf keine UAC-Genehmigung oder Administratorkennwörter bereitstellen.'
+                        } else { '' }
                         $manualText = if ($manualAction) {
-                            "Benutzerbezogenes WinGet-Update '$($interactivePackage.Name)' für '$($interactivePackage.UserName)' fehlgeschlagen (Exitcode $($interactivePackage.ExitCode)). $packageOutput"
+                            "Benutzerbezogenes WinGet-Update '$($interactivePackage.Name)' für '$($interactivePackage.UserName)' fehlgeschlagen (Exitcode $($interactivePackage.ExitCode)). $privilegeHint $packageOutput"
                         } else { '' }
                         $result += [pscustomobject]@{
                             Manager='Winget'; Available=$true; Success=([bool]$interactivePackage.Success)
