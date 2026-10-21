@@ -11,6 +11,16 @@
 		"EnableWingetUpdates": true,
 		"CheckWingetUserUpdates": true,
 		"EnableChocolateyUpdates": true,
+		"ScheduledCheck": {
+			"Enabled": false,
+			"Frequency": "Weekly",
+			"Interval": 1,
+			"DaysOfWeek": [
+				"Wednesday"
+			],
+			"Time": "04:05",
+			"StartWhenAvailable": false
+		},
 		"TargetComputers": "Server",
 		"AdditionalComputers": [
 		],

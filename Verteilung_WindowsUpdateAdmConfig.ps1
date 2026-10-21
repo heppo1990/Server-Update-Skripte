@@ -1225,6 +1225,29 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
     }
 }
 
+# Die automatische Check-Aufgabe betrifft den Verwaltungsserver selbst und
+# wird unabhängig vom gerade bearbeiteten Windows-Ziel konfiguriert. Ein reiner
+# Temp-Cleanup-Lauf verändert keine geplanten Aufgaben.
+if (-not $CleanupLegacyTempOnly) {
+    $scheduledCheckConfiguration = if ($UpdateSettings.PSObject.Properties['ScheduledCheck']) {
+        $UpdateSettings.ScheduledCheck
+    } else {
+        [PSCustomObject]@{ Enabled = $false }
+    }
+    try {
+        $scheduledCheckResult = Set-WindowsUpdateScheduledCheckTask -ScriptRoot $PSScriptRoot `
+            -Configuration $scheduledCheckConfiguration -WriteLog { param($message) Write-DeployLog $message }
+        if ($scheduledCheckResult.State -eq 'Registered') {
+            Write-DeployLog "Geplante Update-Prüfung: $($scheduledCheckResult.Schedule)" -Level Success
+        }
+    }
+    catch {
+        Write-DeployLog 'Geplante Check-Aufgabe konnte nicht eingerichtet werden; Details im Verteilungslog.' -Level Warning
+        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } `
+            -Operation 'Geplante Check-Aufgabe' -Target $env:COMPUTERNAME -ErrorRecord $_
+    }
+}
+
 # Zusammenfassung
 Write-DeployLog ''
 Write-DeployLog 'Ergebnis:'
