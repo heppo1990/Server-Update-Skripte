@@ -2281,10 +2281,33 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $exceptionMessage -match '(?i)(WinGet-Katalogabfrage hat das Zeitlimit|WinGet.*Zeitlimit von 5 Minuten überschritten)'
                     $retryAfterSourceReset = $queryTimedOut -and $ExecutionMode -eq 'Check'
                     $retryFreshConnection = $retryFreshConnection -or ($queryTimedOut -and $ExecutionMode -eq 'Install')
-                    $result += [PSCustomObject]@{
-                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
-                        Packages=@(); AvailableOutput=''; ActionOutput='WinGet-Abfrage fehlgeschlagen; Details im Log.'; DiagnosticOutput=$(if ($wingetDiagnosticOutput) { "$wingetDiagnosticOutput`r`nAbfragefehler:`r`n$($_.Exception.ToString())" } else { $_.Exception.ToString() })
-                        RetryFreshConnection=$retryFreshConnection; RetryAfterSourceReset=$retryAfterSourceReset
+                    $exceptionDiagnostic = @(
+                        $_.Exception.ToString()
+                        if (-not [string]::IsNullOrWhiteSpace([string]$_.ScriptStackTrace)) { "PowerShell-Stacktrace:`r`n$($_.ScriptStackTrace)" }
+                    ) -join "`r`n"
+                    $diagnosticText = if ($wingetDiagnosticOutput) { "$wingetDiagnosticOutput`r`nAbfragefehler:`r`n$exceptionDiagnostic" } else { $exceptionDiagnostic }
+
+                    # Ein Fehler in einer nachgelagerten WinGet-Auswertung darf
+                    # bereits erfolgreich installierte Pakete nicht rückwirkend
+                    # als fehlgeschlagen markieren. Das betrifft insbesondere
+                    # den Folgecheck nach einer erfolgreichen CLI-Installation.
+                    $completedInstallResults = @($result | Where-Object {
+                        $_.Manager -eq 'Winget' -and $_.Success -and -not $_.Skipped -and
+                        @($_.Packages).Count -gt 0
+                    })
+                    if ($ExecutionMode -eq 'Install' -and $completedInstallResults.Count -gt 0) {
+                        foreach ($completedResult in $completedInstallResults) {
+                            $existingDiagnostic = [string]$completedResult.DiagnosticOutput
+                            $completedResult.DiagnosticOutput = (@($existingDiagnostic, "Folgeauswertung nach Paketinstallation fehlgeschlagen; Installationsergebnis bleibt erhalten:`r`n$diagnosticText" |
+                                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join "`r`n")
+                        }
+                    }
+                    else {
+                        $result += [PSCustomObject]@{
+                            Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                            Packages=@(); AvailableOutput=''; ActionOutput='WinGet-Abfrage fehlgeschlagen; Details im Log.'; DiagnosticOutput=$diagnosticText
+                            RetryFreshConnection=$retryFreshConnection; RetryAfterSourceReset=$retryAfterSourceReset
+                        }
                     }
                 }
             }
