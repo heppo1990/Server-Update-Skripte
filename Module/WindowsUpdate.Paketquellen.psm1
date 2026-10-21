@@ -11,7 +11,10 @@ function Reset-WindowsUpdateRemoteWinGetSources {
 
     $resetScript = {
         $ErrorActionPreference = 'Stop'
-        $knownDefaultSources = @('msstore', 'winget', 'winget-font')
+        # winget-font ist eine optionale, explizite Zusatzquelle und wird von
+        # `source reset --force` nicht zwingend wieder angelegt. Für eine
+        # gültige Standardkonfiguration müssen nur msstore und winget existieren.
+        $knownDefaultSources = @('msstore', 'winget')
 
         function Invoke-WinGetCliWithoutWindow {
             param([Parameter(Mandatory)][string]$Executable, [string[]]$Arguments = @())

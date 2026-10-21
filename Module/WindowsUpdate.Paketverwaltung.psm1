@@ -1226,7 +1226,9 @@ finally {
 
         function Reset-WingetDefaultSources {
             param([Parameter(Mandatory)][string]$Path)
-            $knownDefaultSources = @('msstore', 'winget', 'winget-font')
+            # winget-font ist eine optionale, explizite Zusatzquelle und wird von
+            # `source reset --force` nicht zwingend wieder angelegt.
+            $knownDefaultSources = @('msstore', 'winget')
             $configuredResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'list', '--disable-interactivity')
             $configuredOutput = [string]$configuredResult.Output
             $configuredExitCode = [int]$configuredResult.ExitCode
