@@ -690,7 +690,7 @@ catch {
             if (-not $IncludeInteractiveUserUpdates) {
                 return [pscustomobject]@{
                     Lines = @()
-                    Notes = @('Benutzerbezogene WinGet-Zusatzprüfung wurde für diesen Lauf per -SkipWingetUserUpdates deaktiviert.')
+                    Notes = @('Benutzerbezogene WinGet-Zusatzprüfung wurde für diesen Lauf über die Settings oder per -SkipWingetUserUpdates deaktiviert.')
                     Packages = @()
                 }
             }

@@ -85,6 +85,7 @@ Die folgenden Tabellen beschreiben alle Felder aus `default_settings.json`. Opti
 | `DetectNowWaitSeconds`        | Wartezeit nach dem Anstoßen einer Windows-Update-Erkennung, bevor das Skript mit der Suche fortfährt.                                                                                                                                                 |
 | `ClearUpdateCacheBeforeCheck` | Bei `true` werden vor dem Check Download- und DataStore-Cache bereinigt und eine neue Erkennung angestoßen; `false` überspringt diese Bereinigung.                                                                                                    |
 | `EnableWingetUpdates`         | Bei `true` werden Winget-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Winget.                                                                                                                                       |
+| `CheckWingetUserUpdates`      | Bei `true` ergänzt der Check WinGet-Updates aus interaktiven Benutzersitzungen; `false` überspringt nur diese Zusatzabfrage. Maschinenweite WinGet-Prüfung und Benutzerinstallationen bleiben davon unberührt. Standard: `true`.                         |
 | `EnableChocolateyUpdates`     | Bei `true` werden Chocolatey-Paketupdates gesucht und im Installationslauf verarbeitet; `false` überspringt Chocolatey. Chocolatey wird dadurch nicht installiert.                                                                                    |
 | `TargetComputers`             | AD-Auswahl: `Server` verarbeitet Windows-Server, `All` alle passenden Windows-Computer. Zusätzliche Geräte werden über die nächsten beiden Listen angegeben.                                                                                          |
 | `AdditionalComputers`         | Liste zusätzlicher Computer, die unabhängig von der AD-Auswahl verarbeitet werden.                                                                                                                                                                    |
@@ -181,6 +182,7 @@ Für den Normalbetrieb kann der relevante Block beispielsweise so aussehen:
 ```json
 "ClearUpdateCacheBeforeCheck": true,
 "EnableWingetUpdates": true,
+"CheckWingetUserUpdates": true,
 "EnableChocolateyUpdates": true,
 "DeferredUpdateCategories": ["Exchange Server", "SQL Server"],
 "DeferredUpdateKBs": [],

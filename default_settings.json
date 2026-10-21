@@ -9,6 +9,7 @@
 		"DetectNowWaitSeconds": 60,
 		"ClearUpdateCacheBeforeCheck": false,
 		"EnableWingetUpdates": true,
+		"CheckWingetUserUpdates": true,
 		"EnableChocolateyUpdates": true,
 		"TargetComputers": "Server",
 		"AdditionalComputers": [

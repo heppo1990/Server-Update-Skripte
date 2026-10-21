@@ -498,6 +498,8 @@ $cacheDescription = if ($clearCacheBeforeCheck) {
   'Cache-Bereinigung ist laut Konfiguration deaktiviert.'
 }
 $enableWingetUpdates = if ($UpdateSettings.PSObject.Properties['EnableWingetUpdates']) { [bool]$UpdateSettings.EnableWingetUpdates } else { $true }
+$checkWingetUserUpdates = if ($UpdateSettings.PSObject.Properties['CheckWingetUserUpdates']) { [bool]$UpdateSettings.CheckWingetUserUpdates } else { $true }
+$checkWingetUserUpdates = $checkWingetUserUpdates -and -not $SkipWingetUserUpdates
 $enableChocolateyUpdates = if ($UpdateSettings.PSObject.Properties['EnableChocolateyUpdates']) { [bool]$UpdateSettings.EnableChocolateyUpdates } else { $true }
 if ($script:IsLocalSystemRun) {
   Write-ScriptLog 'Aufgabenlauf als SYSTEM erkannt; Windows-Updates werden geprüft. Benutzerbezogene Paketmanager und Vorbereitungsarbeiten über den normalen WinRM-Endpunkt werden ausgelassen.'
@@ -506,7 +508,7 @@ if ($script:IsLocalSystemRun) {
   $enableChocolateyUpdates = $false
   $packageManagerDescription = 'Paketmanager im SYSTEM-Aufgabenlauf nicht geprüft.'
 } else {
-  $packageManagerDescription = "Winget: $(if ($enableWingetUpdates) { 'aktiviert' } else { 'deaktiviert' }); Chocolatey: $(if ($enableChocolateyUpdates) { 'aktiviert' } else { 'deaktiviert' })."
+  $packageManagerDescription = "Winget: $(if ($enableWingetUpdates) { 'aktiviert' } else { 'deaktiviert' }); WinGet-Benutzercheck: $(if ($checkWingetUserUpdates) { 'aktiviert' } else { 'deaktiviert' }); Chocolatey: $(if ($enableChocolateyUpdates) { 'aktiviert' } else { 'deaktiviert' })."
 }
 
 # KRITISCH: PSWindowsUpdate-Modul laden
@@ -1106,7 +1108,7 @@ if ($ServerADList -ne $null) {
           if ($script:IsLocalSystemRun) {
             $packageResults = @()
           } else {
-            $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $targetEnableWinget -EnableChocolatey $enableChocolateyUpdates -IncludeInteractiveUserUpdates (-not $SkipWingetUserUpdates) -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
+            $packageResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $svcCredential -Mode Check -EnableWinget $targetEnableWinget -EnableChocolatey $enableChocolateyUpdates -IncludeInteractiveUserUpdates $checkWingetUserUpdates -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message ([bool]$logOnly) })
             if (-not $targetEnableWinget -and $skipWingetReason) {
               $packageResults = @($packageResults | Where-Object { $_.Manager -ne 'Winget' })
             }
