@@ -1304,9 +1304,9 @@ $checkRoleDefinition}
         if (-not (Test-Path -LiteralPath $windowsPowerShell)) {
             throw "Windows PowerShell 5.1 wurde nicht gefunden: $windowsPowerShell"
         }
-        $jeaAclEntries = @('(A;;GR;;;BA)')
+        $jeaAclEntries = @('(A;;GA;;;BA)')
         if (-not [string]::IsNullOrWhiteSpace($ManagementComputerSid)) {
-            $jeaAclEntries += "(A;;GR;;;$ManagementComputerSid)"
+            $jeaAclEntries += "(A;;GXGR;;;$ManagementComputerSid)"
         }
         $jeaSecurityDescriptorSddl = 'O:NSG:BAD:P{0}S:P(AU;FA;GA;;;WD)(AU;SA;GXGW;;;WD)' -f ($jeaAclEntries -join '')
         $registrationScript = @"
@@ -1321,9 +1321,9 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
         Write-SetupLog "Configuration über Windows PowerShell 5.1 registriert" "SUCCESS"
     }
     else {
-        $jeaAclEntries = @('(A;;GR;;;BA)')
+        $jeaAclEntries = @('(A;;GA;;;BA)')
         if (-not [string]::IsNullOrWhiteSpace($ManagementComputerSid)) {
-            $jeaAclEntries += "(A;;GR;;;$ManagementComputerSid)"
+            $jeaAclEntries += "(A;;GXGR;;;$ManagementComputerSid)"
         }
         $jeaSecurityDescriptorSddl = 'O:NSG:BAD:P{0}S:P(AU;FA;GA;;;WD)(AU;SA;GXGW;;;WD)' -f ($jeaAclEntries -join '')
         Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' `
