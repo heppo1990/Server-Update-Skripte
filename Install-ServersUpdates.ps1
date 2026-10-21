@@ -327,6 +327,22 @@ function Invoke-PackageManagerUpdates {
       }
       Write-ScriptLog ''
     }
+    # Die Konsolenausgabe wird aus den bestätigten Einzelergebnissen aufgebaut.
+    # Dieselben Zähler geben wir explizit zurück, damit die Gesamtsumme nicht
+    # von der Enumeration/Serialisierung einzelner Remoting-Objekte abhängt.
+    $installedCounts = @{}
+    foreach ($manager in $successfulPackagesByManager.Keys) {
+      $installedCounts[[string]$manager] = @($successfulPackagesByManager[$manager]).Count
+    }
+    $results += [pscustomobject]@{
+      Manager = '__InstallSummary'
+      Available = $false
+      Success = $true
+      Skipped = $true
+      SkipReason = 'Interne Zählzusammenfassung'
+      Packages = @()
+      InstalledCounts = $installedCounts
+    }
     return $results
   }
   catch {
@@ -2448,6 +2464,18 @@ if ($ServerADList -ne $null) {
         $excludedChocolateyIds = if ($localManagementTargets -contains $Servername) { @($script:ManagementPowerShellUpdateExcludeChocolateyId) } else { @() }
         $packageResults = @(Invoke-PackageManagerUpdates -Servername $Servername -AuthInfo $svcCredential -ExcludeWinGetIds $excludedWinGetIds -ExcludeChocolateyIds $excludedChocolateyIds)
         foreach ($packageResult in $packageResults) {
+          if ([string]$packageResult.Manager -eq '__InstallSummary') {
+            $installedCountsProperty = $packageResult.PSObject.Properties['InstalledCounts']
+            if ($installedCountsProperty -and $installedCountsProperty.Value -is [System.Collections.IDictionary]) {
+              foreach ($managerName in $installedCountsProperty.Value.Keys) {
+                $installedCount = [int]$installedCountsProperty.Value[$managerName]
+                $PackageUpdateCount += $installedCount
+                if ([string]$managerName -eq 'Winget') { $WingetUpdateCount += $installedCount }
+                if ([string]$managerName -eq 'Chocolatey') { $ChocolateyUpdateCount += $installedCount }
+              }
+            }
+            continue
+          }
           $packages = @($packageResult.Packages)
           # Auch gefundene Pakete aus fehlgeschlagenen Installationen in den
           # Mailbericht aufnehmen. Bisher landeten hier nur erfolgreiche Updates;
@@ -2489,9 +2517,6 @@ if ($ServerADList -ne $null) {
           if (-not $packageResult.Available -or -not $packageResult.Success) { continue }
           $packages = @($packageResult.Packages)
           if ($packages.Count -eq 0) { continue }
-          $PackageUpdateCount += $packages.Count
-          if ($packageResult.Manager -eq 'Winget') { $WingetUpdateCount += $packages.Count }
-          if ($packageResult.Manager -eq 'Chocolatey') { $ChocolateyUpdateCount += $packages.Count }
         }
 
         # Zurückgestellte Kategorien + Zeitpunkte aus Settings lesen
