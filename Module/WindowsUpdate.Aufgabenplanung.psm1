@@ -45,7 +45,7 @@ function Set-WindowsUpdateScheduledCheckTask {
     if ($timeText -notmatch '^(?:[01]\d|2[0-3]):[0-5]\d$') {
         throw "ScheduledCheck.Time muss im Format HH:mm angegeben werden; erhalten: '$timeText'."
     }
-    $runAt = [datetime]::Today.Add([TimeSpan]::ParseExact($timeText, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture)
+    $runAt = [datetime]::Today.Add([TimeSpan]::ParseExact($timeText, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture))
     $trigger = if ($frequency -eq 'Daily') {
         New-ScheduledTaskTrigger -Daily -DaysInterval $interval -At $runAt
     }
