@@ -1071,13 +1071,17 @@ finally {
                 finally {
                     if ($taskRegistered) {
                         try {
-                            $registeredTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                            if ([string]$registeredTask.State -eq 'Running' -and -not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
-                                Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                                $notes += "Nicht abgeschlossene WinGet-Benutzeraufgabe '$taskName' für '$userName' nach Fehler/Timeout gestoppt."
+                            $registeredTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                            if (-not $registeredTask) {
+                                $notes += "Temporäre WinGet-Benutzeraufgabe '$taskName' für '$userName' war beim Aufräumen bereits entfernt."
+                            } else {
+                                if ([string]$registeredTask.State -eq 'Running' -and -not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                                    Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                                    $notes += "Nicht abgeschlossene WinGet-Benutzeraufgabe '$taskName' für '$userName' nach Fehler/Timeout gestoppt."
+                                }
+                                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+                                $notes += "Temporäre WinGet-Benutzeraufgabe '$taskName' für '$userName' entfernt."
                             }
-                            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
-                            $notes += "Temporäre WinGet-Benutzeraufgabe '$taskName' für '$userName' entfernt."
                         } catch {
                             $notes += "Temporäre WinGet-Benutzeraufgabe '$taskName' für '$userName' konnte nicht vollständig bereinigt werden: $($_.Exception.Message)"
                         }
