@@ -938,7 +938,12 @@ finally {
                     Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
                     Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
                     $action = New-ScheduledTaskAction -Execute $powershellPath -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedQuery"
-                    $principal = New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
+                    # Task Scheduler resolves an interactive logon more reliably by
+                    # the canonical account name than by the user's SID. On some
+                    # targets the SID principal is reported as not logged on even
+                    # while that user's console session is active.
+                    $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType Interactive -RunLevel Limited
+                    $notes += "Benutzeraufgabe wird mit interaktivem Principal '$userName' (SID '$userSid') registriert."
                     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
                     $taskRegistered = $true
                     $taskStartedAt = Get-Date
