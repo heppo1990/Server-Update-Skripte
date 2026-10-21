@@ -1570,7 +1570,7 @@ finally {
                     $wingetDiagnosticOutput += "WinGet-Quellenpaket:`r`n$($_.Exception.ToString())`r`n"
                 }
             }
-            if ($ExecutionMode -eq 'Check' -and $serverCaption -match 'Windows Server (2019|2022)') {
+            if ($ExecutionMode -eq 'Check') {
                 # Microsoft.WinGet.Client 1.29.380+ benötigt für Aufrufe in
                 # erhöhten Sitzungen auch einen App-Installer derselben
                 # Mindestgeneration. Bei einem älteren DesktopAppInstaller
@@ -1582,9 +1582,13 @@ finally {
                 $currentAppInstaller = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
                     Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
                     Select-Object -First 1)
-                $minimumElevatedAppInstallerVersion = [version]'1.29.380.0'
                 $clientModuleVersion = if ($clientModule.Count -gt 0) { try { [version]$clientModule[0].Version } catch { [version]'0.0' } } else { [version]'0.0' }
                 $appInstallerVersion = if ($currentAppInstaller.Count -gt 0) { try { [version]$currentAppInstaller[0].Version } catch { [version]'0.0' } } else { [version]'0.0' }
+                $minimumElevatedAppInstallerVersion = if ($clientModuleVersion -ge [version]'1.29.380.0') {
+                    $clientModuleVersion
+                } else {
+                    [version]'0.0'
+                }
 
                 if ($clientModuleVersion -ge $minimumElevatedAppInstallerVersion -and
                     $appInstallerVersion -lt $minimumElevatedAppInstallerVersion) {
