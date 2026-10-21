@@ -756,8 +756,14 @@ function Invoke-WinRMDeployment {
                 if ([string]::IsNullOrWhiteSpace([string]$managerDomain.NetBIOSName)) {
                     throw "NetBIOS-Domänenname für '$($managerComputer.Domain)' konnte nicht ermittelt werden."
                 }
+                $managerAdComputer = Get-ADComputer -Identity $env:COMPUTERNAME -Server $managerDomain.DNSRoot -Properties SID -ErrorAction Stop
+                if (-not $managerAdComputer.SID) {
+                    throw "AD hat keine SID für das Verwaltungsserver-Computerkonto '$env:COMPUTERNAME' geliefert."
+                }
                 $setupParameters.ManagementComputerAccount = '{0}\{1}$' -f $managerDomain.NetBIOSName, $env:COMPUTERNAME
+                $setupParameters.ManagementComputerSid = $managerAdComputer.SID.Value
                 Write-DeployLog "[$Servername] JEA-Zugriff für SYSTEM-Check wird auf das Verwaltungsserver-Computerkonto $($setupParameters.ManagementComputerAccount) beschränkt." -LogOnly
+                Write-DeployLog "[$Servername] Verwaltungsserver-SID für die JEA-ACL wurde zentral aus AD ermittelt: $($setupParameters.ManagementComputerSid)." -LogOnly
             }
             catch {
                 throw "Computerkonto des Verwaltungsservers für den geplanten SYSTEM-Check konnte nicht ermittelt werden: $($_.Exception.Message)"

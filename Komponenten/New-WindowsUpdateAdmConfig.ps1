@@ -84,6 +84,12 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$ManagementComputerAccount,
 
+    # SID des Verwaltungsserver-Computerkontos, zentral aus AD ermittelt.
+    # Wird für die JEA-Endpunkt-ACL direkt als SID verwendet, damit das Ziel
+    # das Konto bei der Registrierung nicht per NTAccount auflösen muss.
+    [Parameter(Mandatory=$false)]
+    [string]$ManagementComputerSid,
+
     # Für Ziele außerhalb der Verwaltungs-AD wird Zertifikats-Remoting auch
     # dann benötigt, wenn das Gerät Mitglied einer anderen AD-Domäne ist.
     [Parameter(Mandatory=$false)]
@@ -852,6 +858,9 @@ try {
             # für den Verwaltungsserver registrieren wie der ursprüngliche Lauf.
             $arguments += ' -ManagementComputerAccount "{0}"' -f $ManagementComputerAccount
         }
+        if (-not [string]::IsNullOrWhiteSpace($ManagementComputerSid)) {
+            $arguments += ' -ManagementComputerSid "{0}"' -f $ManagementComputerSid
+        }
         $taskName = 'WindowsUpdateAdm-Finalize'
         $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
             (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
@@ -1126,6 +1135,9 @@ Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
         if ($ManagementComputerAccount -notmatch '^[^\\]+\\[^\\]+\$$') {
             throw "Ungültiges Verwaltungsserver-Computerkonto: '$ManagementComputerAccount'. Erwartet wird DOMAIN\COMPUTER$."
         }
+        if ($ManagementComputerSid -notmatch '^S-1-5-21-(?:\d+-){3}\d+$') {
+            throw "Ungültige oder fehlende SID für das Verwaltungsserver-Computerkonto '$ManagementComputerAccount': '$ManagementComputerSid'. Die SID muss zentral aus AD übergeben werden."
+        }
         $escapedManagementComputerAccount = $ManagementComputerAccount.Replace("'", "''")
         $checkRoleDefinition = @"
     '$escapedManagementComputerAccount' = @{
@@ -1237,9 +1249,14 @@ $checkRoleDefinition}
         if (-not (Test-Path -LiteralPath $windowsPowerShell)) {
             throw "Windows PowerShell 5.1 wurde nicht gefunden: $windowsPowerShell"
         }
+        $jeaAclEntries = @('(A;;GR;;;BA)')
+        if (-not [string]::IsNullOrWhiteSpace($ManagementComputerSid)) {
+            $jeaAclEntries += "(A;;GR;;;$ManagementComputerSid)"
+        }
+        $jeaSecurityDescriptorSddl = 'O:NSG:BAD:P{0}S:P(AU;FA;GA;;;WD)(AU;SA;GXGW;;;WD)' -f ($jeaAclEntries -join '')
         $registrationScript = @"
 `$ErrorActionPreference = 'Stop'
-Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC.Replace("'", "''"))' -NoServiceRestart -Confirm:`$false -WarningAction SilentlyContinue -ErrorAction Stop
+Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC.Replace("'", "''"))' -SecurityDescriptorSddl '$jeaSecurityDescriptorSddl' -NoServiceRestart -Confirm:`$false -WarningAction SilentlyContinue -ErrorAction Stop
 "@
         $registrationEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($registrationScript))
         $registrationProcess = Start-Process -FilePath $windowsPowerShell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$registrationEncoded) -Wait -PassThru -WindowStyle Hidden
@@ -1249,8 +1266,14 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
         Write-SetupLog "Configuration über Windows PowerShell 5.1 registriert" "SUCCESS"
     }
     else {
+        $jeaAclEntries = @('(A;;GR;;;BA)')
+        if (-not [string]::IsNullOrWhiteSpace($ManagementComputerSid)) {
+            $jeaAclEntries += "(A;;GR;;;$ManagementComputerSid)"
+        }
+        $jeaSecurityDescriptorSddl = 'O:NSG:BAD:P{0}S:P(AU;FA;GA;;;WD)(AU;SA;GXGW;;;WD)' -f ($jeaAclEntries -join '')
         Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' `
                                         -Path $PermanentPSSC `
+                                        -SecurityDescriptorSddl $jeaSecurityDescriptorSddl `
                                         -NoServiceRestart `
                                         -Confirm:$false `
                                         -WarningAction SilentlyContinue `
