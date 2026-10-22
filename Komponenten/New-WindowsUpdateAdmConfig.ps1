@@ -780,7 +780,13 @@ try {
                         Write-SetupLog "Zertifikat mit Account '$localUser' eindeutig verknüpft und verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)')." "SUCCESS"
                     }
                     catch {
-                        Write-SetupLog 'Zertifikat-Mapping fehlgeschlagen; Details im Setup-Protokoll.' 'WARN'
+                        # Ein fehlgeschlagener Mapping-Schritt ist an dieser
+                        # Stelle noch kein endgültiger Verbindungsfehler: Das
+                        # Client-Zertifikat kann auf dem Verwaltungsserver
+                        # gerade erst installiert werden. Die Verteilung prüft
+                        # anschließend die echte Zertifikatsverbindung zum
+                        # WindowsUpdateAdm-Endpunkt und meldet deren Ergebnis.
+                        Write-SetupLog 'Zertifikat-Mapping konnte im Setup noch nicht bestätigt werden; der abschließende Zertifikats-Endpunkttest entscheidet.' 'INFO'
                         Write-SetupDiagnostic -Operation 'WinRM-Zertifikatmapping' -ErrorRecord $_ -Context @("User=$localUser")
                     }
                 }
