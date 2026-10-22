@@ -1193,7 +1193,27 @@ public static class $nativeClassName
             }
         }
 
-        $escapedCheckRolePrincipal = ("$env:COMPUTERNAME\$checkGroupName").Replace("'", "''")
+        $checkRolePrincipal = "$env:COMPUTERNAME\$checkGroupName"
+        $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        if ([int]$operatingSystem.ProductType -eq 2) {
+            # Domänencontroller besitzen keine lokale SAM. Die dort erstellte
+            # Gruppe wird im Domänenkontext geführt, daher ist COMPUTERNAME\Gruppe
+            # für RoleDefinitions nicht auflösbar. Den kanonischen Namen aus der
+            # Gruppen-SID ermitteln, statt einen Domänennamen fest einzutragen.
+            $checkGroup.RefreshCache(@('objectSid'))
+            $checkGroupSidBytes = [byte[]]$checkGroup.Properties['objectSid'].Value
+            if (-not $checkGroupSidBytes -or $checkGroupSidBytes.Length -eq 0) {
+                throw "Die SID der JEA-Prüfgruppe '$checkGroupName' konnte auf dem Domänencontroller nicht gelesen werden."
+            }
+            $checkGroupSid = [System.Security.Principal.SecurityIdentifier]::new($checkGroupSidBytes, 0)
+            $checkRolePrincipal = $checkGroupSid.Translate([System.Security.Principal.NTAccount]).Value
+            if ([string]::IsNullOrWhiteSpace($checkRolePrincipal) -or
+                $checkRolePrincipal -notmatch ('\\' + [regex]::Escape($checkGroupName) + '$')) {
+                throw "Die JEA-Prüfgruppe konnte auf dem Domänencontroller nicht in einen gültigen Kontonamen übersetzt werden: '$checkRolePrincipal'."
+            }
+            Write-SetupLog "Domänencontroller erkannt; JEA-Prüfgruppe über SID als '$checkRolePrincipal' aufgelöst." 'INFO'
+        }
+        $escapedCheckRolePrincipal = $checkRolePrincipal.Replace("'", "''")
         $checkRoleDefinition = @"
     '$escapedCheckRolePrincipal' = @{
         RoleCapabilities = 'WindowsUpdateCheckRole'
