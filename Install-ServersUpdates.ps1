@@ -316,13 +316,24 @@ function Invoke-PackageManagerUpdates {
       Write-ScriptLog "Manuelle Aktion erforderlich: $manualPackageCount $manualPackageLabel auf ${Servername}."
       foreach ($manualAction in $manualPackageActions) {
         $manualRows = @($manualAction.Packages)
-        $manualPackageName = if ($manualRows.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$manualRows[0].Name)) {
-          [string]$manualRows[0].Name
-        } elseif ($manualRows.Count -gt 0) {
-          [string]$manualRows[0].Id
-        } else {
-          [string]$manualAction.Manager
+        $manualPackageName = ''
+        if ($manualRows.Count -gt 0) {
+          $firstManualRow = $manualRows[0]
+          if ($firstManualRow -is [string]) {
+            $manualRowMatch = [regex]::Match(
+              [string]$firstManualRow,
+              '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)\s+(?<Source>[^\s]+)\s*$',
+              [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            $manualPackageName = if ($manualRowMatch.Success) { $manualRowMatch.Groups['Name'].Value.Trim() } else { ([string]$firstManualRow).Trim() }
+          } elseif ($null -ne $firstManualRow) {
+            $nameProperty = $firstManualRow.PSObject.Properties['Name']
+            $idProperty = $firstManualRow.PSObject.Properties['Id']
+            if ($nameProperty) { $manualPackageName = [string]$nameProperty.Value }
+            if ([string]::IsNullOrWhiteSpace($manualPackageName) -and $idProperty) { $manualPackageName = [string]$idProperty.Value }
+          }
         }
+        if ([string]::IsNullOrWhiteSpace($manualPackageName)) { $manualPackageName = [string]$manualAction.Manager }
         Write-ScriptLog "  $manualPackageName`: $($manualAction.Text)"
       }
       Write-ScriptLog ''
