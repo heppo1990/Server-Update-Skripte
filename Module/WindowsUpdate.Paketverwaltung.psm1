@@ -2441,6 +2441,19 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     ) -join "`r`n"
                     $diagnosticText = if ($wingetDiagnosticOutput) { "$wingetDiagnosticOutput`r`nAbfragefehler:`r`n$exceptionDiagnostic" } else { $exceptionDiagnostic }
 
+                    # `winget list --upgrade-available --scope machine` kann
+                    # eine leere Maschinen-Scope-Suche als internen Marker
+                    # ausgeben. Auf Windows Servern sind Benutzerupdates
+                    # absichtlich deaktiviert. Behandle diesen Fall als leeres
+                    # Ergebnis, auch wenn eine nachgelagerte Auswertung dabei
+                    # über ein leeres Array stolpert; sonst erscheint ein
+                    # falscher WinGet-Fehler in Konsole und Zusammenfassung.
+                    $emptyMachineScopeResult = $ExecutionMode -eq 'Install' -and
+                        @($packageLines).Count -eq 0 -and
+                        @($sourceFailureLines).Count -eq 0 -and
+                        $wingetDiagnosticOutput -match '(?i)(\bNoInstalledPackageFound\b|no installed package found|es wurde kein installiertes paket gefunden)' -and
+                        $wingetDiagnosticOutput -notmatch '(?i)(Fehler beim Durchsuchen der Quelle|An error occurred while searching the source|failed when searching (?:the )?source|Quellenfehler:)'
+
                     # Ein Fehler in einer nachgelagerten WinGet-Auswertung darf
                     # bereits erfasste Einzelresultate nicht durch einen
                     # zusätzlichen allgemeinen WinGet-Fehler überdecken. Das
@@ -2449,7 +2462,15 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $recordedInstallResults = @($result | Where-Object {
                         $_.Manager -eq 'Winget' -and @($_.Packages).Count -gt 0
                     })
-                    if ($ExecutionMode -eq 'Install' -and $recordedInstallResults.Count -gt 0) {
+                    if ($emptyMachineScopeResult) {
+                        $result += [PSCustomObject]@{
+                            Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                            Packages=@(); AvailableOutput=$availableOutput
+                            ActionOutput='Keine maschinenweiten WinGet-Updates verfügbar.'
+                            DiagnosticOutput=$wingetDiagnosticOutput
+                        }
+                    }
+                    elseif ($ExecutionMode -eq 'Install' -and $recordedInstallResults.Count -gt 0) {
                         foreach ($recordedResult in $recordedInstallResults) {
                             $diagnosticProperty = $recordedResult.PSObject.Properties['DiagnosticOutput']
                             $existingDiagnostic = if ($diagnosticProperty) { [string]$diagnosticProperty.Value } else { '' }
