@@ -1339,9 +1339,7 @@ finally {
             $currentPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
                 Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) })
             $latestPackage = @($allPackages + $currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
-            if ($latestPackage.Count -eq 0) { return [pscustomobject]@{ Version = ''; RegistrationChanged = $false } }
-
-            $targetVersion = [version]$latestPackage[0].Version
+            $targetVersion = if ($latestPackage.Count -gt 0) { [version]$latestPackage[0].Version } else { [version]'0.0' }
             $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
             $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
             $registrationChanged = $currentVersion -lt $targetVersion
@@ -1358,6 +1356,9 @@ finally {
             $minimumAppInstallerVersion = if ($moduleVersion.Build -ge 0) {
                 [version]::new($moduleVersion.Major, $moduleVersion.Minor, $moduleVersion.Build, [Math]::Max(0, $moduleVersion.Revision))
             } else { $moduleVersion }
+            if ($moduleVersion -le [version]'0.0') {
+                throw 'Microsoft.WinGet.Client ist nicht verfügbar; die erforderliche App-Installer-Version kann nicht ermittelt werden.'
+            }
             if ($currentVersion -lt $minimumAppInstallerVersion) {
                 $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdate-WinGet-GitHub-' + [guid]::NewGuid().ToString('N'))
                 $extractRoot = Join-Path $payloadRoot 'Dependencies'
@@ -1405,7 +1406,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
                 }
             }
-            if ($registrationChanged) {
+            if ($registrationChanged -and -not $installedFromGitHub) {
                 $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
                 if (-not $installedFromGitHub -and -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
                     throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
