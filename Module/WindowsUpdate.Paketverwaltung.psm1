@@ -2289,17 +2289,17 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $diagnosticText = if ($wingetDiagnosticOutput) { "$wingetDiagnosticOutput`r`nAbfragefehler:`r`n$exceptionDiagnostic" } else { $exceptionDiagnostic }
 
                     # Ein Fehler in einer nachgelagerten WinGet-Auswertung darf
-                    # bereits erfolgreich installierte Pakete nicht rückwirkend
-                    # als fehlgeschlagen markieren. Das betrifft insbesondere
-                    # den Folgecheck nach einer erfolgreichen CLI-Installation.
-                    $completedInstallResults = @($result | Where-Object {
-                        $_.Manager -eq 'Winget' -and $_.Success -and -not $_.Skipped -and
-                        @($_.Packages).Count -gt 0
+                    # bereits erfasste Einzelresultate nicht durch einen
+                    # zusätzlichen allgemeinen WinGet-Fehler überdecken. Das
+                    # gilt auch, wenn ein Paket korrekt als manuelle Nacharbeit
+                    # dokumentiert wurde.
+                    $recordedInstallResults = @($result | Where-Object {
+                        $_.Manager -eq 'Winget' -and @($_.Packages).Count -gt 0
                     })
-                    if ($ExecutionMode -eq 'Install' -and $completedInstallResults.Count -gt 0) {
-                        foreach ($completedResult in $completedInstallResults) {
-                            $existingDiagnostic = [string]$completedResult.DiagnosticOutput
-                            $completedResult.DiagnosticOutput = (@($existingDiagnostic, "Folgeauswertung nach Paketinstallation fehlgeschlagen; Installationsergebnis bleibt erhalten:`r`n$diagnosticText" |
+                    if ($ExecutionMode -eq 'Install' -and $recordedInstallResults.Count -gt 0) {
+                        foreach ($recordedResult in $recordedInstallResults) {
+                            $existingDiagnostic = [string]$recordedResult.DiagnosticOutput
+                            $recordedResult.DiagnosticOutput = (@($existingDiagnostic, "WinGet-Folgeauswertung nach den Einzelversuchen fehlgeschlagen; die dokumentierten Paketresultate bleiben maßgeblich:`r`n$diagnosticText" |
                                 Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join "`r`n")
                         }
                     }
