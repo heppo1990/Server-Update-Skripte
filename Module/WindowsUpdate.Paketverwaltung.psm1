@@ -1343,6 +1343,10 @@ finally {
             $currentPackage = @($currentPackages | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
             $currentVersion = if ($currentPackage.Count -gt 0) { [version]$currentPackage[0].Version } else { [version]'0.0' }
             $registrationChanged = $currentVersion -lt $targetVersion
+            $wingetAliasPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+            $aliasRegistrationRequired = -not (Test-Path -LiteralPath $wingetAliasPath -PathType Leaf)
+            $registrationRequired = $registrationChanged -or $aliasRegistrationRequired
+            $aliasRegistrationMessage = ''
             $installedFromGitHub = $false
             $appxTaskRuns = @()
 
@@ -1406,7 +1410,10 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     Remove-Item -LiteralPath $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
                 }
             }
-            if ($registrationChanged -and -not $installedFromGitHub) {
+            if ($aliasRegistrationRequired -and -not $registrationChanged) {
+                $aliasRegistrationMessage = "WinGet-Ausführungsalias fehlt für den aktuellen Benutzer ($wingetAliasPath); App Installer wird erneut registriert."
+            }
+            if ($registrationRequired -and -not $installedFromGitHub) {
                 $manifestPath = Join-Path ([string]$latestPackage[0].InstallLocation) 'AppxManifest.xml'
                 if (-not $installedFromGitHub -and -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
                     throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
@@ -1467,6 +1474,11 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 } }
             }
 
+            $aliasRegistered = Test-Path -LiteralPath $wingetAliasPath -PathType Leaf
+            if (-not $aliasRegistered) {
+                throw "App Installer $targetVersion wurde für den aktuellen Benutzer registriert, aber der WinGet-Ausführungsalias fehlt weiterhin: $wingetAliasPath"
+            }
+
             $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
                 Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
             if ($registeredPackage.Count -eq 0 -or [string]$registeredPackage[0].Status -ne 'Ok') {
@@ -1474,7 +1486,8 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             }
             return [pscustomobject]@{
                 Version = [string]$registeredPackage[0].Version
-                RegistrationChanged = $registrationChanged
+                RegistrationChanged = [bool]($registrationChanged -or $aliasRegistrationRequired)
+                AliasRegistrationMessage = $aliasRegistrationMessage
                 InstalledFromGitHub = [bool]$installedFromGitHub
                 TaskRuns = @($appxTaskRuns)
             }
@@ -1656,6 +1669,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $appInstallerRegistrationChanged = $true
                         $wingetPath = Resolve-WingetExecutable
                         $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) für den aktuellen Remoting-Benutzer registriert; WinGet-Abfrage wird in einer neuen Verbindung fortgesetzt."
+                        if (-not [string]::IsNullOrWhiteSpace([string]$appInstallerRegistration.AliasRegistrationMessage)) {
+                            $wingetBootstrapMessage += " $($appInstallerRegistration.AliasRegistrationMessage)"
+                        }
                         foreach ($taskRun in @($appInstallerRegistration.TaskRuns)) {
                             $wingetBootstrapMessage += " AppX-Aufgabe: Konto=$($taskRun.UserName); Anmeldetyp=$($taskRun.LogonType)."
                         }
@@ -1789,6 +1805,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
                         $registrationText = if ($appInstallerRegistration.RegistrationChanged) { 'für den aktuellen Benutzer registriert' } else { 'bereits für den aktuellen Benutzer registriert' }
                         $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) $registrationText."
+                        if (-not [string]::IsNullOrWhiteSpace([string]$appInstallerRegistration.AliasRegistrationMessage)) {
+                            $wingetBootstrapMessage += " $($appInstallerRegistration.AliasRegistrationMessage)"
+                        }
                         if ($appInstallerRegistration.InstalledFromGitHub) {
                             $wingetBootstrapMessage += ' App Installer und fehlende Abhängigkeiten wurden aus dem offiziellen WinGet-GitHub-Release bereitgestellt.'
                         }
