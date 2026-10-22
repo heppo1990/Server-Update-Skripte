@@ -2451,9 +2451,16 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     })
                     if ($ExecutionMode -eq 'Install' -and $recordedInstallResults.Count -gt 0) {
                         foreach ($recordedResult in $recordedInstallResults) {
-                            $existingDiagnostic = [string]$recordedResult.DiagnosticOutput
-                            $recordedResult.DiagnosticOutput = (@($existingDiagnostic, "WinGet-Folgeauswertung nach den Einzelversuchen fehlgeschlagen; die dokumentierten Paketresultate bleiben maßgeblich:`r`n$diagnosticText" |
+                            $diagnosticProperty = $recordedResult.PSObject.Properties['DiagnosticOutput']
+                            $existingDiagnostic = if ($diagnosticProperty) { [string]$diagnosticProperty.Value } else { '' }
+                            $combinedDiagnostic = (@($existingDiagnostic, "WinGet-Folgeauswertung nach den Einzelversuchen fehlgeschlagen; die dokumentierten Paketresultate bleiben maßgeblich:`r`n$diagnosticText" |
                                 Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join "`r`n")
+                            if ($diagnosticProperty) {
+                                $recordedResult.DiagnosticOutput = $combinedDiagnostic
+                            }
+                            else {
+                                Add-Member -InputObject $recordedResult -NotePropertyName DiagnosticOutput -NotePropertyValue $combinedDiagnostic
+                            }
                         }
                     }
                     else {

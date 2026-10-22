@@ -1906,7 +1906,30 @@ elseif ($shouldPreflightManagementPowerShell -and ($wingetEnabledForManagement -
         $wingetExecutable = $null
         $chocolateyExecutable = $null
         if ($managementPowerShellManager -eq 'Winget') {
-          $appInstallerPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Sort-Object { [version]$_.Version } -Descending)
+          if ($localOsInfo -and [int]$localOsInfo.ProductType -gt 1 -and [int]$localOsInfo.BuildNumber -eq 17763 -and -not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            $portableCacheRoot = Join-Path $env:LOCALAPPDATA 'WindowsUpdateAdm\WinGetPortable'
+            if (Test-Path -LiteralPath $portableCacheRoot -PathType Container) {
+              $portableCandidates = @(Get-ChildItem -LiteralPath $portableCacheRoot -Filter winget.exe -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                $versionMatch = [regex]::Match($_.FullName, '\\WinGetPortable\\v?(?<Version>\d+(?:\.\d+){1,3})(?:\\|$)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if ($versionMatch.Success) {
+                  try { [pscustomobject]@{ Path=$_.FullName; Version=[version]$versionMatch.Groups['Version'].Value } } catch { }
+                }
+              } | Sort-Object Version -Descending)
+              if ($portableCandidates.Count -gt 0) {
+                $wingetExecutable = [string]$portableCandidates[0].Path
+                Write-ScriptLog "Server 2019: verwende die portable WinGet-CLI aus dem lokalen Cache ($($portableCandidates[0].Version)); AppX wird in PowerShell 7 nicht geladen." -LogOnly
+              }
+            }
+          }
+          $appInstallerPackages = @()
+          if ([string]::IsNullOrWhiteSpace($wingetExecutable)) {
+            try {
+              $appInstallerPackages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop | Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending)
+            }
+            catch {
+              Write-ScriptLog "AppX-Abfrage für WinGet auf dem Verwaltungsserver nicht verfügbar; prüfe die installierten Paketpfade und den Benutzeralias weiter. Ursache: $($_.Exception.Message)" -LogOnly
+            }
+          }
           foreach ($appInstallerPackage in $appInstallerPackages) {
             $candidateWinget = Join-Path ([string]$appInstallerPackage.InstallLocation) 'winget.exe'
             if (Test-Path -LiteralPath $candidateWinget -PathType Leaf) { $wingetExecutable = $candidateWinget; break }
