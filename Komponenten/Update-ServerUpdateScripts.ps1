@@ -813,6 +813,21 @@ function Invoke-ServerUpdateScripts {
         Write-Host ''
         Write-Host ("Skript-Update aus GitHub übernommen ({0} benötigte Datei(en)); starte mit aktualisiertem Stand neu." -f $changedFiles.Count) -ForegroundColor Cyan
 
+        # Der Updater kann sich selbst aus der alten Ablage im Repository-Root
+        # nach Komponenten verschieben. Die Legacy-Datei wird anschließend
+        # entfernt; für den Neustart muss dann der neue kanonische Pfad gelten.
+        $restartScriptPath = $ScriptPath
+        if (-not (Test-Path -LiteralPath $restartScriptPath -PathType Leaf) -and
+            $scriptName -ieq 'Update-ServerUpdateScripts.ps1') {
+            $movedUpdaterPath = Join-Path $scriptRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
+            if (Test-Path -LiteralPath $movedUpdaterPath -PathType Leaf) {
+                $restartScriptPath = $movedUpdaterPath
+            }
+        }
+        if (-not (Test-Path -LiteralPath $restartScriptPath -PathType Leaf)) {
+            throw "Der aktualisierte Einstiegspunkt '$scriptName' wurde am ursprünglichen und am erwarteten neuen Pfad nicht gefunden."
+        }
+
         # Ein SYSTEM-Aufgabenlauf soll nach dem Austausch nicht vom erneuten
         # Aufruf der Skriptdatei im selben PowerShell-Prozess abhängen. Eine
         # frische Instanz lädt garantiert die ersetzte Datei; -Wait hält den
@@ -832,7 +847,7 @@ function Invoke-ServerUpdateScripts {
                     throw 'Der Pfad der aktuell laufenden PowerShell konnte nicht ermittelt werden.'
                 }
 
-                $restartArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $ScriptPath
+                $restartArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $restartScriptPath
                 if ((@($BoundParameters.Keys) -contains 'TestMail') -and [bool]$BoundParameters['TestMail']) {
                     $restartArguments += ' -TestMail'
                 }
@@ -846,13 +861,13 @@ function Invoke-ServerUpdateScripts {
                 exit ([int]$restartProcess.ExitCode)
             }
             catch {
-                Write-ServerUpdateUpdaterDiagnostic -Operation 'SYSTEM-Check nach Skriptupdate neu starten' -ErrorRecord $_ -Context $ScriptPath
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'SYSTEM-Check nach Skriptupdate neu starten' -ErrorRecord $_ -Context $restartScriptPath
                 throw "Skriptdateien wurden aktualisiert, aber der SYSTEM-Check konnte nicht neu gestartet werden: $($_.Exception.Message)"
             }
         }
 
         $global:LASTEXITCODE = 0
-        & $ScriptPath @BoundParameters @RemainingArguments
+        & $restartScriptPath @BoundParameters @RemainingArguments
         $scriptExitCode = 0
         if (Test-Path variable:global:LASTEXITCODE) { $scriptExitCode = [int]$global:LASTEXITCODE }
         exit $scriptExitCode
