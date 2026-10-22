@@ -911,13 +911,21 @@ try {
     $RoleCapDir    = Join-Path $JeaBaseDir "RoleCapabilities"
 
     $JeaModuleFile = Join-Path $JeaBaseDir "$JeaModuleName.psm1"
-    $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
     if ([string]::IsNullOrWhiteSpace($DeploymentVersion)) {
-        $deploymentVersion = $expectedDeploymentVersion
-    } elseif ($DeploymentVersion -ne $expectedDeploymentVersion) {
-        throw "Übergebene WindowsUpdateAdm-Version '$DeploymentVersion' stimmt nicht mit der zentral erwarteten Version '$expectedDeploymentVersion' überein."
+        # Die Verteilung übergibt die zentral ermittelte Version ausdrücklich.
+        # Das Setup wird auf älteren Zielsystemen als einzelne Datei ausgeführt;
+        # dort muss die Versionsfunktion aus dem übertragenen Fachmodul nicht
+        # zwingend im Skriptbereich verfügbar sein.
+        $deploymentVersionCommand = Get-Command -Name Get-WindowsUpdateAdmDeploymentVersion -ErrorAction SilentlyContinue
+        if (-not $deploymentVersionCommand) {
+            throw 'Keine WindowsUpdateAdm-Version übergeben und Get-WindowsUpdateAdmDeploymentVersion ist nicht verfügbar.'
+        }
+        $deploymentVersion = [string](Get-WindowsUpdateAdmDeploymentVersion)
     } else {
-        $deploymentVersion = $DeploymentVersion
+        $deploymentVersion = [string]$DeploymentVersion
+    }
+    if ([string]::IsNullOrWhiteSpace($deploymentVersion)) {
+        throw 'Die WindowsUpdateAdm-Bereitstellungsversion ist leer.'
     }
     $JeaModuleSource = @"
 function Get-WindowsUpdateAdmDeploymentStatus {
