@@ -4,6 +4,8 @@ param(
     [ValidateRange(1, 1000)][int]$MaxEventsPerTarget = 100
 )
 
+# Ältere Windows-/PowerShell-Versionen verwenden sonst oft TLS 1.0 als Standard.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 # Die gemeinsamen Skripte werden beim Start aktualisiert.
 $scriptUpdatePath = Join-Path $PSScriptRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {

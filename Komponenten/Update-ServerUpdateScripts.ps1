@@ -1,5 +1,9 @@
 ﻿# Aktualisiert vor dem Skriptlauf alle geänderten Programmdateien aus dem öffentlichen main-Branch.
 
+# Ältere Windows-/PowerShell-Versionen verwenden TLS 1.0 als Standard. GitHub
+# verlangt TLS 1.2; die Ergänzung gilt für Commitfeed, API und Raw-Dateien.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 function Get-ServerUpdateGitBlobSha1 {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }

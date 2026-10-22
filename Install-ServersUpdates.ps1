@@ -53,6 +53,8 @@ param(
     [string]$ManagementPowerShellRunLogPath,
     [string]$ManagementPowerShellRunTimestamp
 )
+# Ältere Windows-/PowerShell-Versionen verwenden sonst oft TLS 1.0 als Standard.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
 $scriptUpdatePath = Join-Path $PSScriptRoot 'Komponenten\Update-ServerUpdateScripts.ps1'
 if (-not (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf)) {
