@@ -762,8 +762,16 @@ function Invoke-WinRMDeployment {
                 if (-not $managerAdComputer.SID) {
                     throw "AD hat keine SID für das Verwaltungsserver-Computerkonto '$env:COMPUTERNAME' geliefert."
                 }
+                $managerSidValue = if ($managerAdComputer.SID -is [System.Security.Principal.SecurityIdentifier]) {
+                    $managerAdComputer.SID.Value
+                } else {
+                    [string]$managerAdComputer.SID
+                }
+                if ([string]::IsNullOrWhiteSpace($managerSidValue)) {
+                    throw "AD hat eine leere SID für das Verwaltungsserver-Computerkonto '$env:COMPUTERNAME' geliefert."
+                }
                 $setupParameters.ManagementComputerAccount = '{0}\{1}$' -f $managerDomain.NetBIOSName, $env:COMPUTERNAME
-                $setupParameters.ManagementComputerSid = $managerAdComputer.SID.Value
+                $setupParameters.ManagementComputerSid = $managerSidValue
                 Write-DeployLog "[$Servername] JEA-Zugriff für SYSTEM-Check wird auf das Verwaltungsserver-Computerkonto $($setupParameters.ManagementComputerAccount) beschränkt." -LogOnly
                 Write-DeployLog "[$Servername] Verwaltungsserver-SID für die JEA-ACL wurde zentral aus AD ermittelt: $($setupParameters.ManagementComputerSid)." -LogOnly
             }

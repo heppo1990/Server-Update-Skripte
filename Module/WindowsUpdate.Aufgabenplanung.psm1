@@ -54,10 +54,13 @@ function Set-WindowsUpdateScheduledCheckTask {
         if ($configuredDays.Count -eq 0) { throw 'ScheduledCheck.DaysOfWeek muss für eine wöchentliche Aufgabe mindestens einen Wochentag enthalten.' }
         $days = @(
             foreach ($day in $configuredDays) {
-                if (-not [System.Enum]::IsDefined([System.DayOfWeek], [string]$day)) {
+                $dayName = [enum]::GetNames([System.DayOfWeek]) |
+                    Where-Object { [string]::Equals($_, [string]$day, [StringComparison]::OrdinalIgnoreCase) } |
+                    Select-Object -First 1
+                if (-not $dayName) {
                     throw "Unbekannter Wochentag '$day' in ScheduledCheck.DaysOfWeek. Zulässig: $([enum]::GetNames([System.DayOfWeek]) -join ', ')."
                 }
-                [System.DayOfWeek]([System.Enum]::Parse([System.DayOfWeek], [string]$day, $true))
+                [System.DayOfWeek]([System.Enum]::Parse([System.DayOfWeek], $dayName, $false))
             }
         ) | Select-Object -Unique
         New-ScheduledTaskTrigger -Weekly -WeeksInterval $interval -DaysOfWeek $days -At $runAt
