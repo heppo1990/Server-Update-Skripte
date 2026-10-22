@@ -794,9 +794,35 @@ function Invoke-ServerUpdateScripts {
             }
         }
         finally {
-            try { Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction Stop }
-            catch {
-                Write-ServerUpdateUpdaterDiagnostic -Operation 'Temporäre Updater-Dateien bereinigen' -ErrorRecord $_ -Context $temporaryDirectory
+            $cleanupError = $null
+            for ($cleanupAttempt = 1; $cleanupAttempt -le 5; $cleanupAttempt++) {
+                try {
+                    if (Test-Path -LiteralPath $temporaryDirectory) {
+                        Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction Stop
+                    }
+                    if (-not (Test-Path -LiteralPath $temporaryDirectory)) {
+                        $cleanupError = $null
+                        break
+                    }
+                    throw [IO.IOException]::new("Temporäres Verzeichnis ist nach Bereinigungsversuch $cleanupAttempt weiterhin vorhanden.")
+                }
+                catch {
+                    $cleanupError = $_
+                    if ($cleanupAttempt -lt 5) { Start-Sleep -Milliseconds 400 }
+                }
+            }
+
+            if ($cleanupError) {
+                $remainingItems = @()
+                try {
+                    if (Test-Path -LiteralPath $temporaryDirectory -PathType Container) {
+                        $remainingItems = @(Get-ChildItem -LiteralPath $temporaryDirectory -Force -Recurse -ErrorAction Stop |
+                            Select-Object -ExpandProperty FullName)
+                    }
+                }
+                catch { $remainingItems = @("Inventar fehlgeschlagen: $($_.Exception.Message)") }
+                $cleanupContext = "Pfad=$temporaryDirectory; Versuche=5; VerbliebeneEinträge=$($remainingItems -join '; ')"
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'Temporäre Updater-Dateien bereinigen' -ErrorRecord $cleanupError -Context $cleanupContext
                 Write-Warning 'Temporäre Updater-Dateien konnten nicht vollständig bereinigt werden; Details stehen im Updater-Protokoll.'
             }
         }
