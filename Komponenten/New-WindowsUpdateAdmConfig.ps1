@@ -1439,17 +1439,27 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
         Write-SetupLog "Role Capability vorhanden: $RoleCapabilityFile" "SUCCESS"
         Write-SetupLog "Session Config vorhanden: $PermanentPSSC" "SUCCESS"
         
-        # Loopback-Test nur versuchen, nicht als K.O.-Kriterium werten
-        try {
-            $TestResult = Invoke-Command -ComputerName localhost -ConfigurationName WindowsUpdateAdm `
-                                         -ScriptBlock { Get-Command Get-WindowsUpdate } `
-                                         -ErrorAction Stop
-            Write-SetupLog "Loopback-Verbindungstest erfolgreich - Get-WindowsUpdate erreichbar" "SUCCESS"
-        }
-        catch {
-            Write-SetupLog 'Loopback-Test nicht möglich; Details im Setup-Protokoll.' 'WARN'
-            Write-SetupDiagnostic -Operation 'WinRM-Loopback-Test' -ErrorRecord $_ -Context @('RemoteSetup=True')
-            Write-SetupLog "Endpunkt ist korrekt konfiguriert - manueller Test empfohlen" "INFO"
+        if ($FinalizeJEA) {
+            # Die einmalige JEA-Registrierung läuft als SYSTEM. Dieses Konto
+            # ist nicht zwangsläufig durch die auf Administratoren begrenzte
+            # Endpunkt-ACL zugelassen; ein lokaler WinRM-Aufruf würde daher
+            # AccessDenied melden, obwohl der Endpunkt korrekt registriert ist.
+            # Die tatsächliche Erreichbarkeit wird vom Verwaltungsserver aus
+            # über die konfigurierte WinRM-Authentifizierung geprüft.
+            Write-SetupLog 'Lokaler Loopback-Test im SYSTEM-Finalisierungskontext übersprungen; Endpunktprüfung erfolgt vom Verwaltungsserver.' 'INFO'
+        } else {
+            # Bei einem lokalen, interaktiven Setup ist der Loopback-Test
+            # aussagekräftig. Ein Fehler bleibt eine Warnung, kein K.O.-Kriterium.
+            try {
+                $TestResult = Invoke-Command -ComputerName localhost -ConfigurationName WindowsUpdateAdm `
+                                             -ScriptBlock { Get-Command Get-WindowsUpdate } `
+                                             -ErrorAction Stop
+                Write-SetupLog "Loopback-Verbindungstest erfolgreich - Get-WindowsUpdate erreichbar" "SUCCESS"
+            }
+            catch {
+                Write-SetupLog 'Lokaler Loopback-Test nicht möglich; der Endpunkt ist registriert, externer Verbindungstest erforderlich.' 'WARN'
+                Write-SetupDiagnostic -Operation 'WinRM-Loopback-Test' -ErrorRecord $_ -Context @('RemoteSetup=False', 'FinalizeJEA=False')
+            }
         }
     } else {
         $Missing = @()
