@@ -852,7 +852,11 @@ try {
         } else {
             Get-WindowsUpdateAdmDeploymentVersion
         }
-        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA -DeploymentVersion "{1}" -ResumeLogPath "{2}"' -f $PSCommandPath, $taskDeploymentVersion, $script:SetupLogPath
+        # Der initiale Remote-Lauf hat Modul- und NuGet-Pflege bereits
+        # abgeschlossen. Die lokale SYSTEM-Finalisierung registriert nur JEA
+        # und darf weder erneut NuGet aufrufen noch temporäre Offlinepakete
+        # benötigen.
+        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA -ModulesVerifiedCurrent -DeploymentVersion "{1}" -ResumeLogPath "{2}"' -f $PSCommandPath, $taskDeploymentVersion, $script:SetupLogPath
         if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
             # Die SYSTEM-Finalisierung muss dieselbe eingeschränkte JEA-Rolle
             # für den Verwaltungsserver registrieren wie der ursprüngliche Lauf.
