@@ -1769,7 +1769,12 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $wingetQuerySources = @()
             $wingetModuleUseAllowed = $true
             if ($isWindowsServer2019) {
+                $installedWingetPath = $wingetPath
+                $installedWingetHealth = Test-WingetExecutable -Path $installedWingetPath
                 try {
+                    # Zuerst das aktuelle Release online ermitteln und
+                    # bereitstellen. Bei API-/Downloadfehlern bleibt als
+                    # Rückfall die lokal installierte, startfähige CLI.
                     $portableClient = Get-WinGetPortableClientFromGitHub
                     $script:WindowsUpdatePortableWinGetPath = [string]$portableClient.Path
                     $wingetPath = [string]$portableClient.Path
@@ -1779,9 +1784,19 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $wingetBootstrapMessage += " Windows Server 2019: experimentelle WinGet-CLI $($portableClient.Version) $cacheState; PowerShell-Modul und AppX-Registrierungsreparatur werden umgangen."
                 }
                 catch {
-                    $wingetPreparationSucceeded = $false
-                    $wingetBootstrapMessage += ' Experimentelle WinGet-CLI konnte nicht aus dem aktuellen GitHub-Release bereitgestellt werden.'
-                    $wingetDiagnosticOutput += "WinGet-GitHub-Extraktion:`r`n$($_.Exception.ToString())`r`n"
+                    $githubFailure = $_.Exception.ToString()
+                    if ($installedWingetHealth.Works) {
+                        $script:WindowsUpdatePortableWinGetPath = [string]$installedWingetPath
+                        $wingetPath = [string]$installedWingetPath
+                        $wingetPortableMode = $true
+                        $wingetModuleUseAllowed = $false
+                        $wingetBootstrapMessage += " GitHub konnte die aktuelle WinGet-CLI nicht bereitstellen; verwende die startfähige lokal installierte CLI ($($installedWingetHealth.Output))."
+                        $wingetDiagnosticOutput += "WinGet-GitHub-Fehler (lokaler Fallback verwendet):`r`n$githubFailure`r`n"
+                    } else {
+                        $wingetPreparationSucceeded = $false
+                        $wingetBootstrapMessage += ' Experimentelle WinGet-CLI konnte weder lokal noch aus GitHub bereitgestellt werden; die GitHub-API oder der Release-Download kann beispielsweise durch ein Ratenlimit gesperrt sein.'
+                        $wingetDiagnosticOutput += "Lokale WinGet-CLI:`r`n$($installedWingetHealth.DiagnosticOutput)`r`nWinGet-GitHub-Extraktion:`r`n$githubFailure`r`n"
+                    }
                 }
             }
             if ($ExecutionMode -eq 'Check' -and $wingetPath -and -not $wingetPortableMode -and $wingetPreparationSucceeded) {
@@ -1869,7 +1884,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $wingetDiagnosticOutput += "WinGet-Quellenpaket:`r`n$($_.Exception.ToString())`r`n"
                 }
             }
-            if ($ExecutionMode -eq 'Check') {
+            if ($ExecutionMode -eq 'Check' -and $wingetPreparationSucceeded) {
                 if (-not $wingetPortableMode) {
                 # Microsoft.WinGet.Client 1.29.380+ benötigt für Aufrufe in
                 # erhöhten Sitzungen auch einen App-Installer derselben
