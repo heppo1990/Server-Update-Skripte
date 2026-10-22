@@ -3031,7 +3031,12 @@ foreach ($manualAction in @($ManualActions)) {
     if ($null -eq $_) { continue }
     $packageName = ''
     if ($_ -is [string]) {
-      $packageName = ([string]$_).Trim()
+      $manualRowMatch = [regex]::Match(
+        [string]$_,
+        '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<InstalledVersion>\S+)\s+(?<AvailableVersion>\S+)\s+(?<Source>[^\s]+)\s*$',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+      )
+      $packageName = if ($manualRowMatch.Success) { $manualRowMatch.Groups['Name'].Value.Trim() } else { ([string]$_).Trim() }
     } else {
       $nameProperty = $_.PSObject.Properties['Name']
       $idProperty = $_.PSObject.Properties['Id']
