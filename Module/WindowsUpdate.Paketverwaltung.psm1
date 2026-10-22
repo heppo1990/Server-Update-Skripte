@@ -1419,10 +1419,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     throw "App Installer $targetVersion ist vorhanden, aber sein Manifest fehlt: $manifestPath"
                 }
                 if (-not $installedFromGitHub) { try {
-                    $quotedManifestPath = "'" + $manifestPath.Replace("'", "''") + "'"
                     $appxTaskResult = Invoke-WinGetCurrentUserAppxTask -Purpose 'App Installer registrieren' -ScriptText @"
 `$ErrorActionPreference = 'Stop'
-Add-AppxPackage -Path $quotedManifestPath -Register -DisableDevelopmentMode -ErrorAction Stop | Out-Null
+Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop | Out-Null
 "@
                     $appxTaskRuns += $appxTaskResult
                 }
