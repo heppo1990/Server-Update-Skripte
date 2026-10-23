@@ -1380,6 +1380,10 @@ try {
     Add-DeferredCategoryValue -Value `$parsedCategories -Target `$categoryValues
     `$categories = `$categoryValues.ToArray()
     `$deferredKBs = @('$deferredKBsJson' | ConvertFrom-Json | Where-Object { -not [string]::IsNullOrWhiteSpace([string]`$_) })
+    if (`$deferredKBs.Count -eq 0 -and `$categories.Count -eq 0) {
+      throw 'Für die Nachinstallation wurden keine KBs oder Kategorien gespeichert. Aufgabe bleibt zur Diagnose bestehen; sie wird nicht als abgeschlossen entfernt.'
+    }
+    Write-DeferredLog "Gespeicherte Auswahl geladen: KBs=`$(`$deferredKBs.Count), Kategorien=`$(`$categories.Count)."
     `$results = @()
     `$selectionParts = @()
     if (`$deferredKBs.Count -gt 0) {
