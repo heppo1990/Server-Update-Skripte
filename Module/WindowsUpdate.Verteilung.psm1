@@ -98,6 +98,58 @@ function Test-WindowsUpdateDeploymentConfiguration {
     [PSCustomObject]@{ IsCurrent = $false; Reason = $reason; Version = '' }
 }
 
+function Wait-WindowsUpdateDeploymentFinalization {
+    param(
+        [Parameter(Mandatory)][string]$Servername,
+        [Parameter(Mandatory)][System.Security.Cryptography.X509Certificates.X509Certificate2]$ClientCertificate,
+        [string]$SetupLogPath,
+        [ValidateRange(30, 900)][int]$TimeoutSeconds = 300
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastConnectionError = $null
+    do {
+        $state = $null
+        try {
+            $state = Invoke-Command -ComputerName $Servername -UseSSL `
+                -CertificateThumbprint $ClientCertificate.Thumbprint `
+                -ArgumentList $SetupLogPath -ErrorAction Stop -ScriptBlock {
+                    param($logPath)
+                    if ([string]::IsNullOrWhiteSpace([string]$logPath) -or -not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+                        $logPath = Get-ChildItem -LiteralPath (Join-Path $env:ProgramData 'WindowsUpdateAdm\Logs') `
+                            -Filter ("Setup_{0}_*.log" -f $env:COMPUTERNAME) -File -ErrorAction SilentlyContinue |
+                            Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+                    }
+                    $content = if ($logPath -and (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+                        Get-Content -LiteralPath $logPath -Raw -ErrorAction SilentlyContinue
+                    } else { '' }
+                    $failure = [regex]::Match([string]$content, '(?im)^.*(?:\[ERROR\].*(?:FEHLER beim Setup|Setup fehlgeschlagen)|Setup fehlgeschlagen; vollständige Diagnose).*$')
+                    $task = Get-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -ErrorAction SilentlyContinue
+                    [pscustomobject]@{
+                        Complete = [string]$content -match '(?i)Lokales Setup abgeschlossen; zentrale Endpunktprüfung folgt'
+                        Failure = if ($failure.Success) { $failure.Value.Trim() } else { '' }
+                        TaskState = if ($task) { [string]$task.State } else { 'Nicht vorhanden' }
+                        LogPath = [string]$logPath
+                    }
+                }
+            $lastConnectionError = $null
+        }
+        catch {
+            $lastConnectionError = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        }
+        if ($state -and $state.Complete) { return $state }
+        if ($state -and -not [string]::IsNullOrWhiteSpace([string]$state.Failure)) {
+            throw "SYSTEM-Finalisierung auf $Servername fehlgeschlagen: $($state.Failure)"
+        }
+
+        if ((Get-Date) -ge $deadline) {
+            $detail = if ($lastConnectionError) { " Letzter Verbindungsfehler: $lastConnectionError" } else { '' }
+            throw "SYSTEM-Finalisierung auf $Servername wurde innerhalb von $TimeoutSeconds Sekunden nicht abgeschlossen.$detail"
+        }
+        Start-Sleep -Seconds 5
+    } while ($true)
+}
+
 
 
 # Verteilungsablauf: WinRM-Verbindung, Komponentenübertragung und Ergebnisbewertung.
@@ -604,6 +656,19 @@ function Invoke-WindowsUpdateWinRMDeployment {
         }
 
         if (-not $requiresJeaEndpointTest) {
+            $clientCert = Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME
+            if (-not $clientCert) { throw 'Lokales Client-Zertifikat für die Finalisierungsprüfung wurde nicht gefunden.' }
+            $setupLogPath = $null
+            foreach ($setupEntry in $remoteSetupOutput) {
+                $setupEntryText = if ($setupEntry -is [System.Management.Automation.InformationRecord]) { [string]$setupEntry.MessageData } else { [string]$setupEntry }
+                if ($setupEntryText -match '(?i)Protokoll:\s*(?<Path>[A-Z]:\\[^\r\n]*Setup_[^\\\r\n]+\.log)') {
+                    $setupLogPath = $Matches.Path.Trim()
+                }
+            }
+            Write-DeployLog "[$Servername] Warte auf Abschluss der lokalen SYSTEM-Finalisierung vor der Zertifikatsprüfung." -LogOnly
+            $finalization = Wait-WindowsUpdateDeploymentFinalization -Servername $Servername `
+                -ClientCertificate $clientCert -SetupLogPath $setupLogPath -TimeoutSeconds 300
+
             $certificateStatus = Test-WindowsUpdateDeploymentConfiguration `
                 -Servername $Servername `
                 -DeployType $DeployType `
