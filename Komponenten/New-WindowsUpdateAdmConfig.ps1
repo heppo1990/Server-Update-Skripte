@@ -156,33 +156,7 @@ catch {
 # Logging-Funktion (farbneutral für Remote-Ausführung)
 function Write-SetupLog {
     param([string]$Message, [string]$Level = "INFO", [switch]$LogOnly)
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $LogMessage = "[$Timestamp] [$Level] $Message"
-    if ($script:SetupLogPath) {
-        try { Add-Content -LiteralPath $script:SetupLogPath -Value $LogMessage -Encoding UTF8 -ErrorAction Stop }
-        catch { Write-Verbose "Setup-Protokoll konnte nicht geschrieben werden: $($_.Exception.Message)" }
-    }
-    
-    if ($LogOnly) { return }
-
-    # Farben nur wenn Terminal tatsaechlich Farben unterstuetzt
-    $SupportsColor = $false
-    try {
-        $null = $Host.UI.RawUI.ForegroundColor
-        $SupportsColor = ($Host.Name -eq 'ConsoleHost') -and (-not [Console]::IsOutputRedirected)
-    } catch { }
-    
-    if ($SupportsColor) {
-        switch ($Level) {
-            "ERROR"   { Write-Host $LogMessage -ForegroundColor Red }
-            "WARN"    { Write-Host $LogMessage -ForegroundColor Yellow }
-            "SUCCESS" { Write-Host $LogMessage -ForegroundColor Green }
-            "UPDATE"  { Write-Host $LogMessage -ForegroundColor Cyan }
-            default   { Write-Host $LogMessage }
-        }
-    } else {
-        Write-Host $LogMessage
-    }
+    Write-WindowsUpdateSetupLog -Message $Message -Level $Level -LogPath $script:SetupLogPath -LogOnly:$LogOnly
 }
 
 function Write-SetupDiagnostic {
@@ -192,22 +166,7 @@ function Write-SetupDiagnostic {
         [string[]]$Context = @()
     )
 
-    if (-not $script:SetupLogPath) { return }
-    $details = [System.Collections.Generic.List[string]]::new()
-    $details.Add("[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DIAG] Operation=$Operation")
-    $details.Add("[DIAG] Target=$env:COMPUTERNAME")
-    foreach ($item in $Context) { if (-not [string]::IsNullOrWhiteSpace($item)) { $details.Add("[DIAG] Context=$item") } }
-    $details.Add("[DIAG] ErrorId=$($ErrorRecord.FullyQualifiedErrorId)")
-    $details.Add("[DIAG] Category=$($ErrorRecord.CategoryInfo.Category)")
-    if ($ErrorRecord.InvocationInfo -and $ErrorRecord.InvocationInfo.PositionMessage) {
-        $details.Add("[DIAG] Position=$($ErrorRecord.InvocationInfo.PositionMessage.Trim())")
-    }
-    if ($ErrorRecord.ScriptStackTrace) { $details.Add("[DIAG] ScriptStackTrace=$($ErrorRecord.ScriptStackTrace)") }
-    foreach ($line in ($ErrorRecord.Exception.ToString() -split "`r?`n")) {
-        if (-not [string]::IsNullOrWhiteSpace($line)) { $details.Add("[DIAG] $($line.TrimEnd())") }
-    }
-    try { Add-Content -LiteralPath $script:SetupLogPath -Value $details.ToArray() -Encoding UTF8 -ErrorAction Stop }
-    catch { Write-Verbose "Setup-Diagnose konnte nicht geschrieben werden: $($_.Exception.Message)" }
+    Write-WindowsUpdateSetupDiagnostic -Operation $Operation -ErrorRecord $ErrorRecord -LogPath $script:SetupLogPath -TargetComputer $env:COMPUTERNAME -Context $Context
 }
 
 try {

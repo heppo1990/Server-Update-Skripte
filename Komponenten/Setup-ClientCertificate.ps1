@@ -92,27 +92,7 @@ function Write-ClientCertificateDiagnostic {
         [string]$Context
     )
 
-    try {
-        $logDirectory = Split-Path -Parent $clientCertificateLogPath
-        if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) {
-            New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
-        }
-        $details = @(
-            "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] $Operation"
-            "Benutzer: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-            "Kontext: $Context"
-            "ErrorId: $($ErrorRecord.FullyQualifiedErrorId)"
-            "Kategorie: $($ErrorRecord.CategoryInfo)"
-            "Aufrufstelle: $($ErrorRecord.InvocationInfo.PositionMessage)"
-            "Stacktrace: $($ErrorRecord.ScriptStackTrace)"
-            "Ausnahme: $($ErrorRecord.Exception.ToString())"
-            ''
-        ) -join [Environment]::NewLine
-        Add-Content -LiteralPath $clientCertificateLogPath -Value $details -Encoding UTF8 -ErrorAction Stop
-    }
-    catch {
-        Write-Verbose "Diagnose konnte nicht protokolliert werden: $($_.Exception.Message)"
-    }
+    Write-WindowsUpdateClientCertificateDiagnostic -LogPath $clientCertificateLogPath -Operation $Operation -ErrorRecord $ErrorRecord -Context $Context
 }
 
 Write-Host "`n=== Client-Zertifikat Setup für WinRM ===" -ForegroundColor Cyan

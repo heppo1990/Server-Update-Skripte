@@ -132,94 +132,7 @@ $ServerADList = Get-WindowsUpdateTargets `
   -WriteLog { param($message) Write-ScriptLog $message }
 
 # HTML-Report mit modernem Design
-$RepBody = @"
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>Update-Download Report - ${ComputerFQDN}</title>
-<style>
-    body { 
-        font-family: Arial, sans-serif; 
-        margin: 20px; 
-        background-color: #f5f5f5;
-    }
-    h1 { 
-        color: #333; 
-        border-bottom: 2px solid #FF9800; 
-        padding-bottom: 10px;
-    }
-    .info-box {
-        background-color: white;
-        padding: 15px;
-        margin: 10px 0;
-        border-left: 4px solid #FF9800;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .warning-box {
-        background-color: #fff3cd;
-        padding: 15px;
-        margin: 10px 0;
-        border-left: 4px solid #ffc107;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    table { 
-        border-collapse: collapse; 
-        width: 100%; 
-        margin: 10px 0; 
-        background-color: white;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    th, td { 
-        border: 1px solid #ddd; 
-        padding: 12px 8px; 
-        text-align: left; 
-    }
-    th { 
-        background-color: #FF9800; 
-        color: white; 
-        font-weight: bold;
-    }
-    tr:nth-child(even) { 
-        background-color: #f9f9f9; 
-    }
-    tr:hover {
-        background-color: #f1f1f1;
-    }
-    .server-title {
-        background-color: #FF9800;
-        color: white;
-        padding: 10px;
-        margin: 15px 0 5px 0;
-        font-weight: bold;
-        border-radius: 3px;
-    }
-    .no-updates {
-        background-color: #d4edda;
-        color: #155724;
-        padding: 10px;
-        margin: 5px 0;
-        border-left: 4px solid #28a745;
-    }
-    .summary {
-        background-color: #fff3e0;
-        padding: 15px;
-        margin: 20px 0;
-        border-radius: 5px;
-        font-size: 1.1em;
-        border-left: 4px solid #FF9800;
-    }
-</style>
-</head>
-<body>
-<h1>Update-Download Report - ${ComputerFQDN}</h1>
-<div class="info-box">
-    <p><strong>Computer:</strong> ${ComputerFQDN}</p>
-    <p><strong>PowerShell Version:</strong> $($PSVersionTable.PSVersion)</p>
-    <p><strong>Zeitstempel:</strong> ${TimeStamp}</p>
-    <p><strong>HINWEIS:</strong> Dieser Report zeigt heruntergeladene Updates. Es wurden <strong>KEINE Updates installiert</strong>!</p>
-</div>
-"@
+$RepBody = New-WindowsUpdateDownloadReportHeader -ComputerName $ComputerFQDN -Timestamp $TimeStamp -PowerShellVersion ([string]$PSVersionTable.PSVersion)
 
 # Server verarbeiten
 if ($ServerADList -ne $null) {
@@ -519,57 +432,8 @@ if ($LinuxCheckAttempted -and $LinuxConfiguredHostCount -gt 0) { $processedSyste
 if ($HACheckAttempted) { $processedSystemParts += 'Home Assistant: 1' }
 $processedSystemBreakdown = $processedSystemParts -join ', '
 
-if ($UpdCount -eq 0 -and $WindowsUnreachableHosts -eq 0) {
-  $RepBody += @"
-<div class="summary">
-    <p><strong>Ergebnis: Es wurden KEINE Updates heruntergeladen!</strong></p>
-    <p>Keine Updates verfügbar oder alle bereits heruntergeladen.</p>
-</div>
-"@
-} else {
-  $downloadSummaryHeadline = if ($UpdCount -eq 0) { 'Ergebnis: Keine Updates heruntergeladen; nicht erreichbare Ziele wurden übersprungen.' } else { "Ergebnis: Es wurden $UpdCount Update(s) heruntergeladen!" }
-  $downloadSummaryDetail = if ($UpdCount -eq 0) { 'Die übersprungenen Systeme wurden nicht geprüft.' } else { 'Diese Updates können mit dem Install-ServersUpdates.ps1 Skript installiert werden.' }
-  $RepBody += @"
-<div class="summary">
-    <p><strong>$downloadSummaryHeadline</strong></p>
-    <p>$downloadSummaryDetail</p>
-</div>
-"@
-}
-
-if ($WindowsUnreachableHosts -gt 0) {
-  $RepBody += "<div class='warning-box'><strong>Nicht erreichbar übersprungen:</strong> $WindowsUnreachableHosts Windows-Ziel(e). Diese Systeme wurden nicht auf Updates geprüft oder Updates heruntergeladen.</div>"
-}
-
-$RepBody += @"
-<div class="info-box">
-    <p><strong>Statistik:</strong></p>
-    <ul>
-        <li>Verarbeitete Systeme: $ProcessedSystemCount$(if ($processedSystemBreakdown) { " ($processedSystemBreakdown)" })</li>
-        <li>Heruntergeladene Updates: $UpdCount</li>
-        <li>Verarbeitungsdauer: $ScriptDuration Minuten</li>
-    </ul>
-</div>
-</body>
-</html>
-"@
-
-if ($LinuxCheckExecuted) {
-  $RepBody = $RepBody.Replace('        <li>Verarbeitungsdauer:', "        <li>Linux-Updates verfügbar (nicht separat herunterladbar): $LinuxAvailableUpdateCount</li>`n        <li>Verarbeitungsdauer:")
-}
-if ($HACheckExecuted) {
-  $RepBody = $RepBody.Replace('        <li>Verarbeitungsdauer:', "        <li>Home-Assistant-Updates verfügbar (nicht separat herunterladbar): $HAAvailableUpdateCount</li>`n        <li>Verarbeitungsdauer:")
-}
-
- $downloadSummaryLines = @(
-  "PowerShell Version: $($PSVersionTable.PSVersion)",
-  "Verarbeitete Systeme: $ProcessedSystemCount$(if ($processedSystemBreakdown) { " ($processedSystemBreakdown)" })",
-  "Heruntergeladene Updates: $UpdCount",
-  "Dauer: $ScriptDuration Minuten"
-)
-if ($WindowsUnreachableHosts -gt 0) { $downloadSummaryLines = $downloadSummaryLines[0..2] + "Nicht erreichbar übersprungen: $WindowsUnreachableHosts Windows-Ziel(e)" + $downloadSummaryLines[-1] }
-if ($LinuxCheckExecuted) { $downloadSummaryLines = $downloadSummaryLines[0..($downloadSummaryLines.Count - 2)] + "Linux-Updates verfügbar (nicht separat herunterladbar): $LinuxAvailableUpdateCount" + $downloadSummaryLines[-1] }
-if ($HACheckExecuted) { $downloadSummaryLines = $downloadSummaryLines[0..($downloadSummaryLines.Count - 2)] + "Home-Assistant-Updates verfügbar (nicht separat herunterladbar): $HAAvailableUpdateCount" + $downloadSummaryLines[-1] }
+$RepBody = Complete-WindowsUpdateDownloadReport -ReportBody $RepBody -DownloadedUpdateCount $UpdCount -UnreachableWindowsCount $WindowsUnreachableHosts -ProcessedSystemCount $ProcessedSystemCount -ProcessedSystemBreakdown $processedSystemBreakdown -DurationMinutes ([string]$ScriptDuration) -IncludeLinux:$LinuxCheckExecuted -LinuxAvailableUpdateCount $LinuxAvailableUpdateCount -IncludeHomeAssistant:$HACheckExecuted -HomeAssistantAvailableUpdateCount $HAAvailableUpdateCount
+$downloadSummaryLines = New-WindowsUpdateDownloadConsoleSummary -PowerShellVersion ([string]$PSVersionTable.PSVersion) -ProcessedSystemCount $ProcessedSystemCount -ProcessedSystemBreakdown $processedSystemBreakdown -DownloadedUpdateCount $UpdCount -UnreachableWindowsCount $WindowsUnreachableHosts -IncludeLinux:$LinuxCheckExecuted -LinuxAvailableUpdateCount $LinuxAvailableUpdateCount -IncludeHomeAssistant:$HACheckExecuted -HomeAssistantAvailableUpdateCount $HAAvailableUpdateCount -DurationMinutes ([string]$ScriptDuration)
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-DOWNLOAD ZUSAMMENFASSUNG' -Lines $downloadSummaryLines -WriteLog { param($message) Write-ScriptLog $message }
 
 # E-Mail versenden
