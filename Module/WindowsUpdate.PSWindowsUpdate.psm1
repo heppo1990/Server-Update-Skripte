@@ -336,7 +336,16 @@ function Import-WindowsUpdatePSWindowsUpdateModule {
         }
     }
 
-    $moduleReady = Update-PSWindowsUpdateModule -WriteLog { param($message, $level) & $WriteLog "[$level] $message" }
+    # Den übergeordneten Logger vor dem Aufruf explizit schließen. Ohne
+    # GetNewClosure() kann PowerShell innerhalb von Update-PSWindowsUpdateModule
+    # dessen gleichnamigen Parameter $WriteLog auflösen und den Callback
+    # rekursiv aufrufen, bis die Aufruftiefe überschritten ist.
+    $parentWriteLog = $WriteLog
+    $moduleWriteLog = {
+        param($message, $level)
+        & $parentWriteLog "[$level] $message"
+    }.GetNewClosure()
+    $moduleReady = Update-PSWindowsUpdateModule -WriteLog $moduleWriteLog
     if (-not $moduleReady) { return $false }
     if (Get-Module -Name PSWindowsUpdate) {
         & $WriteLog 'PSWindowsUpdate ist bereits geladen.'
