@@ -537,7 +537,7 @@ function Invoke-HA {
         elseif ($Command -like "ha os update*") {
             $Script:UpdateStats.OSUpdated = $true
         }
-        elseif ($Command -like "ha addons update*") {
+        elseif ($Command -like "ha apps update*") {
             $Script:UpdateStats.AddonsUpdated++
         }
     }
@@ -615,8 +615,10 @@ function Wait-HAAfterReboot {
 
 function Invoke-HAAddOnUpdates {
     Write-HostLog -Message '=== Update Home Assistant Add-ons ===' -RemoteHost $HAHost -LogFile $LogFile -Level Info
-    $addonsJson = Invoke-HAJson -Command 'ha addons list --raw-json' -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
-    if ($addonsJson.data -and $addonsJson.data.addons) { $addons = $addonsJson.data.addons }
+    $addonsJson = Invoke-HAJson -Command 'ha apps list --raw-json' -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
+    if ($addonsJson.data -and $addonsJson.data.apps) { $addons = $addonsJson.data.apps }
+    elseif ($addonsJson.data -and $addonsJson.data.addons) { $addons = $addonsJson.data.addons }
+    elseif ($addonsJson.apps) { $addons = $addonsJson.apps }
     elseif ($addonsJson.addons) { $addons = $addonsJson.addons }
     else { $addons = $addonsJson }
     if (-not $addons) {
@@ -629,7 +631,7 @@ function Invoke-HAAddOnUpdates {
         $addonVersionOld = if ($addon.version) { $addon.version } else { '?' }
         $addonVersionNew = if ($addon.version_latest) { $addon.version_latest } else { '?' }
         Write-HostLog -Message ("Update Add-on: {0} ({1} -> {2})" -f $addonName, $addonVersionOld, $addonVersionNew) -RemoteHost $HAHost -LogFile $LogFile -Level Info
-        Invoke-HA -Command ("ha addons update {0}" -f $addon.slug) -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
+        Invoke-HA -Command ("ha apps update {0}" -f $addon.slug) -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
         $Script:UpdateStats.AddonsUpdateList += [PSCustomObject]@{ Name = $addonName; VersionOld = $addonVersionOld; VersionNew = $addonVersionNew }
     }
 }
@@ -653,8 +655,8 @@ if ($CheckOnly) {
         if ($osInfo.data.update_available) {
             $details += [PSCustomObject]@{ Component='OS'; Current=[string]$osInfo.data.version; Available=[string]$osInfo.data.version_latest }
         }
-        $addonsJson = Invoke-HAJson -Command 'ha addons list --raw-json' -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
-        $addons = if ($addonsJson.data -and $addonsJson.data.addons) { @($addonsJson.data.addons) } elseif ($addonsJson.addons) { @($addonsJson.addons) } else { @($addonsJson) }
+        $addonsJson = Invoke-HAJson -Command 'ha apps list --raw-json' -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
+        $addons = if ($addonsJson.data -and $addonsJson.data.apps) { @($addonsJson.data.apps) } elseif ($addonsJson.data -and $addonsJson.data.addons) { @($addonsJson.data.addons) } elseif ($addonsJson.apps) { @($addonsJson.apps) } elseif ($addonsJson.addons) { @($addonsJson.addons) } else { @($addonsJson) }
         foreach ($addon in $addons | Where-Object { $_.update_available }) {
             # PowerShell erlaubt kein if-Statement direkt als Wert in einem Hashtable-Feld.
             $addonDisplayName = if ($addon.name) { "Add-on: $($addon.name)" } else { "Add-on: $($addon.slug)" }
