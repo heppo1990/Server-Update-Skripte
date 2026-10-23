@@ -1235,13 +1235,13 @@ try {
     `$notificationPath = Join-Path `$logDirectory 'DeferredUpdates-FinalNotificationSent.txt'
     if (Test-Path -LiteralPath `$notificationPath) {
       Write-DeferredLog 'Abschluss-E-Mail übersprungen; für diese Nachinstallation wurde bereits ein Mailversand versucht.'
-      return
+      return `$true
     }
     try {
       `$mail = Get-DeferredMailSettings
       if (-not (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo)) {
         Write-DeferredLog 'Abschluss-E-Mail übersprungen: SendMail, SMTP-Host oder Empfänger fehlen.'
-        return
+        return `$true
       }
       `$mailSubject = if (-not [string]::IsNullOrWhiteSpace([string]`$mail.Install.Subject)) { `$Subject + ' ' + [string]`$mail.Install.Subject } else { `$Subject }
       `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port)
@@ -1253,8 +1253,10 @@ try {
       `$smtp.Send(`$message)
       [System.IO.File]::WriteAllText(`$notificationPath, [DateTime]::UtcNow.ToString('o'))
       Write-DeferredLog 'Abschluss-E-Mail erfolgreich versendet.'
+      return `$true
     } catch {
       Write-DeferredLog "Abschluss-Mailversand fehlgeschlagen; ein weiterer Versuch bleibt möglich: `$(`$_.Exception.Message)"
+      return `$false
     } finally {
       if (`$message) { `$message.Dispose() }
       if (`$smtp) { `$smtp.Dispose() }
@@ -1271,7 +1273,9 @@ try {
     `$taskExpired = `$true
     `$workerPhase = 'Maximale Laufzeit erreicht'
     Write-DeferredLog 'Die Nachinstallationsaufgabe hat die maximale Laufzeit von fünf Tagen erreicht und wird beendet.'
-    Send-DeferredFinalMail -Subject 'FEHLER Nachinstallation:' -Body "Die zurückgestellten Updates auf `$env:COMPUTERNAME wurden innerhalb von fünf Tagen nicht vollständig installiert. Bitte das Protokoll DeferredUpdates.log prüfen und manuell nacharbeiten."
+    if (-not (Send-DeferredFinalMail -Subject 'FEHLER Nachinstallation:' -Body "Die zurückgestellten Updates auf `$env:COMPUTERNAME wurden innerhalb von fünf Tagen nicht vollständig installiert. Bitte das Protokoll DeferredUpdates.log prüfen und manuell nacharbeiten.")) {
+      `$workerFailed = `$true
+    }
     return
   }
   `$lastBoot = ([DateTime](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).ToUniversalTime()
@@ -1599,7 +1603,9 @@ tr:nth-child(even) { background-color: #f9f9f9; }
         Write-DeferredLog "Zurückgestellte Updates sind noch verfügbar (`$(`$remainingUpdates.Count)); nächster Installationsversuch im Wartungsfenster. Verbleibend: `$(`$remainingTitles -join '; ')"
       } else {
         `$workerPhase = 'Abschluss-E-Mail senden'
-        Send-DeferredFinalMail -Subject 'Nachinstallation:' -Body `$body -IsHtml `$true
+        if (-not (Send-DeferredFinalMail -Subject 'Nachinstallation:' -Body `$body -IsHtml `$true)) {
+          `$workerFailed = `$true
+        }
       }
     }
     `$workerPhase = 'Abgeschlossen'
