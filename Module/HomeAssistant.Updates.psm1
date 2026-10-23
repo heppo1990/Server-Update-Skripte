@@ -583,6 +583,30 @@ function Invoke-HAJson {
     }
 }
 
+function Get-HAJsonPropertyValue {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory=$true)][string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -ne $property) { return $property.Value }
+    return $null
+}
+
+function Get-HAAppListFromResponse {
+    param([Parameter(Mandatory=$true)][object]$Response)
+
+    $data = Get-HAJsonPropertyValue -InputObject $Response -Name 'data'
+    $apps = Get-HAJsonPropertyValue -InputObject $data -Name 'apps'
+    if ($null -eq $apps) { $apps = Get-HAJsonPropertyValue -InputObject $data -Name 'addons' }
+    if ($null -eq $apps) { $apps = Get-HAJsonPropertyValue -InputObject $Response -Name 'apps' }
+    if ($null -eq $apps) { $apps = Get-HAJsonPropertyValue -InputObject $Response -Name 'addons' }
+    if ($null -eq $apps) { return ,@() }
+    return ,@($apps)
+}
+
 function Wait-HAAfterReboot {
     Write-HostLog -Message "Warte maximal $script:HARebootWaitSeconds Sekunden auf Home Assistant nach dem Neustart ..." -RemoteHost $HAHost -LogFile $LogFile -Level Info
     Start-Sleep -Seconds 15
@@ -616,11 +640,7 @@ function Wait-HAAfterReboot {
 function Invoke-HAAddOnUpdates {
     Write-HostLog -Message '=== Update Home Assistant Add-ons ===' -RemoteHost $HAHost -LogFile $LogFile -Level Info
     $addonsJson = Invoke-HAJson -Command 'ha apps list --raw-json' -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
-    if ($addonsJson.data -and $addonsJson.data.apps) { $addons = $addonsJson.data.apps }
-    elseif ($addonsJson.data -and $addonsJson.data.addons) { $addons = $addonsJson.data.addons }
-    elseif ($addonsJson.apps) { $addons = $addonsJson.apps }
-    elseif ($addonsJson.addons) { $addons = $addonsJson.addons }
-    else { $addons = $addonsJson }
+    $addons = Get-HAAppListFromResponse -Response $addonsJson
     if (-not $addons) {
         Write-HostLog -Message 'Keine Add-ons gefunden (oder JSON-Struktur unerwartet).' -RemoteHost $HAHost -LogFile $LogFile -Level Warning
         return
@@ -656,7 +676,7 @@ if ($CheckOnly) {
             $details += [PSCustomObject]@{ Component='OS'; Current=[string]$osInfo.data.version; Available=[string]$osInfo.data.version_latest }
         }
         $addonsJson = Invoke-HAJson -Command 'ha apps list --raw-json' -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile
-        $addons = if ($addonsJson.data -and $addonsJson.data.apps) { @($addonsJson.data.apps) } elseif ($addonsJson.data -and $addonsJson.data.addons) { @($addonsJson.data.addons) } elseif ($addonsJson.apps) { @($addonsJson.apps) } elseif ($addonsJson.addons) { @($addonsJson.addons) } else { @($addonsJson) }
+        $addons = Get-HAAppListFromResponse -Response $addonsJson
         foreach ($addon in $addons | Where-Object { $_.update_available }) {
             # PowerShell erlaubt kein if-Statement direkt als Wert in einem Hashtable-Feld.
             $addonDisplayName = if ($addon.name) { "Add-on: $($addon.name)" } else { "Add-on: $($addon.slug)" }
