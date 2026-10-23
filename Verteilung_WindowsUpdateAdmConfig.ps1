@@ -283,6 +283,7 @@ ForEach ($Server in $Serverlist) {
         $deployResult = Invoke-WindowsUpdateServerDeployment `
             -Servername                $Servername `
             -PSSCfgSkriptFile          $PSSCfgSkriptFile `
+            -CommonModuleFile         $CommonModuleFile `
             -RootDirectory             $PSScriptRoot `
             -OfflineModulePayloadRoot $script:OfflineModulePayloadRoot `
             -DeployType                $deployTypeLabel `

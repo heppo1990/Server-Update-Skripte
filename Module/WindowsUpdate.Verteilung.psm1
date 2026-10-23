@@ -149,6 +149,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
     param(
         [string]$Servername,
         [string]$PSSCfgSkriptFile,
+        [string]$CommonModuleFile = 'WindowsUpdate.Common.psm1',
         [string]$RootDirectory,
         [string]$OfflineModulePayloadRoot,
         [string]$DeployType,
@@ -760,6 +761,7 @@ function Invoke-WindowsUpdateServerDeployment {
     param(
         [string]$Servername,
         [string]$PSSCfgSkriptFile,
+        [string]$CommonModuleFile = 'WindowsUpdate.Common.psm1',
         [string]$RootDirectory,
         [string]$OfflineModulePayloadRoot,
         [string]$DeployType = "AD",
@@ -803,6 +805,7 @@ function Invoke-WindowsUpdateServerDeployment {
             return Invoke-WindowsUpdateWinRMDeployment `
                 -Servername $Servername `
                 -PSSCfgSkriptFile $PSSCfgSkriptFile `
+                -CommonModuleFile $CommonModuleFile `
                 -RootDirectory $RootDirectory `
                 -OfflineModulePayloadRoot $OfflineModulePayloadRoot `
                 -DeployType $DeployType `
