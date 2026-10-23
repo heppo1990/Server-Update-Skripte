@@ -491,6 +491,12 @@ function Register-DeferredUpdateTask {
   if ([string]::IsNullOrWhiteSpace([string]$deferredMailSettings.Install.Subject)) {
     Add-Member -InputObject $deferredMailSettings.Install -NotePropertyName 'Subject' -NotePropertyValue 'Server Updates installiert' -Force
   }
+  $deferredBaseSubject = [string]$deferredMailSettings.Install.Subject
+  if (-not [string]::IsNullOrWhiteSpace($deferredCompanyName) -and
+      -not $deferredBaseSubject.StartsWith("$deferredCompanyName -", [System.StringComparison]::OrdinalIgnoreCase)) {
+    $deferredBaseSubject = "$deferredCompanyName - $deferredBaseSubject"
+  }
+  Add-Member -InputObject $deferredMailSettings.Install -NotePropertyName 'Subject' -NotePropertyValue $deferredBaseSubject -Force
   $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($deferredMailSettings | ConvertTo-Json -Depth 5 -Compress)))
   $registeredAt = [DateTime]::UtcNow.ToFileTimeUtc()
   $expiresAt = [DateTime]::FromFileTimeUtc($registeredAt).AddDays(5).ToLocalTime()
@@ -514,6 +520,18 @@ try {
   New-Item -ItemType Directory -Path `$logDirectory -Force | Out-Null
   function Write-DeferredLog([string]`$Message) {
     "`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  `$Message" | Add-Content -LiteralPath `$logFile -Encoding UTF8
+  }
+  function Get-DeferredUpdateField {
+    param([object]`$Update, [string[]]`$Names)
+    foreach (`$name in `$Names) {
+      `$property = `$Update.PSObject.Properties[`$name]
+      if (`$null -eq `$property -or `$null -eq `$property.Value) { continue }
+      `$value = `$property.Value
+      if (`$value -is [array]) { `$value = @(`$value | ForEach-Object { if (`$_ -and `$_.PSObject.Properties['Name']) { [string]`$_.Name } else { [string]`$_ } } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]`$_) }) -join ', ' }
+      elseif (`$value -isnot [string] -and `$value.PSObject.Properties['Name']) { `$value = [string]`$value.Name }
+      if (-not [string]::IsNullOrWhiteSpace([string]`$value)) { return [string]`$value }
+    }
+    return ''
   }
   function Get-DeferredMailSettings {
     `$mail = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$mailJson')) | ConvertFrom-Json
@@ -720,7 +738,7 @@ try {
         try { `$historyDate = [DateTime]`$entry.Date } catch { continue }
         if (`$historyDate -lt `$registeredAt.ToLocalTime()) { continue }
 
-        `$historyResult = [string]`$entry.Result
+        `$historyResult = Get-DeferredUpdateField -Update `$entry -Names @('Result', 'Status', 'OperationResult')
         if ([string]::IsNullOrWhiteSpace(`$historyResult) -and `$entry.PSObject.Properties['ResultCode']) {
           `$historyResult = switch ([int]`$entry.ResultCode) {
             2 { 'Succeeded' }
@@ -730,9 +748,9 @@ try {
         }
         if (`$historyResult -notmatch '^(Succeeded|Erfolgreich)$') { continue }
 
-        `$historyKB = [string]`$entry.KB
-        `$historyTitle = [string]`$entry.Title
-        `$historyCategoryText = @(`$entry.Categories | ForEach-Object { [string]`$_ }) -join '; '
+        `$historyKB = Get-DeferredUpdateField -Update `$entry -Names @('KB', 'KBArticleID', 'KBArticleIDs', 'UpdateKB', 'ArticleID')
+        `$historyTitle = Get-DeferredUpdateField -Update `$entry -Names @('Title', 'UpdateTitle', 'Name', 'Description')
+        `$historyCategoryText = Get-DeferredUpdateField -Update `$entry -Names @('Categories', 'Category', 'CategoryNames')
         `$matchesDeferredSelection = `$false
         foreach (`$deferredKB in `$deferredKBs) {
           if (-not [string]::IsNullOrWhiteSpace(`$historyKB) -and
@@ -798,21 +816,29 @@ try {
       `$computerValue = Get-DeferredUpdateField -Update `$result -Names @('ComputerName', 'PSComputerName')
       if ([string]::IsNullOrWhiteSpace(`$computerValue)) { `$computerValue = [string]`$env:COMPUTERNAME }
       `$statusValue = Get-DeferredUpdateField -Update `$result -Names @('Status', 'Result', 'UpdateStatus')
-      `$kbValue = Get-DeferredUpdateField -Update `$result -Names @('KB', 'KBArticleID', 'KBArticleIDs')
+      `$kbValue = Get-DeferredUpdateField -Update `$result -Names @('KB', 'KBArticleID', 'KBArticleIDs', 'UpdateKB', 'ArticleID')
       if (-not [string]::IsNullOrWhiteSpace(`$kbValue)) {
         `$kbValue = (@(([string]`$kbValue -split ',\s*') | ForEach-Object { if (`$_ -match '^KB') { `$_ } else { "KB`$_" } }) -join ', ')
       }
-      `$sizeValue = Get-DeferredUpdateField -Update `$result -Names @('Size', 'MaxDownloadSize')
-      `$titleValue = Get-DeferredUpdateField -Update `$result -Names @('Title', 'UpdateTitle', 'Name')
+      `$sizeValue = Get-DeferredUpdateField -Update `$result -Names @('Size', 'MaxDownloadSize', 'DownloadSize')
+      `$titleValue = Get-DeferredUpdateField -Update `$result -Names @('Title', 'UpdateTitle', 'Name', 'Description')
+      `$updateIdValue = Get-DeferredUpdateField -Update `$result -Names @('UpdateID', 'UpdateIdentity', 'Identity')
+      if ([string]::IsNullOrWhiteSpace(`$statusValue)) { `$statusValue = 'Erfolgreich installiert' }
+      if ([string]::IsNullOrWhiteSpace(`$kbValue) -and [string]::IsNullOrWhiteSpace(`$titleValue) -and [string]::IsNullOrWhiteSpace(`$updateIdValue)) { continue }
       `$computerName = [System.Net.WebUtility]::HtmlEncode(`$computerValue)
       `$status = [System.Net.WebUtility]::HtmlEncode(`$statusValue)
       `$kb = [System.Net.WebUtility]::HtmlEncode(`$kbValue)
       `$size = [System.Net.WebUtility]::HtmlEncode(`$sizeValue)
       `$title = [System.Net.WebUtility]::HtmlEncode(`$titleValue)
+      `$updateId = [System.Net.WebUtility]::HtmlEncode(`$updateIdValue)
+      if ([string]::IsNullOrWhiteSpace(`$titleValue)) { `$title = "Update-ID: `$updateId" }
       "<tr><td>`$computerName</td><td>`$status</td><td>`$kb</td><td>`$size</td><td>`$title</td></tr>"
     }
     if (-not `$rows) { `$rows = '<tr><td colspan="5">Keine zurückgestellten Updates waren mehr verfügbar.</td></tr>' }
     `$safeSelection = [System.Net.WebUtility]::HtmlEncode(`$selection)
+    `$mailSettingsForReport = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$mailJson')) | ConvertFrom-Json
+    `$safeCompany = [System.Net.WebUtility]::HtmlEncode([string]`$mailSettingsForReport.CompanyName)
+    if ([string]::IsNullOrWhiteSpace(`$safeCompany)) { `$safeCompany = 'Server Updates' }
     `$body = @'
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
@@ -826,14 +852,14 @@ th, td { border: 1px solid #ddd; padding: 10px 8px; text-align: left; }
 th { background-color: #4CAF50; color: white; }
 tr:nth-child(even) { background-color: #f9f9f9; }
 </style></head><body>
-<h1>Nachinstallation – Server Updates</h1>
-<div class="info-box"><p><strong>Computer:</strong> {{computer}}</p><p><strong>Zeitpunkt:</strong> {{date}}</p><p><strong>Auswahl:</strong> {{selection}}</p></div>
+<h1>{{company}} – Server Updates</h1>
+<div class="info-box"><p><strong>Computer:</strong> {{computer}}</p><p><strong>PowerShell-Version:</strong> {{powershell}}</p><p><strong>Zeitpunkt:</strong> {{date}}</p><p><strong>Nachinstallierte Auswahl:</strong> {{selection}}</p></div>
 <div class="section-title">Nachinstallierte Windows-Updates</div>
 <table><tr><th>ComputerName</th><th>Status</th><th>KB</th><th>Size</th><th>Title</th></tr>{{rows}}</table>
-<div class="summary"><strong>Ergebnis:</strong> Die Nachinstallation wurde abgeschlossen. Installierte Updates: {{count}}.</div>
+<div class="summary"><strong>Ergebnis:</strong> Die Nachinstallation wurde erfolgreich abgeschlossen. Installierte Updates: {{count}}.</div>
 </body></html>
 '@
-    `$body = `$body.Replace('{{computer}}', [System.Net.WebUtility]::HtmlEncode(`$env:COMPUTERNAME)).Replace('{{date}}', (Get-Date -Format 'dd.MM.yyyy HH:mm:ss')).Replace('{{selection}}', `$safeSelection).Replace('{{rows}}', (`$rows -join '')).Replace('{{count}}', [string]`$(@(`$results).Count))
+    `$body = `$body.Replace('{{company}}', `$safeCompany).Replace('{{computer}}', [System.Net.WebUtility]::HtmlEncode(`$env:COMPUTERNAME)).Replace('{{powershell}}', [System.Net.WebUtility]::HtmlEncode(`$PSVersionTable.PSVersion.ToString())).Replace('{{date}}', (Get-Date -Format 'dd.MM.yyyy HH:mm:ss')).Replace('{{selection}}', `$safeSelection).Replace('{{rows}}', (`$rows -join '')).Replace('{{count}}', [string]`$(@(`$results).Count))
     `$workerPhase = 'Neustartbedarf prüfen'
     `$rebootStatus = Get-WURebootStatus -Silent -ErrorAction Stop
     `$rebootRequired = if (`$rebootStatus -is [bool]) { `$rebootStatus } elseif (`$null -ne `$rebootStatus -and `$null -ne `$rebootStatus.PSObject.Properties['RebootRequired']) { [bool]`$rebootStatus.RebootRequired } else { `$false }
@@ -903,7 +929,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
         Write-DeferredLog "Zurückgestellte Updates sind noch verfügbar (`$(`$remainingUpdates.Count)); nächster Installationsversuch im Wartungsfenster. Verbleibend: `$(`$remainingTitles -join '; ')"
       } else {
         `$workerPhase = 'Abschluss-E-Mail senden'
-        if (-not (Send-DeferredFinalMail -Subject 'Nachinstallation:' -Body `$body -IsHtml `$true)) {
+        if (-not (Send-DeferredFinalMail -Subject 'Nachinstallation abgeschlossen:' -Body `$body -IsHtml `$true)) {
           `$workerFailed = `$true
         }
       }
