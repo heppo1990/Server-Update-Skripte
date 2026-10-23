@@ -162,7 +162,7 @@ function Invoke-PackageManagerUpdates {
     $wingetSkipReason = ''
     if ($enableWinget) {
       try {
-        $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $AuthInfo -TimeoutSeconds 30 `
+        $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $AuthInfo -TimeoutSeconds 60 `
           -WriteLog { param($message) Write-ScriptLog $message -LogOnly }
         Write-ScriptLog "Betriebssystem auf $Servername erkannt: $($targetOsInfo.Caption); Version $($targetOsInfo.Version); Build $($targetOsInfo.BuildNumber); ProductType $($targetOsInfo.ProductType)." -LogOnly
         if ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {

@@ -194,7 +194,7 @@ function Get-WindowsUpdateTargetOperatingSystem {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
         $AuthInfo,
-        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 30,
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 60,
         [scriptblock]$WriteLog
     )
 

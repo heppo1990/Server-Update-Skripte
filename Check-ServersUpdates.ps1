@@ -774,7 +774,7 @@ if ($ServerADList -ne $null) {
         $skipWingetReason = ''
         if ($targetEnableWinget) {
           try {
-            $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $svcCredential -TimeoutSeconds 30 `
+            $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $svcCredential -TimeoutSeconds 60 `
               -WriteLog { param($message) Write-ScriptLog $message $true }
             Write-ScriptLog "Betriebssystem auf $Servername erkannt: $($targetOsInfo.Caption); Version $($targetOsInfo.Version); Build $($targetOsInfo.BuildNumber); ProductType $($targetOsInfo.ProductType)." $true
             if ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
