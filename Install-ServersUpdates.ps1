@@ -982,6 +982,10 @@ try {
     $runnerSource = @"
 @echo off
 echo [%date% %time%] Taskrunner gestartet.>>"$RunnerLogPath"
+if not exist "$WorkerPath" (
+  echo [%date% %time%] FEHLER: Workerdatei "$WorkerPath" fehlt; Nachinstallationsaufgabe muss neu eingerichtet werden.>>"$RunnerLogPath"
+  exit /b 1
+)
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$WorkerPath" >>"$RunnerLogPath" 2>&1
 set "WORKER_EXIT=%ERRORLEVEL%"
 echo [%date% %time%] PowerShell-Worker beendet; Exitcode %WORKER_EXIT%.>>"$RunnerLogPath"
@@ -1057,7 +1061,8 @@ exit /b %WORKER_EXIT%
       )
       if ($expiryTriggerAt -gt [datetime]::MinValue) { $triggers += New-ScheduledTaskTrigger -Once -At $expiryTriggerAt }
       $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-      Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Force | Out-Null
+      $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew
+      Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
     } else {
       # schtasks unterstützt nur einen Trigger je Task; Windows 7 erhält deshalb
       # getrennte Aufgaben für Wartungsfenster und Systemstart.
@@ -1232,9 +1237,6 @@ try {
       Write-DeferredLog 'Abschluss-E-Mail übersprungen; für diese Nachinstallation wurde bereits ein Mailversand versucht.'
       return
     }
-    # Vor dem SMTP-Aufruf markieren: auch bei einem Abbruch während/nach Send
-    # wird für denselben Lauf kein zweites Mal eine Mail versendet.
-    [System.IO.File]::WriteAllText(`$notificationPath, [DateTime]::UtcNow.ToString('o'))
     try {
       `$mail = Get-DeferredMailSettings
       if (-not (`$mail.Install.SendMail -and `$mail.Host -and `$mail.MailTo)) {
@@ -1249,9 +1251,10 @@ try {
       `$message.BodyEncoding = [Text.Encoding]::UTF8
       `$message.IsBodyHtml = `$IsHtml
       `$smtp.Send(`$message)
+      [System.IO.File]::WriteAllText(`$notificationPath, [DateTime]::UtcNow.ToString('o'))
       Write-DeferredLog 'Abschluss-E-Mail erfolgreich versendet.'
     } catch {
-      Write-DeferredLog "Einmaliger Abschluss-Mailversand fehlgeschlagen: `$(`$_.Exception.Message)"
+      Write-DeferredLog "Abschluss-Mailversand fehlgeschlagen; ein weiterer Versuch bleibt möglich: `$(`$_.Exception.Message)"
     } finally {
       if (`$message) { `$message.Dispose() }
       if (`$smtp) { `$smtp.Dispose() }
