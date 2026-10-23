@@ -178,7 +178,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
             if ($preflight.IsCurrent) {
                 $preflightCertificate = if ($DeployType -ne 'AD') { Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME } else { $null }
                 $authLabel = if ($DeployType -eq 'AD') { 'Kerberos' } else { "Clientzertifikat $($preflightCertificate.Thumbprint)" }
-                Write-DeployLog "[$Servername] Konfiguration Version $($preflight.Version) aktuell; Verbindung per $authLabel erfolgreich. Einrichtung wird übersprungen." -Level Success
+                Write-DeployLog "[$Servername] WindowsUpdateAdm-Endpunkt und Statusfunktion (Version $($preflight.Version)) erfolgreich getestet." -Level Success
+                Write-DeployLog "[$Servername] Konfiguration aktuell; Verbindung per $authLabel erfolgreich. Einrichtung wird übersprungen." -LogOnly
                 return [PSCustomObject]@{
                     Status = 'Success'
                     Message = "WindowsUpdateAdm Version $($preflight.Version) aktuell; Verbindung erfolgreich, keine Einrichtung erforderlich"
