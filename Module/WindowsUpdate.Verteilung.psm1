@@ -411,8 +411,14 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 $modulesToStage.Add($moduleName)
             }
         }
-        $nugetExpected = [version]'2.8.5.208'
-        $nugetNeeded = -not $targetModuleStatus.NuGet -or ([version]$targetModuleStatus.NuGet -lt $nugetExpected)
+        $nugetMinimum = [version]'2.8.5.201'
+        $nugetExpected = if ($ExpectedModuleVersions.Contains('NuGet')) { [version]$ExpectedModuleVersions['NuGet'] } else { $null }
+        $nugetInstalled = if ($targetModuleStatus.NuGet) { [version]$targetModuleStatus.NuGet } else { $null }
+        $nugetNeeded = if ($nugetExpected) {
+            -not $nugetInstalled -or $nugetInstalled -lt $nugetExpected
+        } else {
+            -not $nugetInstalled -or $nugetInstalled -lt $nugetMinimum
+        }
         $modulesVerifiedCurrent = ($modulesToStage.Count -eq 0 -and -not $nugetNeeded)
         $moduleStateText = foreach ($moduleName in @('PSWindowsUpdate', $(if ($EnableWingetUpdates) { 'Microsoft.WinGet.Client' }))) {
             if (-not [string]::IsNullOrWhiteSpace($moduleName)) {
@@ -421,7 +427,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 '{0} {1}/{2}' -f $moduleName, $installed, $ExpectedModuleVersions[$moduleName]
             }
         }
-        $moduleStateText += 'NuGet {0}/{1}' -f $targetModuleStatus.NuGet, $nugetExpected
+        $nugetExpectedText = if ($nugetExpected) { [string]$nugetExpected } else { "Onlineversion nicht ermittelbar; Mindestversion $nugetMinimum" }
+        $moduleStateText += 'NuGet {0}/{1}' -f $targetModuleStatus.NuGet, $nugetExpectedText
         Write-DeployLog "[$Servername] Versionsprüfung: $($moduleStateText -join '; ')." -LogOnly
         if ($modulesVerifiedCurrent) {
             Write-DeployLog "[$Servername] PSWindowsUpdate, NuGet und optionale WinGet-Module sind aktuell; keine Offlinepakete werden übertragen." -LogOnly

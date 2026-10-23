@@ -113,6 +113,28 @@ $updaterDefinition
     return $true
 }
 
+function Get-WindowsUpdateOnlineNuGetProviderVersion {
+    <# Ermittelt die aktuelle klassische NuGet-Provider-Version im OneGet-Bootstrap-Feed. #>
+    param([scriptblock]$WriteLog)
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    try {
+        $provider = Find-PackageProvider -Name NuGet -AllVersions -ForceBootstrap -Force `
+            -ErrorAction SilentlyContinue -WarningAction SilentlyContinue |
+            Where-Object { $_.Source -match '(?i)(cdn\.oneget\.org|onegetcdn\.azureedge\.net)/providers/nuget-\d+(\.\d+){1,3}\.package\.swidtag$' } |
+            Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+        if (-not $provider -or [string]$provider.Version -notmatch '^\d+(\.\d+){1,3}$') {
+            throw 'Der OneGet-Bootstrap-Feed lieferte keine gültige NuGet-Provider-Version.'
+        }
+        return [pscustomobject]@{ Version = [version]$provider.Version; Error = $null }
+    }
+    catch {
+        $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        if ($WriteLog) { & $WriteLog "Aktuelle NuGet-Provider-Version konnte online nicht ermittelt werden. Ursache: $detail" 'WARN' }
+        return [pscustomobject]@{ Version = $null; Error = $detail }
+    }
+}
+
 function New-WindowsUpdateNuGetProviderPayload {
     <# Beschafft den NuGet-Provider zentral online und erstellt ein temporäres Offlinepaket. #>
     param([Parameter(Mandatory)][string]$DestinationPath, [scriptblock]$WriteLog)
@@ -120,28 +142,15 @@ function New-WindowsUpdateNuGetProviderPayload {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $providerRoot = Join-Path $DestinationPath 'NuGetProvider'
     New-Item -ItemType Directory -Path $providerRoot -Force -ErrorAction Stop | Out-Null
-    $providerVersion = $null
-
+    $providerLookup = Get-WindowsUpdateOnlineNuGetProviderVersion -WriteLog $WriteLog
+    $providerVersion = if ($providerLookup.Version) { [string]$providerLookup.Version } else { $null }
+    $targetVersionPath = $null
     try {
-        # Nur den klassischen OneGet-Bootstrap-Provider verwenden. Der integrierte
-        # NuGet-Provider 3.0.0.1 aus PowerShell 7 ist kein Paket dieses Feeds.
-        $provider = Find-PackageProvider -Name NuGet -AllVersions -ForceBootstrap -Force `
-            -ErrorAction Stop -WarningAction SilentlyContinue |
-            Where-Object { $_.Source -match '(?i)(cdn\.oneget\.org|onegetcdn\.azureedge\.net)/providers/nuget-\d+(\.\d+){1,3}\.package\.swidtag$' } |
-            Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
-        if ($provider) { $providerVersion = [string]$provider.Version }
-    } catch { }
-
-    if ($providerVersion -notmatch '^\d+(\.\d+){1,3}$') {
-        # 2.8.5.208 ist die letzte von Microsoft dokumentierte Provider-Version.
-        $providerVersion = '2.8.5.208'
-    }
-
-    $targetVersionPath = Join-Path $providerRoot $providerVersion
-    New-Item -ItemType Directory -Path $targetVersionPath -Force -ErrorAction Stop | Out-Null
-    $providerFile = Join-Path $targetVersionPath 'Microsoft.PackageManagement.NuGetProvider.dll'
-    $providerUri = "https://cdn.oneget.org/providers/Microsoft.PackageManagement.NuGetProvider-$providerVersion.dll"
-    try {
+        if (-not $providerVersion) { throw $providerLookup.Error }
+        $targetVersionPath = Join-Path $providerRoot $providerVersion
+        New-Item -ItemType Directory -Path $targetVersionPath -Force -ErrorAction Stop | Out-Null
+        $providerFile = Join-Path $targetVersionPath 'Microsoft.PackageManagement.NuGetProvider.dll'
+        $providerUri = "https://cdn.oneget.org/providers/Microsoft.PackageManagement.NuGetProvider-$providerVersion.dll"
         Invoke-WebRequest -Uri $providerUri -OutFile $providerFile -UseBasicParsing `
             -ErrorAction Stop -WarningAction SilentlyContinue
         if (-not (Test-Path -LiteralPath $providerFile -PathType Leaf) -or (Get-Item -LiteralPath $providerFile).Length -lt 1024) {
@@ -151,7 +160,7 @@ function New-WindowsUpdateNuGetProviderPayload {
         return [pscustomobject]@{ Root = $providerRoot; Version = $providerVersion; Source = 'Online' }
     }
     catch {
-        Remove-Item -LiteralPath $targetVersionPath -Recurse -Force -ErrorAction SilentlyContinue
+        if ($targetVersionPath) { Remove-Item -LiteralPath $targetVersionPath -Recurse -Force -ErrorAction SilentlyContinue }
         $localProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
             Where-Object { $_.ProviderPath -match '(?i)[\\/]PackageManagement[\\/]ProviderAssemblies[\\/]nuget[\\/]' } |
             Sort-Object Version -Descending | Select-Object -First 1
@@ -181,8 +190,6 @@ function Update-NuGetProvider {
     $installedProvider = $availableProviders |
         Where-Object { $_.ProviderPath -like "$providerRoot\*" } |
         Sort-Object Version -Descending | Select-Object -First 1
-    $latestProvider = $null
-
     # PowerShell 7 enthält NuGet im eigenen PackageManagement-Modul; der
     # Bootstrap-Feed stellt diesen integrierten Provider nicht als Update bereit.
     if ($PSVersionTable.PSVersion.Major -ge 7) {
@@ -206,28 +213,10 @@ function Update-NuGetProvider {
                 (Test-Path -LiteralPath (Join-Path $_.FullName 'Microsoft.PackageManagement.NuGetProvider.dll') -PathType Leaf) } |
             Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
     }
-    $onlineInstallError = $null
+    $providerLookup = Get-WindowsUpdateOnlineNuGetProviderVersion -WriteLog $WriteLog
+    $targetVersion = $providerLookup.Version
+    $onlineInstallError = $providerLookup.Error
     $fallbackError = $null
-    try {
-        # Die Suche prüft Bootstrap-Feed und PSGallery. Ein "No match" aus PSGallery
-        # darf die gefundenen Bootstrap-Versionen nicht durch ErrorAction Stop verwerfen.
-        $latestProvider = Find-PackageProvider -Name NuGet -AllVersions -ForceBootstrap -Force `
-            -ErrorAction SilentlyContinue -WarningAction SilentlyContinue |
-            Where-Object { $_.Source -match '(?i)(cdn\.oneget\.org|onegetcdn\.azureedge\.net)/providers/nuget-\d+(\.\d+){1,3}\.package\.swidtag$' } |
-            Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
-    }
-    catch {
-        $message = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-        $onlineInstallError = $message
-    }
-
-    if (-not $latestProvider) {
-        if (-not $onlineInstallError) { $onlineInstallError = 'Die aktuelle Version konnte nicht aus dem Bootstrap-Feed ermittelt werden.' }
-        $targetVersion = $null
-    } else {
-        $targetVersion = [version]$latestProvider.Version
-    }
-
     if ($targetVersion -and $installedProvider -and $installedProvider.Version -ge $targetVersion -and -not $Force) {
         if ($WriteLog) { & $WriteLog "NuGet ist aktuell (Version $($installedProvider.Version))." 'SUCCESS' }
         return $true

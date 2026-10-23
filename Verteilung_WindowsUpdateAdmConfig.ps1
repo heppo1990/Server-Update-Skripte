@@ -235,6 +235,15 @@ if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
             Write-DeployLog "Aktuelle PSGallery-Version von $moduleName nicht ermittelbar; Zielprüfung verwendet eine sichere Bereitstellung." -Level Warning -LogOnly
         }
     }
+    $nugetOnlineVersion = Get-WindowsUpdateOnlineNuGetProviderVersion -WriteLog {
+        param($message, $level)
+        $deployLevel = if ($level -eq 'WARN') { 'Warning' } else { 'Info' }
+        Write-DeployLog $message -Level $deployLevel -LogOnly
+    }
+    if ($nugetOnlineVersion.Version) {
+        $script:ExpectedModuleVersions['NuGet'] = [version]$nugetOnlineVersion.Version
+        Write-DeployLog "Aktuelle NuGet-Provider-Version aus dem Onlinefeed: $($nugetOnlineVersion.Version)." -LogOnly
+    }
 }
 
 # Ergebnis-Tracking
