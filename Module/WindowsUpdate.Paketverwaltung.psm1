@@ -2410,7 +2410,19 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 if ($ExecutionMode -eq 'Install') {
                     $interactiveQuery = Get-WingetInteractiveUserUpgradeLines -InstallUpdates
                     $wingetInteractiveUserDiagnosticOutput = @($interactiveQuery.Notes) -join "`r`n"
-                    foreach ($interactivePackage in @($interactiveQuery.Packages)) {
+                    $interactivePackages = @()
+                    foreach ($interactivePackageCandidate in @($interactiveQuery.Packages)) {
+                        if ($null -eq $interactivePackageCandidate) {
+                            $nullPackageNote = 'Die WinGet-Benutzerfolgeauswertung lieferte einen leeren Paketeintrag; der Eintrag wurde ignoriert.'
+                            $wingetInteractiveUserDiagnosticOutput = @(
+                                $wingetInteractiveUserDiagnosticOutput
+                                $nullPackageNote
+                            ) -join "`r`n"
+                            continue
+                        }
+                        $interactivePackages += $interactivePackageCandidate
+                    }
+                    foreach ($interactivePackage in $interactivePackages) {
                         $displayName = "[$($interactivePackage.UserName)] $($interactivePackage.Name)"
                         $packageRow = [pscustomobject]@{
                             Name = $displayName; Id = $interactivePackage.Id
