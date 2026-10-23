@@ -1790,7 +1790,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $wingetPath = [string]$installedWingetPath
                         $wingetPortableMode = $true
                         $wingetModuleUseAllowed = $false
-                        $wingetBootstrapMessage += " GitHub konnte die aktuelle WinGet-CLI nicht bereitstellen; verwende die startfähige lokal installierte CLI ($($installedWingetHealth.Output))."
+                        $wingetBootstrapMessage += " WinGet-GitHub-Fallback: Der API-/Releaseabruf ist fehlgeschlagen; die geprüfte, lokal installierte CLI '$installedWingetPath' wird verwendet ($($installedWingetHealth.Output))."
                         $wingetDiagnosticOutput += "WinGet-GitHub-Fehler (lokaler Fallback verwendet):`r`n$githubFailure`r`n"
                     } else {
                         $wingetPreparationSucceeded = $false
