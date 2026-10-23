@@ -933,12 +933,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($deploymentVersion)) {
         throw 'Die WindowsUpdateAdm-Bereitstellungsversion ist leer.'
     }
-    $JeaModuleSource = @"
-function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '$deploymentVersion' }
-}
-Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
-"@
+    $JeaModuleSource = New-WindowsUpdateAdmDeploymentStatusModuleSource -Version $deploymentVersion
     if (-not (Test-Path -LiteralPath $JeaBaseDir)) { New-Item -Path $JeaBaseDir -ItemType Directory -Force | Out-Null }
     [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
     Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"

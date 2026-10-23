@@ -210,19 +210,7 @@ if ($existingCert) {
 if (-not $existingCert) {
     Write-Host "`nErstelle Client-Zertifikat '$CertName'..." -ForegroundColor Cyan
     try {
-        $cert = New-SelfSignedCertificate `
-            -Subject        "CN=$CertName" `
-            -CertStoreLocation $certStorePath `
-            -KeyUsage       DigitalSignature, KeyEncipherment `
-            -KeyAlgorithm   RSA `
-            -KeyLength      4096 `
-            -HashAlgorithm  SHA256 `
-            -NotAfter       (Get-Date).AddYears($ValidYears) `
-            -TextExtension  @(
-                "2.5.29.37={text}1.3.6.1.5.5.7.3.2",
-                "2.5.29.17={text}upn=$certUpn"
-            ) `
-            -ErrorAction    Stop
+        $cert = New-WindowsUpdateClientCertificate -Subject "CN=$CertName" -StorePath $certStorePath -UserPrincipalName $certUpn -ValidYears $ValidYears
 
         Write-Host "Zertifikat erstellt:" -ForegroundColor Green
         Write-Host "  Thumbprint: $($cert.Thumbprint)" -ForegroundColor White
@@ -238,14 +226,7 @@ if (-not $existingCert) {
 # Public Key exportieren
 Write-Host "`nExportiere Public Key nach: $exportPath" -ForegroundColor Cyan
 try {
-    if (-not (Test-Path -LiteralPath $certificateDirectory -PathType Container)) {
-        New-Item -Path $certificateDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
-    }
-    $certBytes = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-    [System.IO.File]::WriteAllBytes($exportPath, $certBytes)
-    if (Test-Path -LiteralPath $legacyExportPath -PathType Leaf) {
-        Remove-Item -LiteralPath $legacyExportPath -Force -ErrorAction Stop
-    }
+    Export-WindowsUpdateClientCertificatePublicKey -Certificate $cert -Path $exportPath -LegacyPath $legacyExportPath | Out-Null
     Write-Host "Public Key exportiert." -ForegroundColor Green
 }
 catch {

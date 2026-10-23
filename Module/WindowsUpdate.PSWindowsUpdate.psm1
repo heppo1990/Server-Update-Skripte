@@ -308,3 +308,73 @@ function Update-PSWindowsUpdateModule {
     }
     return $true
 }
+
+function Import-WindowsUpdatePSWindowsUpdateModule {
+    param(
+        [Parameter(Mandatory)][scriptblock]$WriteLog,
+        [switch]$LocalSystemRun
+    )
+
+    & $WriteLog 'Versuche PSWindowsUpdate-Modul zu laden...'
+    if ($LocalSystemRun) {
+        $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+        if (-not $installedModule) {
+            & $WriteLog 'KRITISCHER FEHLER: PSWindowsUpdate ist maschinenweit nicht installiert; der SYSTEM-Aufgabenlauf kann das Modul nicht aktualisieren.'
+            return $false
+        }
+        try {
+            Import-Module -Name $installedModule.Path -ErrorAction Stop
+            & $WriteLog "PSWindowsUpdate $($installedModule.Version) aus dem maschinenweiten Modulpfad geladen; Onlineaktualisierung im SYSTEM-Aufgabenlauf übersprungen."
+            return $true
+        }
+        catch {
+            & $WriteLog "KRITISCHER FEHLER: PSWindowsUpdate $($installedModule.Version) konnte im SYSTEM-Aufgabenlauf nicht geladen werden: $($_.Exception.Message)"
+            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'PSWindowsUpdate-Import-SYSTEM' -ErrorRecord $_
+            return $false
+        }
+    }
+
+    $moduleReady = Update-PSWindowsUpdateModule -WriteLog { param($message, $level) & $WriteLog "[$level] $message" }
+    if (-not $moduleReady) { return $false }
+    if (Get-Module -Name PSWindowsUpdate) {
+        & $WriteLog 'PSWindowsUpdate ist bereits geladen.'
+        return $true
+    }
+    try {
+        Import-Module PSWindowsUpdate -ErrorAction Stop
+        & $WriteLog 'PSWindowsUpdate erfolgreich geladen (Standard-Pfad).'
+        return $true
+    }
+    catch {
+        & $WriteLog 'Standard-Import von PSWindowsUpdate fehlgeschlagen; prüfe alternative Modulpfade.'
+        Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'PSWindowsUpdate-Import Standardpfad' -ErrorRecord $_
+    }
+
+    $possiblePaths = @(
+        "$env:ProgramFiles\WindowsPowerShell\Modules\PSWindowsUpdate",
+        "${env:ProgramFiles(x86)}\WindowsPowerShell\Modules\PSWindowsUpdate",
+        "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules\PSWindowsUpdate",
+        'C:\Program Files\WindowsPowerShell\Modules\PSWindowsUpdate'
+    )
+    foreach ($path in $possiblePaths) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        & $WriteLog "Gefunden in: $path"
+        try {
+            Import-Module $path -ErrorAction Stop
+            & $WriteLog "PSWindowsUpdate erfolgreich geladen aus: $path"
+            return $true
+        }
+        catch {
+            & $WriteLog "Import aus '$path' fehlgeschlagen; Details im Log."
+            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'PSWindowsUpdate-Import Alternativpfad' -Target $path -ErrorRecord $_
+        }
+    }
+
+    & $WriteLog 'FEHLER: PSWindowsUpdate konnte nicht gefunden/geladen werden!'
+    & $WriteLog 'Bitte installieren Sie das Modul mit: Install-Module PSWindowsUpdate -Force'
+    return $false
+}
+
+Export-ModuleMember -Function Update-PSWindowsUpdateModule, Import-WindowsUpdatePSWindowsUpdateModule

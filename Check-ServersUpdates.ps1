@@ -1,4 +1,4 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 
 <#
 .SYNOPSIS
@@ -136,55 +136,29 @@ if ($script:LocalSystemDetectionError) {
 }
 
 function Add-CheckRedistributionNotice {
-  param(
-    [Parameter(Mandatory)][string]$Target,
-    [Parameter(Mandatory)][string]$Reason
-  )
-
-  $nextStep = 'WindowsUpdateAdm-Verteilung und WinRM-Verbindung prüfen; bei fehlendem oder veraltetem JEA-Endpunkt Verteilung erneut ausführen.'
-  $script:CheckActionNotices += [pscustomobject]@{ Area='WindowsUpdateAdm'; Target=$Target; Reason=$Reason; NextStep=$nextStep }
-  Write-ScriptLog "HANDLUNGSBEDARF: $Target (WindowsUpdateAdm) – $Reason $nextStep" $true
+  param([Parameter(Mandatory)][string]$Target,[Parameter(Mandatory)][string]$Reason)
+  $notice = New-WindowsUpdateCheckRedistributionNotice -Target $Target -Reason $Reason
+  $script:CheckActionNotices += $notice
+  Write-ScriptLog "HANDLUNGSBEDARF: $Target ($($notice.Area)) – $Reason $($notice.NextStep)" $true
 }
 
 function Add-CheckExternalSetupNotice {
-  param(
-    [Parameter(Mandatory)][string]$Area,
-    [Parameter(Mandatory)][string]$Target,
-    [Parameter(Mandatory)][string]$Reason
-  )
-
-  if ($Reason -match 'Verbindung nicht bestätigt') {
-    $nextStep = 'Zuerst Erreichbarkeit und SSH prüfen; Verteilung nur bei fehlender oder ungültiger Einrichtung erneut ausführen.'
-  } elseif ($Area -eq 'Linux') {
-    $nextStep = 'Bei fehlendem/veraltetem SSH-Schlüssel oder sudo-Setup die Linux-Verteilung erneut ausführen.'
-  } else {
-    $nextStep = 'Bei fehlendem SSH-Schlüssel die Home-Assistant-Verteilung erneut ausführen.'
-  }
-  $script:CheckActionNotices += [pscustomobject]@{ Area=$Area; Target=$Target; Reason=$Reason; NextStep=$nextStep }
-  Write-ScriptLog "HANDLUNGSBEDARF: $Target ($Area) – $Reason $nextStep" $true
+  param([Parameter(Mandatory)][string]$Area,[Parameter(Mandatory)][string]$Target,[Parameter(Mandatory)][string]$Reason)
+  $notice = New-WindowsUpdateCheckExternalSetupNotice -Area $Area -Target $Target -Reason $Reason
+  $script:CheckActionNotices += $notice
+  Write-ScriptLog "HANDLUNGSBEDARF: $Target ($Area) – $Reason $($notice.NextStep)" $true
 }
 
 function Get-CheckClientCertificate {
-  $thumbprint = [string]$UpdateSettings.ClientCertThumbprint
   try {
-    $certificates = @(Get-ChildItem -Path 'Cert:\CurrentUser\My' -ErrorAction Stop)
+    Get-WindowsUpdateCheckClientCertificate -Thumbprint ([string]$UpdateSettings.ClientCertThumbprint) -ComputerName $env:COMPUTERNAME -StorePath 'Cert:\CurrentUser\My'
   }
   catch {
     Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message $true } -Operation 'WinRM-Clientzertifikate lesen' -Target 'Cert:\CurrentUser\My' -ErrorRecord $_ -Context 'Zertifikatsauthentifizierung für Zusatz- und Hypervisorziele kann nicht bestätigt werden.'
     Write-ScriptLog 'WARNUNG: Lokaler Zertifikatsspeicher konnte nicht gelesen werden; Zertifikatsverbindung ist nicht verfügbar. Details stehen im Protokoll.'
     return $null
   }
-
-  if (-not [string]::IsNullOrWhiteSpace($thumbprint)) {
-    return $certificates | Where-Object { $_.Thumbprint -eq $thumbprint } | Select-Object -First 1
-  }
-
-  return $certificates |
-    Where-Object { $_.Subject -eq "CN=WinRM-UpdateClient-$env:COMPUTERNAME" } |
-    Sort-Object NotAfter -Descending |
-    Select-Object -First 1
 }
-
 function Clear-WindowsUpdateCache {
   param(
     [string]$Servername,
@@ -345,71 +319,8 @@ function Clear-WindowsUpdateCache {
 
 
 function Import-PSWindowsUpdate {
-  Write-ScriptLog "Versuche PSWindowsUpdate-Modul zu laden..."
-  if ($script:IsLocalSystemRun) {
-    $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
-      Sort-Object Version -Descending |
-      Select-Object -First 1
-    if (-not $installedModule) {
-      Write-ScriptLog 'KRITISCHER FEHLER: PSWindowsUpdate ist maschinenweit nicht installiert; der SYSTEM-Aufgabenlauf kann das Modul nicht aktualisieren.'
-      return $false
-    }
-    try {
-      Import-Module -Name $installedModule.Path -ErrorAction Stop
-      Write-ScriptLog "PSWindowsUpdate $($installedModule.Version) aus dem maschinenweiten Modulpfad geladen; Onlineaktualisierung im SYSTEM-Aufgabenlauf übersprungen."
-      return $true
-    }
-    catch {
-      Write-ScriptLog "KRITISCHER FEHLER: PSWindowsUpdate $($installedModule.Version) konnte im SYSTEM-Aufgabenlauf nicht geladen werden: $($_.Exception.Message)"
-      Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'PSWindowsUpdate-Import-SYSTEM' -ErrorRecord $_
-      return $false
-    }
-  }
-  $moduleReady = Update-PSWindowsUpdateModule -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
-  if (-not $moduleReady) { return $false }
-  
-  if (Get-Module -Name PSWindowsUpdate) {
-    Write-ScriptLog "PSWindowsUpdate ist bereits geladen."
-    return $true
-  }
-  
-  try {
-    Import-Module PSWindowsUpdate -ErrorAction Stop
-    Write-ScriptLog "PSWindowsUpdate erfolgreich geladen (Standard-Pfad)."
-    return $true
-  }
-  catch {
-    Write-ScriptLog 'Standard-Import von PSWindowsUpdate fehlgeschlagen; prüfe alternative Modulpfade.'
-    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'PSWindowsUpdate-Import Standardpfad' -ErrorRecord $_
-  }
-  
-  $possiblePaths = @(
-    "$env:ProgramFiles\WindowsPowerShell\Modules\PSWindowsUpdate",
-    "${env:ProgramFiles(x86)}\WindowsPowerShell\Modules\PSWindowsUpdate",
-    "$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules\PSWindowsUpdate",
-    "C:\Program Files\WindowsPowerShell\Modules\PSWindowsUpdate"
-  )
-  
-  foreach ($path in $possiblePaths) {
-    if (Test-Path $path) {
-      Write-ScriptLog "Gefunden in: $path"
-      try {
-        Import-Module $path -ErrorAction Stop
-        Write-ScriptLog "PSWindowsUpdate erfolgreich geladen aus: $path"
-        return $true
-      }
-      catch {
-        Write-ScriptLog "Import aus '$path' fehlgeschlagen; Details im Log."
-        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message } -Operation 'PSWindowsUpdate-Import Alternativpfad' -Target $path -ErrorRecord $_
-      }
-    }
-  }
-  
-  Write-ScriptLog "FEHLER: PSWindowsUpdate konnte nicht gefunden/geladen werden!"
-  Write-ScriptLog "Bitte installieren Sie das Modul mit: Install-Module PSWindowsUpdate -Force"
-  return $false
+  Import-WindowsUpdatePSWindowsUpdateModule -WriteLog { param($message) Write-ScriptLog $message } -LocalSystemRun:$script:IsLocalSystemRun
 }
-
 # Hauptskript
 ############################################################################################################################################################################
 

@@ -400,32 +400,21 @@ if ($ServerADList -ne $null) {
         Write-ScriptLog "Ergebnis des Downloads:"
 
         if ($UpdResult) {
-          # Duplikate entfernen (Get-WindowsUpdate -Download gibt Updates manchmal doppelt zurück)
-          $UpdResult = $UpdResult | Sort-Object -Property KB, ComputerName -Unique
-          
-          # Log-Ausgabe
-          ($UpdResult | Select-Object ComputerName, Status, KB, Size, Title | Format-Table -AutoSize | Out-String) `
-            -split "\r?\n" | ForEach-Object { if ($_) { Write-ScriptLog $_ } }
+          $downloadResult = ConvertTo-WindowsUpdateDownloadResult -Updates @($UpdResult)
+          $UpdResult = @($downloadResult.Updates)
 
-          # HTML-Tabelle
-          $UpdResultFull += @($UpdResult)
-          
+          foreach ($tableLine in $downloadResult.TableLines) {
+            if (-not [string]::IsNullOrWhiteSpace($tableLine)) { Write-ScriptLog $tableLine }
+          }
+
+          $UpdResultFull += $UpdResult
           $RepBody += "<table>`n"
           $RepBody += "<tr><th>ComputerName</th><th>Status</th><th>KB</th><th>Size</th><th>Title</th></tr>`n"
-          
-          foreach ($upd in $UpdResult) {
-            $RepBody += "<tr>"
-            $RepBody += "<td>$($upd.ComputerName)</td>"
-            $RepBody += "<td>$($upd.Status)</td>"
-            $RepBody += "<td>$($upd.KB)</td>"
-            $RepBody += "<td>$($upd.Size)</td>"
-            $RepBody += "<td>$($upd.Title)</td>"
-            $RepBody += "</tr>`n"
+          foreach ($upd in $downloadResult.HtmlRows) {
+            $RepBody += "<tr><td>$($upd.ComputerName)</td><td>$($upd.Status)</td><td>$($upd.KB)</td><td>$($upd.Size)</td><td>$($upd.Title)</td></tr>`n"
           }
-          
           $RepBody += "</table>"
-
-          $UpdCount += @($UpdResult).Count
+          $UpdCount += $downloadResult.Count
         } else {
           Write-ScriptLog "... es sind keine Windows-Updates verfügbar."
           $RepBody += "<div class='no-updates'>Keine Updates zum Download verfügbar.</div>"

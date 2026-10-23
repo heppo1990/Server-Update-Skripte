@@ -245,114 +245,6 @@ $LinuxConnectionErrors = 0
 $HAConnectionErrors = 0
 $script:BootstrapCredentials = @{}
 
-function Get-TargetBootstrapCredential {
-    param([Parameter(Mandatory)][string]$Servername)
-
-    $message = "Einmalige WinRM-Einrichtung für $Servername. Bitte den tatsächlichen lokalen Administratorkontonamen eingeben, z. B. $Servername\Konto oder .\Konto."
-    return Get-Credential -Message $message
-}
-
-function Get-DeploymentClientCertificate {
-    $configuredThumbprint = if ($UpdateSettings.PSObject.Properties['ClientCertThumbprint']) {
-        [string]$UpdateSettings.ClientCertThumbprint
-    } else { '' }
-    $certificates = @(Get-ChildItem 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue)
-    if (-not [string]::IsNullOrWhiteSpace($configuredThumbprint)) {
-        $certificate = $certificates | Where-Object Thumbprint -eq $configuredThumbprint | Select-Object -First 1
-    } else {
-        $certificate = $certificates |
-            Where-Object { $_.Subject -eq "CN=WinRM-UpdateClient-$env:COMPUTERNAME" } |
-            Sort-Object NotAfter -Descending |
-            Select-Object -First 1
-    }
-    if ($certificate -and $certificate.NotAfter -gt (Get-Date) -and $certificate.HasPrivateKey) {
-        return $certificate
-    }
-    return $null
-}
-
-function Test-ExistingWindowsUpdateAdmConfiguration {
-    param(
-        [Parameter(Mandatory)][string]$Servername,
-        [Parameter(Mandatory)][string]$DeployType
-    )
-
-    $certificate = $null
-    if ($DeployType -ne 'AD') {
-        $certificate = Get-DeploymentClientCertificate
-        if (-not $certificate) {
-            return [PSCustomObject]@{ IsCurrent = $false; Reason = 'Das konfigurierte Clientzertifikat fehlt, ist abgelaufen oder besitzt keinen privaten Schlüssel.'; Version = '' }
-        }
-    }
-
-    $endpointParameters = @{
-        ComputerName = $Servername
-        ConfigurationName = 'WindowsUpdateAdm'
-        SessionOption = (New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000)
-        ErrorAction = 'Stop'
-        ScriptBlock = {
-            $updateCommand = Get-Command Get-WindowsUpdate -ErrorAction Stop | Select-Object -First 1
-            $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
-            [PSCustomObject]@{
-                UpdateCommand = [string]$updateCommand.Name
-                DeploymentVersion = [string]$deploymentStatus.Version
-            }
-        }
-    }
-    if ($certificate) {
-        $endpointParameters.UseSSL = $true
-        $endpointParameters.CertificateThumbprint = $certificate.Thumbprint
-    }
-
-    try {
-        $status = Invoke-Command @endpointParameters
-        if ($status.UpdateCommand -ne 'Get-WindowsUpdate') {
-            throw 'Der WindowsUpdateAdm-Endpunkt stellt Get-WindowsUpdate nicht bereit.'
-        }
-        if ($status.DeploymentVersion -eq [string]$expectedDeploymentVersion) {
-            return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$status.DeploymentVersion }
-        }
-        $reason = "Konfigurationsversion $($status.DeploymentVersion) gefunden; erwartet wird $expectedDeploymentVersion."
-    }
-    catch {
-        $reason = $_.Exception.Message
-    }
-
-    # Auf Nicht-AD-Servern 2016/2019 ist der JEA-Endpunkt laut bestehender
-    # Kompatibilitätsregel keine Voraussetzung. Dort prüfen wir die
-    # Zertifikatsverbindung zum normalen WinRM-Endpunkt und die Version im
-    # bereitgestellten JEA-Modul, bevor wir ein erneutes Setup auslösen.
-    if ($certificate -and $reason -and $DeployType -ne 'AD') {
-        try {
-            $legacyStatus = Invoke-Command -ComputerName $Servername -UseSSL `
-                -CertificateThumbprint $certificate.Thumbprint `
-                -SessionOption (New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000) `
-                -ErrorAction Stop -ScriptBlock {
-                    $build = [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber
-                    $modulePath = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\JEA_Updates.psm1'
-                    $moduleText = if (Test-Path -LiteralPath $modulePath -PathType Leaf) { Get-Content -LiteralPath $modulePath -Raw -ErrorAction Stop } else { '' }
-                    $versionMatch = [regex]::Match($moduleText, "function\s+Get-WindowsUpdateAdmDeploymentStatus[\s\S]*?Version\s*=\s*'(?<Version>[^']+)'", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-                    [PSCustomObject]@{
-                        Build = $build
-                        HasStatusFunction = $versionMatch.Success
-                        DeploymentVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['Version'].Value } else { '' }
-                    }
-                }
-            if ([int]$legacyStatus.Build -le 17763) {
-                if ($legacyStatus.HasStatusFunction -and $legacyStatus.DeploymentVersion -eq [string]$expectedDeploymentVersion) {
-                    return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$legacyStatus.DeploymentVersion }
-                }
-                $reason = "Server-Build $($legacyStatus.Build): Modulversion '$($legacyStatus.DeploymentVersion)' gefunden; erwartet wird $expectedDeploymentVersion."
-            }
-        }
-        catch {
-            $reason += " Zertifikatsprüfung am normalen WinRM-Endpunkt ebenfalls fehlgeschlagen: $($_.Exception.Message)"
-        }
-    }
-
-    return [PSCustomObject]@{ IsCurrent = $false; Reason = $reason; Version = '' }
-}
-
 function Add-TrustedWinRMServerCertificate {
     param(
         [Parameter(Mandatory)]$Session,
@@ -413,9 +305,9 @@ function Invoke-WinRMDeployment {
     try {
         if (-not $CleanupLegacyTempOnly) {
             Write-DeployLog "[$Servername] Prüfe vorhandene WindowsUpdateAdm-Version und Verbindung."
-            $preflight = Test-ExistingWindowsUpdateAdmConfiguration -Servername $Servername -DeployType $DeployType
+            $preflight = Test-WindowsUpdateDeploymentConfiguration -Servername $Servername -DeployType $DeployType -ExpectedDeploymentVersion $expectedDeploymentVersion -UpdateSettings $UpdateSettings -ManagementComputerName $env:COMPUTERNAME
             if ($preflight.IsCurrent) {
-                $preflightCertificate = if ($DeployType -ne 'AD') { Get-DeploymentClientCertificate } else { $null }
+                $preflightCertificate = if ($DeployType -ne 'AD') { Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME } else { $null }
                 $authLabel = if ($DeployType -eq 'AD') { 'Kerberos' } else { "Clientzertifikat $($preflightCertificate.Thumbprint)" }
                 Write-DeployLog "[$Servername] Konfiguration Version $($preflight.Version) aktuell; Verbindung per $authLabel erfolgreich. Einrichtung wird übersprungen." -Level Success
                 return [PSCustomObject]@{
@@ -434,7 +326,7 @@ function Invoke-WinRMDeployment {
             Add-WindowsUpdateTrustedHost -ComputerName $Servername -WriteLog { param($message) Write-DeployLog $message }
             # Bei Wiederholungen zuerst das bereits eingerichtete Client-Zertifikat testen.
             # Nur bei einer echten Ersteinrichtung werden Zugangsdaten benötigt.
-            $clientCert = Get-DeploymentClientCertificate
+            $clientCert = Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME
             if ($clientCert) {
                 try {
                     Write-DeployLog "Prüfe Client-Zertifikatsverbindung zu $Servername." -LogOnly
@@ -468,7 +360,7 @@ function Invoke-WinRMDeployment {
                     Write-DeployLog "Verwende für $Servername gespeicherte Zugangsdaten für '$($bootstrapCredential.UserName)'." -LogOnly
                 } else {
                     Write-DeployLog "Einmalige Anmeldedaten für $Servername werden benötigt." -Level Warning
-                    $bootstrapCredential = Get-TargetBootstrapCredential -Servername $Servername
+                    $bootstrapCredential = Get-WindowsUpdateDeploymentBootstrapCredential -Servername $Servername
                 }
                 if (-not $bootstrapCredential) {
                     throw "Die Zugangsdaten für $Servername wurden nicht eingegeben."
@@ -493,7 +385,7 @@ function Invoke-WinRMDeployment {
                         # Benutzernamen im Log (ohne Kennwort) nachvollziehbar machen.
                         Write-DeployLog "Einrichtungsdaten für $Servername wurden abgelehnt." -Level Warning
                         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTP-Anmeldung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Anmeldedaten erneut abfragen')
-                        $bootstrapCredential = Get-TargetBootstrapCredential -Servername $Servername
+                        $bootstrapCredential = Get-WindowsUpdateDeploymentBootstrapCredential -Servername $Servername
                         if (-not $bootstrapCredential) {
                             throw "Die erneuten Zugangsdaten für $Servername wurden nicht eingegeben."
                         }
@@ -857,7 +749,7 @@ function Invoke-WinRMDeployment {
             ErrorAction       = 'Stop'
         }
         if ($DeployType -ne 'AD') {
-            $clientCert = Get-DeploymentClientCertificate
+            $clientCert = Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME
             if (-not $clientCert) {
                 throw 'Lokales Client-Zertifikat für den Verbindungstest wurde nicht gefunden.'
             }
