@@ -7,6 +7,15 @@ function Write-DeferredModuleLog {
   if ($WriteLog) { & $WriteLog $Message ([bool]$LogOnly) }
 }
 
+function New-DeferredModuleLogCallback {
+  param([scriptblock]$WriteLog)
+  $capturedWriteLog = $WriteLog
+  return {
+    param($Message, $LogOnly)
+    if ($capturedWriteLog) { & $capturedWriteLog ([string]$Message) ([bool]$LogOnly) }
+  }.GetNewClosure()
+}
+
 function Get-DeferredWindowsUpdates {
   <#
     Prüft ausschließlich die für die Nachinstallation konfigurierte Auswahl.
@@ -24,6 +33,7 @@ function Get-DeferredWindowsUpdates {
     [scriptblock]$WriteLog
   )
 
+  $deferredLogCallback = New-DeferredModuleLogCallback -WriteLog $WriteLog
   try {
     $isLocal = $Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ManagementComputerFQDN
     $query = {
@@ -114,23 +124,23 @@ function Get-DeferredWindowsUpdates {
     }
 
     if ($isLocal) {
-      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message }
+      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -WriteLog $deferredLogCallback
       if (-not $jeaSupported) { throw "WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver $Servername nicht verfügbar; zurückgestellte Updates können nicht sicher lokal geprüft werden." }
       $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -ConfigurationName 'WindowsUpdateAdm'
       $params.ScriptBlock = $query
       $params.ArgumentList = @($SucheOnline, $DeferredCategories, $DeferredKBs)
-      $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "JEA-Prüfung zurückgestellter Updates auf $Servername" -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message } -ScriptBlock { Invoke-Command @params })
+      $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "JEA-Prüfung zurückgestellter Updates auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params })
     } else {
-      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message }
+      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog $deferredLogCallback
       if (-not $jeaSupported -and $AuthInfo) {
         Write-DeferredModuleLog -WriteLog $WriteLog -Message "Prüfe zurückgestellte Updates als SYSTEM-Aufgabe auf $Servername..."
-        $updates = @(Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $AuthInfo -Mode Check -SearchOnline $SucheOnline -DeferredCategories $DeferredCategories -DeferredKBs $DeferredKBs -DeferredOnly $true -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message })
+        $updates = @(Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $AuthInfo -Mode Check -SearchOnline $SucheOnline -DeferredCategories $DeferredCategories -DeferredKBs $DeferredKBs -DeferredOnly $true -WriteLog $deferredLogCallback)
       }
       else {
         $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo -ConfigurationName $(if ($jeaSupported) { 'WindowsUpdateAdm' } else { $null })
         $params.ScriptBlock = $query
         $params.ArgumentList = @($SucheOnline, $DeferredCategories, $DeferredKBs)
-        $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "Prüfung zurückgestellter Updates auf $Servername" -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message } -ScriptBlock { Invoke-Command @params })
+        $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "Prüfung zurückgestellter Updates auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params })
       }
     }
     # Normale Updateobjekte besitzen MetadataMissing nicht. Unter StrictMode
@@ -161,13 +171,14 @@ function Get-DeferredWindowsUpdates {
   }
   catch {
     Write-DeferredModuleLog -WriteLog $WriteLog -Message "WARNUNG: Zurückgestellte Updates auf $Servername konnten nicht geprüft werden; Details im Log."
-    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message -LogOnly } -Operation 'DeferredUpdates-Check' -Target $Servername -ErrorRecord $_
+    Write-WindowsUpdateDiagnostic -WriteLog $deferredLogCallback -Operation 'DeferredUpdates-Check' -Target $Servername -ErrorRecord $_
     return [PSCustomObject]@{ Success = $false; Updates = @(); Error = $_.Exception.Message }
   }
 }
 
 function Remove-DeferredUpdateTask {
   param([Parameter(Mandatory)][string]$Servername, $AuthInfo = $null, [scriptblock]$WriteLog)
+  $deferredLogCallback = New-DeferredModuleLogCallback -WriteLog $WriteLog
   $taskName = 'WindowsUpdateAdm-DeferredUpdates'
   $removeTask = {
     param($Name)
@@ -196,16 +207,16 @@ function Remove-DeferredUpdateTask {
     Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
     return $removed
   }
-  $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message }
+  $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog $deferredLogCallback
   if (-not $jeaSupported -and $AuthInfo) {
     # Auf Nicht-AD Server 2016 löscht SYSTEM die alte Aufgabe zuverlässig,
     # auch wenn der gemappte Zertifikat-Administrator dafür kein Recht hat.
-    $result = @(Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $AuthInfo -Mode RemoveDeferredTask -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message })
+    $result = @(Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $AuthInfo -Mode RemoveDeferredTask -WriteLog $deferredLogCallback)
     $removed = [bool]($result | Select-Object -First 1 -ExpandProperty Removed)
   } else {
     $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
     $params.ScriptBlock = $removeTask; $params.ArgumentList = $taskName
-    $removed = [bool](Invoke-WindowsUpdateWithRetry -OperationName "Entfernen der Nachinstallationsaufgabe auf $Servername" -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message } -ScriptBlock { Invoke-Command @params })
+    $removed = [bool](Invoke-WindowsUpdateWithRetry -OperationName "Entfernen der Nachinstallationsaufgabe auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params })
   }
   if ($removed) { Write-DeferredModuleLog -WriteLog $WriteLog -Message "Keine zurückgestellten Updates auf ${Servername}: vorhandene Nachinstallationsaufgabe wurde gelöscht." }
   else { Write-DeferredModuleLog -WriteLog $WriteLog -Message "Keine zurückgestellten Updates auf ${Servername}: keine Nachinstallationsaufgabe vorhanden." }
@@ -221,6 +232,7 @@ function Register-OneTimeRemoteTask {
     [AllowEmptyString()][string]$MailPassword = '',
     [scriptblock]$WriteLog
   )
+  $deferredLogCallback = New-DeferredModuleLogCallback -WriteLog $WriteLog
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
   $sb = {
     param($Name, $RunAt, $Encoded, $Password)
@@ -261,7 +273,7 @@ function Register-OneTimeRemoteTask {
   # des ohnehin administrativen Aufrufers angelegt.
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
   $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $At, $encoded, $MailPassword)
-  Invoke-WindowsUpdateWithRetry -OperationName "Remote-Aufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message } -ScriptBlock { Invoke-Command @params | Out-Null }
+  Invoke-WindowsUpdateWithRetry -OperationName "Remote-Aufgabe '$TaskName' auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
 function Register-StartupRemoteTask {
@@ -276,6 +288,7 @@ function Register-StartupRemoteTask {
     [datetime]$ExpiresAt = [datetime]::MinValue,
     [scriptblock]$WriteLog
   )
+  $deferredLogCallback = New-DeferredModuleLogCallback -WriteLog $WriteLog
   # Der Worker wird von powershell.exe (Windows PowerShell 5.1) ausgeführt;
   # seine Syntax muss daher auch mit dem Windows-PowerShell-Parser gültig sein.
   # Der vollständige Worker wird geschützt als temporäre Datei abgelegt. Ein
@@ -448,7 +461,7 @@ exit /b %WORKER_EXIT%
   }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
   $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At, $MaintenanceEndTime, $ExpiresAt)
-  Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog { param($message) Write-DeferredModuleLog -WriteLog $WriteLog -Message $message } -ScriptBlock { Invoke-Command @params | Out-Null }
+  Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
 function Register-DeferredUpdateTask {
