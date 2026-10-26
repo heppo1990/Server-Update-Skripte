@@ -756,7 +756,7 @@ try {
     }
     Write-DeferredLog "Gespeicherte Auswahl geladen: KBs=`$(`$deferredKBs.Count), Kategorien=`$(`$categories.Count)."
     Write-DeferredLog "Auswahl im Detail: KBs=[`$(`$deferredKBs -join ', ')]; Kategorien=[`$(`$categories -join ', ')]; Aufgabenanlage=`$(`$registeredAt.ToString('yyyy-MM-dd HH:mm:ss'))."
-    Write-DeferredLog "Ausführungskontext: Computer=`$env:COMPUTERNAME; Benutzer=`$([Security.Principal.WindowsIdentity]::GetCurrent().Name); PowerShell=`$($PSVersionTable.PSVersion)."
+    Write-DeferredLog "Ausführungskontext: Computer=`$env:COMPUTERNAME; Benutzer=`$([Security.Principal.WindowsIdentity]::GetCurrent().Name); PowerShell=`$(`$PSVersionTable.PSVersion)."
     `$results = @()
     `$installAttemptCount = 0
     `$installReturnedObjectCount = 0
@@ -995,7 +995,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
       }
       foreach (`$category in `$categories) {
         `$categoryRemaining = @(Get-WindowsUpdate -Category `$category -ErrorAction Stop)
-        Write-DeferredLog "Restprüfung für Kategorie '$category': Treffer=`$(`$categoryRemaining.Count)."
+        Write-DeferredLog "Restprüfung für Kategorie '`$category': Treffer=`$(`$categoryRemaining.Count)."
         foreach (`$candidate in `$categoryRemaining) {
           Add-DeferredUpdateCandidate -Candidate `$candidate -Target `$remainingUpdateList
         }

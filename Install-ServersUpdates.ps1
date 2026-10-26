@@ -654,12 +654,9 @@ if ($ManagementPowerShellResume) {
     Write-ScriptLog 'FEHLER: Fortsetzungsstatus des Verwaltungsserver-PowerShell-Updates fehlt; der Lauf wird abgebrochen.'
     throw 'Fortsetzungsstatus des Verwaltungsserver-PowerShell-Updates wurde nicht gefunden.'
   }
-  try {
-    $script:ManagementPowerShellUpdateState = Get-Content -LiteralPath $ManagementPowerShellStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-  }
-  finally {
-    Remove-Item -LiteralPath $ManagementPowerShellStatePath -Force -ErrorAction SilentlyContinue
-  }
+  # Der PS5.1-Übergabeprozess wartet auf diese Fortsetzung und liest danach
+  # denselben Status. Erst der übergeordnete PS5.1-Prozess darf ihn löschen.
+  $script:ManagementPowerShellUpdateState = Get-Content -LiteralPath $ManagementPowerShellStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
   $resumedPowerShellManager = if ($script:ManagementPowerShellUpdateState.PSObject.Properties['Manager'] -and
     -not [string]::IsNullOrWhiteSpace([string]$script:ManagementPowerShellUpdateState.Manager)) {
     [string]$script:ManagementPowerShellUpdateState.Manager
@@ -925,13 +922,30 @@ try {
         Write-ScriptLog "Starte den PS5.1-Übergabeprozess unabhängig von der aktuellen Konsole. Nach dem $managementPowerShellManager-Update öffnet er die Installationsfortsetzung sichtbar in PowerShell 7."
         $managementPowerShellHandoffStarted = $true
         $workerProcess = Start-Process -FilePath $windowsPowerShell51 -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$workerEncoded) -PassThru -Wait -WindowStyle Hidden
-        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { throw "PS5.1-Übergabeprozess lieferte keinen Fortsetzungsstatus (Exitcode $($workerProcess.ExitCode))." }
         if ($workerProcess.ExitCode -ne 0) {
           Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
           Write-ScriptLog "FEHLER: PS7-Fortsetzung wurde mit Exitcode $($workerProcess.ExitCode) beendet. Der ursprüngliche Lauf wird nicht parallel fortgeführt."
           return
         }
-        Write-ScriptLog "PS5.1-Übergabeprozess abgeschlossen (Exitcode $($workerProcess.ExitCode)); der fortgesetzte Installationslauf wurde übernommen."
+        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { throw "PS5.1-Übergabeprozess lieferte keinen Fortsetzungsstatus (Exitcode $($workerProcess.ExitCode))." }
+        try {
+          $handoffState = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+          if ($null -eq $handoffState -or $null -eq $handoffState.PSObject.Properties['Success']) {
+            throw 'Fortsetzungsstatus enthält kein Success-Feld.'
+          }
+        }
+        catch {
+          throw "Fortsetzungsstatus des Verwaltungsserver-PowerShell-Updates ist ungültig: $($_.Exception.Message)"
+        }
+        finally {
+          Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+        }
+        if ([bool]$handoffState.Success) {
+          Write-ScriptLog "PS5.1-Übergabeprozess abgeschlossen (Exitcode $($workerProcess.ExitCode)); der Paketmanager meldet das PowerShell-Update als erfolgreich und der fortgesetzte Installationslauf wurde übernommen."
+        } else {
+          $handoffError = if ($handoffState.PSObject.Properties['Error']) { [string]$handoffState.Error } else { 'Paketmanager meldete keinen erfolgreichen PowerShell-Updateabschluss.' }
+          Write-ScriptLog "PS5.1-Übergabeprozess abgeschlossen (Exitcode $($workerProcess.ExitCode)); PowerShell-Update nicht erfolgreich: $handoffError Der fortgesetzte Installationslauf wurde dennoch übernommen."
+        }
         return
       }
   }
