@@ -184,27 +184,45 @@ function Remove-DeferredUpdateTask {
     param($Name)
     $workerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
     $runnerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates-TaskRunner.cmd'
+    $taskNames = @($Name, ($Name + '-AtStartup'), ($Name + '-Expiry'))
+    $removed = $false
     $scheduledTaskRemovalAvailable = (Get-Command -Name Get-ScheduledTask -ErrorAction SilentlyContinue) -and
       (Get-Command -Name Unregister-ScheduledTask -ErrorAction SilentlyContinue)
     if ($scheduledTaskRemovalAvailable) {
-      if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
-        $removed = $true
-      } else { $removed = $false }
+      foreach ($candidateName in $taskNames) {
+        if (Get-ScheduledTask -TaskName $candidateName -ErrorAction SilentlyContinue) {
+          Unregister-ScheduledTask -TaskName $candidateName -Confirm:$false -ErrorAction Stop
+          $removed = $true
+        }
+      }
+      $remainingTasks = @($taskNames | Where-Object { Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue })
+      if ($remainingTasks.Count -gt 0) { throw "Aufgabenentfernung nicht bestätigt; weiterhin registriert: $($remainingTasks -join ', ')." }
     } else {
       # Windows 7 ohne ScheduledTasks-Modul: beide legacy Trigger mit schtasks entfernen.
       $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
-      $removed = $false
-      foreach ($candidateName in @($Name, ($Name + '-AtStartup'))) {
-        & $schtasks /Query /TN $candidateName *> $null
+      foreach ($candidateName in $taskNames) {
+        $null = & $schtasks /Query /TN $candidateName /FO LIST 2>&1
         if ($LASTEXITCODE -eq 0) {
-          & $schtasks /Delete /TN $candidateName /F *> $null
-          if ($LASTEXITCODE -eq 0) { $removed = $true }
+          $null = & $schtasks /Delete /TN $candidateName /F 2>&1
+          $deleteExitCode = $LASTEXITCODE
+          $null = & $schtasks /Query /TN $candidateName /FO LIST 2>&1
+          if ($LASTEXITCODE -eq 0) { throw "Aufgabe '$candidateName' ist nach dem Löschversuch weiterhin vorhanden (Delete-Exitcode $deleteExitCode)." }
+          $removed = $true
         }
       }
+      $remainingTasks = @($taskNames | Where-Object {
+        $null = & $schtasks /Query /TN $_ /FO LIST 2>&1
+        $LASTEXITCODE -eq 0
+      })
+      if ($remainingTasks.Count -gt 0) { throw "Aufgabenentfernung nicht bestätigt; weiterhin registriert: $($remainingTasks -join ', ')." }
     }
+    # Worker-/Runnerdateien werden erst nach bestätigter Abwesenheit sämtlicher
+    # zugehöriger Aufgaben entfernt. Andernfalls würden verwaiste Trigger bleiben.
     Remove-Item -LiteralPath $workerPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $runnerPath -Force -ErrorAction SilentlyContinue
+    if ((Test-Path -LiteralPath $workerPath) -or (Test-Path -LiteralPath $runnerPath)) {
+      throw 'Task wurde entfernt, aber Worker- oder Starthelferdatei blieb liegen.'
+    }
     return $removed
   }
   $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog $deferredLogCallback
@@ -311,10 +329,23 @@ function Register-StartupRemoteTask {
     $WorkerPath = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm') 'DeferredUpdates.ps1'
     $RunnerPath = Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-TaskRunner.cmd'
     New-Item -ItemType Directory -Path (Split-Path -Parent $WorkerPath) -Force | Out-Null
-    Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-LastFailureNotice.txt') -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-FinalNotificationSent.txt') -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-Results.json') -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $WorkerPath) 'DeferredUpdates-RebootPending.txt') -Force -ErrorAction SilentlyContinue
+    $logDirectory = Split-Path -Parent $WorkerPath
+    $backupStamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+    foreach ($logName in @('DeferredUpdates.log', 'DeferredUpdates-TaskRunner.log')) {
+      $currentLog = Join-Path $logDirectory $logName
+      if (Test-Path -LiteralPath $currentLog -PathType Leaf) {
+        $backupPath = Join-Path $logDirectory ("{0}.{1}.bak" -f $logName, $backupStamp)
+        Move-Item -LiteralPath $currentLog -Destination $backupPath -Force -ErrorAction Stop
+      }
+    }
+    $oldBackups = @(Get-ChildItem -LiteralPath $logDirectory -Filter 'DeferredUpdates*.log.*.bak' -File -ErrorAction Stop |
+      Sort-Object LastWriteTime -Descending | Select-Object -Skip 2)
+    foreach ($oldBackup in $oldBackups) {
+      Remove-Item -LiteralPath $oldBackup.FullName -Force -ErrorAction Stop
+    }
+    foreach ($stateName in @('DeferredUpdates-LastFailureNotice.txt', 'DeferredUpdates-FinalNotificationSent.txt', 'DeferredUpdates-Results.json', 'DeferredUpdates-RebootPending.txt')) {
+      Remove-Item -LiteralPath (Join-Path $logDirectory $stateName) -Force -ErrorAction SilentlyContinue
+    }
     New-Item -ItemType File -Path $WorkerPath -Force | Out-Null
     # SMTP-Daten im Worker dürfen nur SYSTEM und lokale Administratoren lesen.
     $acl = New-Object System.Security.AccessControl.FileSecurity
@@ -507,12 +538,28 @@ function Register-DeferredUpdateTask {
 `$workerFailed = `$false
 `$taskExpired = `$false
 `$workerPhase = 'Initialisierung'
+`$schtasks = Join-Path `$env:WINDIR 'System32\schtasks.exe'
+`$scheduledTaskNames = @(`$taskName, (`$taskName + '-AtStartup'), (`$taskName + '-Expiry'))
 `$removeDeferredTask = {
   param([string]`$Name)
-  `$schtasks = Join-Path `$env:WINDIR 'System32\schtasks.exe'
-  foreach (`$candidateName in @(`$Name, (`$Name + '-AtStartup'), (`$Name + '-Expiry'))) {
-    & `$schtasks /Delete /TN `$candidateName /F *> `$null
+  `$candidateNames = @(`$Name, (`$Name + '-AtStartup'), (`$Name + '-Expiry'))
+  `$removedAny = `$false
+  foreach (`$candidateName in `$candidateNames) {
+    `$null = & `$schtasks /Query /TN `$candidateName /FO LIST 2>&1
+    if (`$LASTEXITCODE -ne 0) { continue }
+
+    `$deleteOutput = & `$schtasks /Delete /TN `$candidateName /F 2>&1
+    `$deleteExitCode = `$LASTEXITCODE
+    `$null = & `$schtasks /Query /TN `$candidateName /FO LIST 2>&1
+    if (`$LASTEXITCODE -eq 0) {
+      throw "Geplante Aufgabe '`$candidateName' ist nach dem Löschversuch weiterhin vorhanden (Exitcode `$deleteExitCode; Ausgabe: `$((@(`$deleteOutput) -join ' ').Trim()))."
+    }
+    if (`$deleteExitCode -ne 0) {
+      Write-DeferredLog "Aufgabe '`$candidateName' war nach einem Löschversuch mit Exitcode `$deleteExitCode nicht mehr registriert."
+    }
+    `$removedAny = `$true
   }
+  return `$removedAny
 }
 try {
   `$logDirectory = Join-Path `$env:ProgramData 'WindowsUpdateAdm'
@@ -585,6 +632,7 @@ try {
   `$scheduledAt = if ($scheduledAtFileTime -gt 0) { [DateTime]::FromFileTimeUtc($scheduledAtFileTime) } else { [DateTime]::MinValue }
   `$maintenanceEndTime = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$maintenanceEndBase64'))
   Write-DeferredLog 'Nachinstallationsaufgabe gestartet.'
+  Write-DeferredLog "Laufdaten: Phase=`$workerPhase; Aufgabenname=`$taskName; Anlage=`$([DateTime]::FromFileTimeUtc([long]`$registeredAt).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')); geplanter Start=`$(`$scheduledAt.ToString('yyyy-MM-dd HH:mm:ss')); Wartungsfenster-Ende=`$maintenanceEndTime."
   `$workerPhase = 'Neustart- und Wartungsfensterprüfung'
   `$registeredAt = [DateTime]::FromFileTimeUtc($registeredAt)
   if ([DateTime]::UtcNow -ge `$registeredAt.AddDays(5)) {
@@ -662,11 +710,12 @@ try {
     while (-not `$windowsUpdateReady -and (Get-Date) -lt `$readyDeadline) {
       `$readyAttempt++
       try {
+        `$readyAttemptStarted = Get-Date
         `$null = @(Get-WindowsUpdate -AcceptAll -ErrorAction Stop)
         `$windowsUpdateReady = `$true
-        Write-DeferredLog 'Windows Update antwortet auf die Bereitschaftssuche.'
+        Write-DeferredLog "Windows Update antwortet auf die Bereitschaftssuche (Versuch `$readyAttempt; Dauer `$([Math]::Round(((Get-Date) - `$readyAttemptStarted).TotalSeconds, 1)) Sekunden)."
       } catch {
-        Write-DeferredLog "Windows Update ist noch nicht bereit (Versuch `$readyAttempt): `$(`$_.Exception.Message)"
+        Write-DeferredLog "Windows Update ist noch nicht bereit (Versuch `$readyAttempt; Dauer `$([Math]::Round(((Get-Date) - `$readyAttemptStarted).TotalSeconds, 1)) Sekunden): `$(`$_.Exception.ToString())"
         if ((Get-Date) -lt `$readyDeadline) { Start-Sleep -Seconds 15 }
       }
     }
@@ -706,18 +755,51 @@ try {
       throw 'Für die Nachinstallation wurden keine KBs oder Kategorien gespeichert. Aufgabe bleibt zur Diagnose bestehen; sie wird nicht als abgeschlossen entfernt.'
     }
     Write-DeferredLog "Gespeicherte Auswahl geladen: KBs=`$(`$deferredKBs.Count), Kategorien=`$(`$categories.Count)."
+    Write-DeferredLog "Auswahl im Detail: KBs=[`$(`$deferredKBs -join ', ')]; Kategorien=[`$(`$categories -join ', ')]; Aufgabenanlage=`$(`$registeredAt.ToString('yyyy-MM-dd HH:mm:ss'))."
+    Write-DeferredLog "Ausführungskontext: Computer=`$env:COMPUTERNAME; Benutzer=`$([Security.Principal.WindowsIdentity]::GetCurrent().Name); PowerShell=`$($PSVersionTable.PSVersion)."
     `$results = @()
+    `$installAttemptCount = 0
+    `$installReturnedObjectCount = 0
     `$selectionParts = @()
     if (`$deferredKBs.Count -gt 0) {
       Write-DeferredLog "Installiere zurückgestellte KBs: `$(`$deferredKBs -join ', ')."
       `$selectionParts += "KBs: `$(`$deferredKBs -join ', ')"
-      foreach (`$kb in `$deferredKBs) { `$results += @(Get-WindowsUpdate -KBArticleID `$kb -AcceptAll -Install -IgnoreReboot) }
+      foreach (`$kb in `$deferredKBs) {
+        `$workerPhase = "KB-Installation `$kb"
+        `$installAttemptCount++
+        Write-DeferredLog "Installationsaufruf gestartet: KB=`$kb; Parameter=KBArticleID, AcceptAll, Install, IgnoreReboot."
+        `$installOutput = @(Get-WindowsUpdate -KBArticleID `$kb -AcceptAll -Install -IgnoreReboot -ErrorAction Stop)
+        `$installReturnedObjectCount += `$installOutput.Count
+        Write-DeferredLog "Installationsaufruf beendet: KB=`$kb; Ergebnisobjekte=`$(`$installOutput.Count)."
+        foreach (`$installResult in `$installOutput) {
+          `$resultTitle = Get-DeferredUpdateField -Update `$installResult -Names @('Title', 'UpdateTitle', 'Name')
+          `$resultKB = Get-DeferredUpdateField -Update `$installResult -Names @('KB', 'KBArticleID', 'KBArticleIDs')
+          `$resultStatus = Get-DeferredUpdateField -Update `$installResult -Names @('Status', 'Result', 'UpdateStatus', 'OperationResult')
+          Write-DeferredLog "Installationsrückgabe: KB=`$resultKB; Status=`$resultStatus; Titel=`$resultTitle."
+        }
+        `$results += `$installOutput
+      }
     }
     if (`$categories.Count -gt 0) {
       Write-DeferredLog "Installiere zurückgestellte Kategorien: `$(`$categories -join ', ')."
       `$selectionParts += "Kategorien: `$(`$categories -join ', ')"
-      foreach (`$category in `$categories) { `$results += @(Get-WindowsUpdate -Category `$category -AcceptAll -Install -IgnoreReboot) }
+      foreach (`$category in `$categories) {
+        `$workerPhase = "Kategorie-Installation `$category"
+        `$installAttemptCount++
+        Write-DeferredLog "Installationsaufruf gestartet: Kategorie=`$category; Parameter=Category, AcceptAll, Install, IgnoreReboot."
+        `$installOutput = @(Get-WindowsUpdate -Category `$category -AcceptAll -Install -IgnoreReboot -ErrorAction Stop)
+        `$installReturnedObjectCount += `$installOutput.Count
+        Write-DeferredLog "Installationsaufruf beendet: Kategorie=`$category; Ergebnisobjekte=`$(`$installOutput.Count)."
+        foreach (`$installResult in `$installOutput) {
+          `$resultTitle = Get-DeferredUpdateField -Update `$installResult -Names @('Title', 'UpdateTitle', 'Name')
+          `$resultKB = Get-DeferredUpdateField -Update `$installResult -Names @('KB', 'KBArticleID', 'KBArticleIDs')
+          `$resultStatus = Get-DeferredUpdateField -Update `$installResult -Names @('Status', 'Result', 'UpdateStatus', 'OperationResult')
+          Write-DeferredLog "Installationsrückgabe: Kategorie=`$category; KB=`$resultKB; Status=`$resultStatus; Titel=`$resultTitle."
+        }
+        `$results += `$installOutput
+      }
     }
+    Write-DeferredLog "Installationsphase zusammengefasst: Aufrufe=`$installAttemptCount; zurückgegebene Ergebnisobjekte=`$installReturnedObjectCount."
     # Ein Update kann mehreren ausgewählten Kategorien zugeordnet sein.
     # Doppelte Rückgabeobjekte dürfen weder mehrfach in der Mail erscheinen
     # noch die angezeigte Installationsanzahl erhöhen.
@@ -905,12 +987,16 @@ tr:nth-child(even) { background-color: #f9f9f9; }
       }
       `$remainingUpdateList = [System.Collections.Generic.List[object]]::new()
       foreach (`$kb in `$deferredKBs) {
-        foreach (`$candidate in @(Get-WindowsUpdate -KBArticleID `$kb -ErrorAction Stop)) {
+        `$kbRemaining = @(Get-WindowsUpdate -KBArticleID `$kb -ErrorAction Stop)
+        Write-DeferredLog "Restprüfung für KB '`$kb': Treffer=`$(`$kbRemaining.Count)."
+        foreach (`$candidate in `$kbRemaining) {
           Add-DeferredUpdateCandidate -Candidate `$candidate -Target `$remainingUpdateList
         }
       }
       foreach (`$category in `$categories) {
-        foreach (`$candidate in @(Get-WindowsUpdate -Category `$category -ErrorAction Stop)) {
+        `$categoryRemaining = @(Get-WindowsUpdate -Category `$category -ErrorAction Stop)
+        Write-DeferredLog "Restprüfung für Kategorie '$category': Treffer=`$(`$categoryRemaining.Count)."
+        foreach (`$candidate in `$categoryRemaining) {
           Add-DeferredUpdateCandidate -Candidate `$candidate -Target `$remainingUpdateList
         }
       }
@@ -926,8 +1012,23 @@ tr:nth-child(even) { background-color: #f9f9f9; }
       if (`$remainingUpdates.Count -gt 0) {
         `$waitForReboot = `$true
         `$remainingTitles = @(`$remainingUpdates | ForEach-Object { if (`$_.Title) { [string]`$_.Title } else { [string]`$_.KB } } | Where-Object { -not [string]::IsNullOrWhiteSpace(`$_) } | Select-Object -Unique)
-        Write-DeferredLog "Zurückgestellte Updates sind noch verfügbar (`$(`$remainingUpdates.Count)); nächster Installationsversuch im Wartungsfenster. Verbleibend: `$(`$remainingTitles -join '; ')"
+        foreach (`$remainingUpdate in `$remainingUpdates) {
+          `$remainingKB = Get-DeferredUpdateField -Update `$remainingUpdate -Names @('KB', 'KBArticleID', 'KBArticleIDs')
+          `$remainingTitle = Get-DeferredUpdateField -Update `$remainingUpdate -Names @('Title', 'UpdateTitle', 'Name')
+          Write-DeferredLog "Verbleibendes Update im Detail: KB=`$remainingKB; Titel=`$remainingTitle."
+        }
+        Write-DeferredLog "Restprüfung für gespeicherte Auswahl fehlgeschlagen: weiterhin verfügbar=`$(`$remainingUpdates.Count); Auswahl=`$selection; nächster Installationsversuch im Wartungsfenster. Verbleibend: `$(`$remainingTitles -join '; ')"
       } else {
+        Write-DeferredLog "Restprüfung für gespeicherte Auswahl: keine Updates mehr verfügbar. Installationsaufrufe=`$installAttemptCount; Ergebnisobjekte=`$installReturnedObjectCount."
+        `$confirmedInstallResults = @(`$results | Where-Object {
+          `$status = Get-DeferredUpdateField -Update `$_ -Names @('Status', 'Result', 'UpdateStatus', 'OperationResult')
+          `$status -match '(?i)(installed|installiert|succeeded|erfolgreich|successfully)' -and
+            `$status -notmatch '(?i)(failed|fehler|with errors|mit fehlern)'
+        })
+        Write-DeferredLog "Installationsnachweis: bestätigte Erfolgsresultate=`$(`$confirmedInstallResults.Count); gespeicherte/ermittelte Resultate gesamt=`$(@(`$results).Count)."
+        if (`$confirmedInstallResults.Count -eq 0) {
+          throw "Die Restprüfung für `$selection ist leer, aber es liegt kein bestätigtes Installationsergebnis vor. Die Nachinstallation bleibt zur Diagnose bestehen."
+        }
         `$workerPhase = 'Abschluss-E-Mail senden'
         if (-not (Send-DeferredFinalMail -Subject 'Nachinstallation abgeschlossen:' -Body `$body -IsHtml `$true)) {
           `$workerFailed = `$true
@@ -954,11 +1055,36 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     } else {
       Write-DeferredLog 'Nachinstallation abgeschlossen. Aufgabe wird entfernt.'
     }
-    & `$removeDeferredTask `$taskName
-    Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates.ps1') -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates-LastFailureNotice.txt') -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates-Results.json') -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path `$logDirectory 'DeferredUpdates-RebootPending.txt') -Force -ErrorAction SilentlyContinue
+    try {
+      `$removedAnyTask = & `$removeDeferredTask `$taskName
+      `$remainingTasks = @(`$scheduledTaskNames | Where-Object {
+        `$null = & `$schtasks /Query /TN `$_ /FO LIST 2>&1
+        `$LASTEXITCODE -eq 0
+      })
+      if (`$remainingTasks.Count -gt 0) {
+        throw "Aufgabenentfernung nicht bestätigt; weiterhin registriert: `$(`$remainingTasks -join ', ')."
+      }
+      Write-DeferredLog "Taskentfernung bestätigt. Entfernte Aufgabe(n): `$removedAnyTask."
+      foreach (`$stateName in @('DeferredUpdates.ps1', 'DeferredUpdates-LastFailureNotice.txt', 'DeferredUpdates-Results.json', 'DeferredUpdates-RebootPending.txt')) {
+        `$statePath = Join-Path `$logDirectory `$stateName
+        if (Test-Path -LiteralPath `$statePath) {
+          Remove-Item -LiteralPath `$statePath -Force -ErrorAction Stop
+          if (Test-Path -LiteralPath `$statePath) { throw "Datei konnte nach der Aufgabenentfernung nicht gelöscht werden: `$statePath" }
+          Write-DeferredLog "Datei nach bestätigter Aufgabenentfernung gelöscht: `$stateName."
+        }
+      }
+      # Der Starthelfer wird zuletzt entfernt, nachdem die Task-Registrierung
+      # nachweislich verschwunden ist.
+      `$runnerPath = Join-Path `$logDirectory 'DeferredUpdates-TaskRunner.cmd'
+      if (Test-Path -LiteralPath `$runnerPath) {
+        Remove-Item -LiteralPath `$runnerPath -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath `$runnerPath) { throw "Starthelfer konnte nicht gelöscht werden: `$runnerPath" }
+        Write-DeferredLog 'Starthelfer nach bestätigter Aufgabenentfernung gelöscht.'
+      }
+    } catch {
+      `$workerFailed = `$true
+      Write-DeferredLog "FEHLER bei Task-/Dateibereinigung: `$(`$_.Exception.Message)"
+    }
   } elseif (`$workerFailed) {
     try { Write-DeferredLog "Aufgabe bleibt nach Fehler in Phase '`$workerPhase' für einen erneuten Versuch bestehen." } catch { }
   }
