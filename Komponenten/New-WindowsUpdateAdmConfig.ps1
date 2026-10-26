@@ -688,19 +688,22 @@ try {
                     # erneuert werden. Die Verteilung bestätigt die Verbindung
                     # normalerweise vorher und setzt dann PreserveExisting... .
                     if ($currentMapping.Count -eq 1 -and $issuerMappings.Count -eq 1) {
-                        $certificateMappingConfirmed = $true
-                        Write-SetupLog "Eindeutiges Zertifikat-Mapping für den aktuellen Thumbprint ist vorhanden; keine Einrichtungsdaten zum Erneuern übergeben." "SUCCESS"
+                        $certificateMappingConfirmed = $false
+                        Write-SetupLog "Ein Zertifikat-Mapping für den aktuellen Thumbprint ist vorhanden; seine Funktion wird anschließend durch den zentralen Verbindungstest bestätigt." "INFO"
                     } else {
                         throw "Zertifikatsmapping ist mehrdeutig (passende Subject/Issuer-Einträge: $($currentMapping.Count); alle Einträge mit Zertifikat-Issuer: $($issuerMappings.Count)); Einrichtungsdaten zum Bereinigen und Erneuern fehlen."
                     }
                 } elseif (-not $CertificateMappingCredential) {
                     throw "Für ein neues oder zu erneuerndes Zertifikat-Mapping wurden keine Einrichtungs-Administrator-Anmeldedaten übergeben."
                 } else {
-                    $localUser = $CertificateMappingCredential.UserName
-                    if ($localUser -match '^\.\\') {
-                        $localUser = "$env:COMPUTERNAME\$($localUser.Substring(2))"
-                    } elseif ($localUser -notmatch '\\') {
-                        $localUser = "$env:COMPUTERNAME\$localUser"
+                    # WinRM-Zertifikatsmappings nehmen einen lokalen Kontonamen
+                    # an. Ein Präfix wie COMPUTER\Benutzer oder .\Benutzer gehört
+                    # nicht in das Mapping; es kann zwar als Eintrag gespeichert
+                    # werden, lässt sich danach aber nicht zuverlässig auflösen.
+                    $credentialUserName = [string]$CertificateMappingCredential.UserName
+                    $localUser = ($credentialUserName -split '\\')[-1]
+                    if ([string]::IsNullOrWhiteSpace($localUser)) {
+                        throw 'Der lokale Kontoname für das WinRM-Zertifikatsmapping ist leer.'
                     }
                     try {
                         # Diese Anmeldedaten wurden vom Aufrufer verwendet, wenn
