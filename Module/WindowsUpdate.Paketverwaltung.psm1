@@ -2882,8 +2882,67 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $retryDiagnosticProperty = $retryResult.PSObject.Properties['DiagnosticOutput']
                 if ($retryDiagnosticProperty) { $retryDiagnostic = [string]$retryDiagnosticProperty.Value }
                 $retryResetProperty = $retryResult.PSObject.Properties['RetryAfterSourceReset']
+                $retryRefreshProperty = $retryResult.PSObject.Properties['RetryAfterSourcePackageRefresh']
                 $retryConnectionProperty = $retryResult.PSObject.Properties['RetryFreshConnection']
+
+                # Eine AppX-Registrierung kann erst nach der ersten frischen
+                # Verbindung sichtbar sein. Meldet diese Verbindung danach
+                # einen leeren Suchlauf, dessen Zustand einen Quellenreset
+                # oder eine Quellenpaket-Erneuerung verlangt, führen wir genau
+                # diesen Folgeschritt aus und prüfen ein letztes Mal in einer
+                # weiteren neuen Verbindung.
                 if (($retryResetProperty -and [bool]$retryResetProperty.Value) -or
+                    ($retryRefreshProperty -and [bool]$retryRefreshProperty.Value)) {
+                    $followupResetPerformed = $false
+                    if ($retryResetProperty -and [bool]$retryResetProperty.Value) {
+                        Write-CommonLog $WriteLog "WinGet auf $ComputerName blieb nach der ersten Wiederholung leer; Quellenreset wird jetzt ausgeführt, danach folgt eine weitere neue Verbindung."
+                        if ($isLocalTarget) {
+                            $null = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds $wingetTimeoutSeconds -WriteLog $WriteLog
+                        } else {
+                            $null = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds $wingetTimeoutSeconds -WriteLog $WriteLog
+                        }
+                        $followupResetPerformed = $true
+                        $retryRequiresSourceReset = $true
+                    }
+                    else {
+                        Write-CommonLog $WriteLog "WinGet auf $ComputerName verlangt nach der ersten Wiederholung eine Quellenpaket-Erneuerung; starte sie vor einer weiteren neuen Verbindung."
+                        $retryRequiresSourcePackageRefresh = $true
+                    }
+
+                    $sourcePackageRefreshPerformed = $true
+                    $followupParameters = @{
+                        ComputerName = $ComputerName
+                        AuthInfo = $AuthInfo
+                        ScriptBlock = $packageScript
+                        ArgumentList = @($Mode, $true, $false, $followupResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates)
+                        IsLocalTarget = $isLocalTarget
+                        OperationName = "WinGet-Folgeprüfung auf $ComputerName"
+                        WriteLog = $WriteLog
+                    }
+                    if ($hasCheckTimeout) { $followupParameters.TimeoutSeconds = $wingetTimeoutSeconds }
+                    else { $followupParameters.NoTimeout = $true }
+                    $followupResults = @(Invoke-WindowsUpdatePackageWorker @followupParameters | Where-Object { $_.Manager -eq 'Winget' })
+                    if ($followupResults.Count -eq 0) { throw 'Die WinGet-Folgeprüfung nach Quellenkorrektur lieferte kein Ergebnis.' }
+
+                    $followupResult = $followupResults[-1]
+                    $followupDiagnosticProperty = $followupResult.PSObject.Properties['DiagnosticOutput']
+                    if ($followupDiagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$followupDiagnosticProperty.Value)) {
+                        $followupDiagnostic = [string]$followupDiagnosticProperty.Value
+                        if ([string]::IsNullOrWhiteSpace($retryDiagnostic)) {
+                            $retryDiagnostic = $followupDiagnostic
+                        } else {
+                            $retryDiagnostic += [Environment]::NewLine + $followupDiagnostic
+                        }
+                    }
+                    $retryResults = $followupResults
+                    $retryResult = $followupResult
+                    $retryResetProperty = $retryResult.PSObject.Properties['RetryAfterSourceReset']
+                    $retryRefreshProperty = $retryResult.PSObject.Properties['RetryAfterSourcePackageRefresh']
+                    $retryConnectionProperty = $retryResult.PSObject.Properties['RetryFreshConnection']
+                }
+
+                if (($retryResetProperty -and [bool]$retryResetProperty.Value) -or
+                    ($retryRefreshProperty -and [bool]$retryRefreshProperty.Value) -or
                     ($retryConnectionProperty -and [bool]$retryConnectionProperty.Value)) {
                     $retryDetail = ([string]$retryResult.ActionOutput -replace '\s+', ' ').Trim()
                     if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet lieferte erneut kein auswertbares Ergebnis.' }
