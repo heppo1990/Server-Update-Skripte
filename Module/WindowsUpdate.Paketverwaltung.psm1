@@ -1,6 +1,79 @@
 ﻿# Fachmodul: WindowsUpdate.Paketverwaltung
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
+function Get-WindowsUpdateWinGetInstallScriptPayload {
+    <# Bezieht das aktuelle, signierte winget-install.ps1 zuerst von GitHub. #>
+    [CmdletBinding()]
+    param()
+
+    $cacheRoot = Join-Path $env:LOCALAPPDATA 'WindowsUpdateAdm\Cache'
+    $cachePath = Join-Path $cacheRoot 'winget-install.ps1'
+    $downloadPath = Join-Path ([IO.Path]::GetTempPath()) ('winget-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    $downloadFailure = $null
+    $selectedPath = $null
+    $source = ''
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -OutFile $downloadPath -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        if ((Get-Item -LiteralPath $downloadPath -ErrorAction Stop).Length -le 0) {
+            throw 'GitHub lieferte eine leere Installationsskriptdatei.'
+        }
+        $signature = Get-AuthenticodeSignature -FilePath $downloadPath -ErrorAction Stop
+        if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+            throw "GitHub-Installationsskript hat keine gültige Authenticode-Signatur (Status: $($signature.Status))."
+        }
+        $selectedPath = $downloadPath
+        $source = 'GitHub-Release'
+        try {
+            New-Item -Path $cacheRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            Copy-Item -LiteralPath $downloadPath -Destination $cachePath -Force -ErrorAction Stop
+        }
+        catch {
+            # Die verifizierte Onlinekopie bleibt nutzbar, auch wenn der Cache
+            # auf dem Verwaltungsserver nicht geschrieben werden kann.
+        }
+    }
+    catch {
+        $downloadFailure = $_.Exception.Message
+        if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+            $cacheSignature = Get-AuthenticodeSignature -FilePath $cachePath -ErrorAction SilentlyContinue
+            if ($cacheSignature -and $cacheSignature.Status -eq [Management.Automation.SignatureStatus]::Valid) {
+                $selectedPath = $cachePath
+                $signature = $cacheSignature
+                $source = 'signierter lokaler Cache (GitHub nicht erreichbar)'
+            }
+        }
+        if (-not $selectedPath) {
+            throw "winget-install.ps1 konnte nicht von GitHub bezogen werden und es gibt keine gültige lokale Kopie. GitHub: $downloadFailure"
+        }
+    }
+    finally {
+        if ($selectedPath -ne $downloadPath -and (Test-Path -LiteralPath $downloadPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $scriptText = [IO.File]::ReadAllText($selectedPath)
+    $versionMatch = [regex]::Match($scriptText, '(?im)^\s*\$CurrentVersion\s*=\s*["''](?<Version>\d+(?:\.\d+){1,3})["'']')
+    if (-not $versionMatch.Success) {
+        throw "Die Version des signierten winget-install.ps1 aus $source konnte nicht ausgelesen werden."
+    }
+    $bytes = [IO.File]::ReadAllBytes($selectedPath)
+    $payload = [pscustomobject]@{
+        Version = $versionMatch.Groups['Version'].Value
+        Source = $source
+        Signer = [string]$signature.SignerCertificate.Subject
+        Sha256 = (Get-FileHash -LiteralPath $selectedPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        ContentBase64 = [Convert]::ToBase64String($bytes)
+        DownloadFailure = $downloadFailure
+    }
+    if ($selectedPath -eq $downloadPath -and (Test-Path -LiteralPath $downloadPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+    }
+    $payload
+}
+
 function Invoke-WindowsUpdatePackageWorker {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
@@ -50,6 +123,82 @@ function Invoke-WindowsUpdatePackageManagers {
         [string[]]$ExcludeChocolateyIds = @(),
         [scriptblock]$WriteLog
     )
+
+    # Das Installationsskript wird nur beim fehlenden/defekten WinGet nachgeladen.
+    # Die unveränderten signierten Bytes laufen auf dem Ziel ausdrücklich in
+    # Windows PowerShell 5.1; diese Ausführung ist für AppX/WinGet erforderlich.
+    $wingetInstallScriptWorker = {
+        param([string]$ScriptBase64, [string]$ExpectedSha256, [string]$ScriptVersion)
+        $ErrorActionPreference = 'Stop'
+        $taskRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdate-WinGetInstall-' + [guid]::NewGuid().ToString('N'))
+        $scriptPath = Join-Path $taskRoot 'winget-install.ps1'
+        $stdoutPath = Join-Path $taskRoot 'stdout.log'
+        $stderrPath = Join-Path $taskRoot 'stderr.log'
+        try {
+            New-Item -Path $taskRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            $scriptBytes = [Convert]::FromBase64String($ScriptBase64)
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { $actualSha256 = [BitConverter]::ToString($sha.ComputeHash($scriptBytes)).Replace('-', '') } finally { $sha.Dispose() }
+            if ($actualSha256 -ine $ExpectedSha256) { throw 'Prüfsumme des übertragenen winget-install.ps1 stimmt nicht mit der geprüften Download-Datei überein.' }
+            [IO.File]::WriteAllBytes($scriptPath, $scriptBytes)
+            $signature = Get-AuthenticodeSignature -FilePath $scriptPath -ErrorAction Stop
+            if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+                throw "Authenticode-Signatur auf dem Ziel ist nicht gültig (Status: $($signature.Status))."
+            }
+
+            $powerShell51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) { throw "Windows PowerShell 5.1 wurde nicht gefunden: $powerShell51" }
+            $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $scriptPath + '" -Force'
+            $process = Start-Process -FilePath $powerShell51 -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -ErrorAction Stop
+            $installerOutput = @()
+            if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { $installerOutput += Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { $installerOutput += Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue }
+            $installerText = ($installerOutput -join [Environment]::NewLine).Trim()
+            if ($process.ExitCode -ne 0) {
+                throw "winget-install.ps1 $ScriptVersion endete in Windows PowerShell 5.1 mit Exitcode $($process.ExitCode). Ausgabe: $installerText"
+            }
+
+            $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                Where-Object { $_.Status -eq 'Ok' } | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+            if ($registeredPackage.Count -eq 0) {
+                $stagedPackage = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
+                    Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+                if ($stagedPackage.Count -gt 0) {
+                    Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop | Out-Null
+                    $registeredPackage = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Status -eq 'Ok' } | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1)
+                }
+            }
+            if ($registeredPackage.Count -eq 0) { throw "winget-install.ps1 endete erfolgreich, aber App Installer ist danach für den Remoting-Benutzer nicht registriert. Ausgabe: $installerText" }
+
+            $wingetPath = Join-Path ([string]$registeredPackage[0].InstallLocation) 'winget.exe'
+            if (-not (Test-Path -LiteralPath $wingetPath -PathType Leaf)) {
+                $wingetPath = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+            }
+            if (-not (Test-Path -LiteralPath $wingetPath -PathType Leaf)) { throw 'winget-install.ps1 meldete Erfolg, aber winget.exe fehlt weiterhin.' }
+            $versionOutput = (& $wingetPath --version 2>&1 | Out-String).Trim()
+            $wingetExitCode = $LASTEXITCODE
+            if ($wingetExitCode -ne 0 -or $versionOutput -notmatch '(?m)^\s*v?\d+\.\d+') {
+                throw "WinGet besteht den Starttest nach der Installation nicht (Exitcode $wingetExitCode). Ausgabe: $versionOutput"
+            }
+            [pscustomobject]@{
+                Success = $true
+                ExitCode = [int]$process.ExitCode
+                PowerShellVersion = [string]$PSVersionTable.PSVersion
+                ScriptVersion = $ScriptVersion
+                AppInstallerVersion = [string]$registeredPackage[0].Version
+                WinGetPath = $wingetPath
+                WinGetVersion = $versionOutput
+                Output = $installerText
+            }
+        }
+        finally {
+            if (Test-Path -LiteralPath $taskRoot -PathType Container) {
+                Remove-Item -LiteralPath $taskRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 
     # Der Block läuft lokal oder innerhalb der vorhandenen WinRM-Verbindung.
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
@@ -1754,9 +1903,15 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $script:WindowsUpdatePortableWinGetPath = $null
             $wingetPortableMode = $false
             $isWindowsServer2019 = $false
+            $wingetInstallScriptSupported = $true
+            $wingetServerUnsupported = $false
             try {
                 $osInformation = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
                 $isWindowsServer2019 = ([int]$osInformation.ProductType -gt 1) -and ([int]$osInformation.BuildNumber -eq 17763)
+                if ([int]$osInformation.ProductType -gt 1 -and [int]$osInformation.BuildNumber -lt 17763) {
+                    $wingetInstallScriptSupported = $false
+                    $wingetServerUnsupported = $true
+                }
             }
             catch { }
             $wingetPath = Resolve-WingetExecutable
@@ -1797,6 +1952,23 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $wingetBootstrapMessage += ' Experimentelle WinGet-CLI konnte weder lokal noch aus GitHub bereitgestellt werden; die GitHub-API oder der Release-Download kann beispielsweise durch ein Ratenlimit gesperrt sein.'
                         $wingetDiagnosticOutput += "Lokale WinGet-CLI:`r`n$($installedWingetHealth.DiagnosticOutput)`r`nWinGet-GitHub-Extraktion:`r`n$githubFailure`r`n"
                     }
+                }
+            }
+            if ($wingetServerUnsupported) {
+                $result += [PSCustomObject]@{ Manager='Winget'; Available=$false; Success=$true; Skipped=$true; SkipReason='Windows Server vor Server 2019'; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }
+                return @($result)
+            }
+            if ($ExecutionMode -in @('Check', 'Install') -and $wingetInstallScriptSupported) {
+                $wingetPreflightHealth = Test-WingetExecutable -Path $wingetPath
+                if (-not $wingetPreflightHealth.Works) {
+                    $result += [PSCustomObject]@{
+                        Manager = 'Winget'; Available = $true; Success = $false; Skipped = $false; SkipReason = ''
+                        ExitCode = $null; Packages = @(); AvailableOutput = ''
+                        ActionOutput = 'WinGet fehlt oder startet nicht; Reparatur über das aktuelle winget-install.ps1 erforderlich.'
+                        DiagnosticOutput = [string]$wingetPreflightHealth.DiagnosticOutput
+                        RequiresWinGetInstallScript = $true
+                    }
+                    return @($result)
                 }
             }
             if ($ExecutionMode -eq 'Check' -and $wingetPath -and -not $wingetPortableMode -and $wingetPreparationSucceeded) {
@@ -1942,6 +2114,16 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $wingetDiagnosticOutput += "WinGet-GitHub-CLI-Test:`r`n$($wingetHealth.DiagnosticOutput)`r`n"
                 }
                 elseif (-not $wingetHealth.Works) {
+                    if ($ExecutionMode -in @('Check', 'Install') -and $wingetInstallScriptSupported) {
+                        $result += [PSCustomObject]@{
+                            Manager = 'Winget'; Available = $true; Success = $false; Skipped = $false; SkipReason = ''
+                            ExitCode = $null; Packages = @(); AvailableOutput = ''
+                            ActionOutput = 'WinGet fehlt oder startet nicht; das aktuelle winget-install.ps1 muss in Windows PowerShell 5.1 ausgeführt und die Prüfung danach neu gestartet werden.'
+                            DiagnosticOutput = [string]$wingetHealth.DiagnosticOutput
+                            RequiresWinGetInstallScript = $true
+                        }
+                        return $result
+                    }
                     $healthProblems = @()
                     if (-not $wingetHealth.Works) { $healthProblems += "winget.exe: $($wingetHealth.Output)" }
                     $wingetBootstrapMessage += " WinGet auf $env:COMPUTERNAME ($serverCaption) ist nicht funktionsfähig ($($healthProblems -join '; ')); starte Reparatur."
@@ -2565,6 +2747,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         $retryRequired = $false
         $retryRequiresSourceReset = $false
         $retryRequiresSourcePackageRefresh = $false
+        $wingetInstallScriptRan = $false
         $retryReason = ''
         $firstDiagnostic = ''
         $retryDiagnostic = ''
@@ -2588,10 +2771,42 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $firstWingetResult = $wingetResults[-1]
             $firstDiagnosticProperty = $firstWingetResult.PSObject.Properties['DiagnosticOutput']
             if ($firstDiagnosticProperty) { $firstDiagnostic = [string]$firstDiagnosticProperty.Value }
+            $installScriptRequiredProperty = $firstWingetResult.PSObject.Properties['RequiresWinGetInstallScript']
             $resetProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourceReset']
             $sourcePackageRefreshProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourcePackageRefresh']
             $connectionProperty = $firstWingetResult.PSObject.Properties['RetryFreshConnection']
-            if ($resetProperty -and [bool]$resetProperty.Value) {
+            if ($installScriptRequiredProperty -and [bool]$installScriptRequiredProperty.Value) {
+                $retryRequired = $true
+                $retryReason = 'WinGet-Installation/Reparatur über winget-install.ps1'
+                try {
+                    $installPayload = Get-WindowsUpdateWinGetInstallScriptPayload
+                    $downloadState = if ($installPayload.Source -eq 'GitHub-Release') { 'aktuell online von GitHub bezogen' } else { $installPayload.Source }
+                    Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; winget-install.ps1 $($installPayload.Version) wurde $downloadState (Signatur gültig: $($installPayload.Signer)). Starte die Installation explizit mit Windows PowerShell 5.1."
+                    $installResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo -ScriptBlock $wingetInstallScriptWorker -ArgumentList @($installPayload.ContentBase64, $installPayload.Sha256, $installPayload.Version) -IsLocalTarget $isLocalTarget -TimeoutSeconds 1800 -OperationName "WinGet-Installation/Reparatur auf $ComputerName (Windows PowerShell 5.1)" -WriteLog $WriteLog)
+                    if ($installResults.Count -eq 0) { throw 'Windows PowerShell 5.1 lieferte kein Ergebnis der WinGet-Installation.' }
+                    $installResult = $installResults[-1]
+                    if (-not $installResult.Success) { throw "WinGet-Installation lieferte keinen bestätigten Erfolg. Ausgabe: $($installResult | Out-String)" }
+                    $firstDiagnostic += [Environment]::NewLine + "winget-install.ps1-Ausgabe:" + [Environment]::NewLine + [string]$installResult.Output
+                    $firstWingetResult | Add-Member -NotePropertyName BootstrapMessage -NotePropertyValue "WinGet wurde mit winget-install.ps1 $($installPayload.Version) unter Windows PowerShell 5.1 installiert/repariert (App Installer $($installResult.AppInstallerVersion), $($installResult.WinGetVersion)); die Prüfung wird in einer neuen Verbindung wiederholt." -Force
+                    $wingetInstallScriptRan = $true
+                    Write-CommonLog $WriteLog "WinGet-Installation/Reparatur auf $ComputerName erfolgreich: App Installer $($installResult.AppInstallerVersion); $($installResult.WinGetVersion); Pfad=$($installResult.WinGetPath); Windows PowerShell $($installResult.PowerShellVersion)."
+                    if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
+                        Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
+                    }
+                }
+                catch {
+                    $retryRequired = $false
+                    $failure = "WinGet-Installation/Reparatur auf $ComputerName fehlgeschlagen; Details im Log."
+                    $failureDiagnostic = $_.Exception.ToString()
+                    $firstDiagnostic += [Environment]::NewLine + 'WinGet-Installationsskript:' + [Environment]::NewLine + $failureDiagnostic
+                    $packageResults += [pscustomobject]@{
+                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                        Packages=@(); AvailableOutput=''; ActionOutput=$failure; DiagnosticOutput=$firstDiagnostic
+                    }
+                    Write-CommonLog $WriteLog $failure 'WARN'
+                }
+            }
+            elseif ($resetProperty -and [bool]$resetProperty.Value) {
                 $retryRequired = $true
                 $retryRequiresSourceReset = $true
                 $retryReason = 'Quellenreset erforderlich'
@@ -2628,7 +2843,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $sourceResetPerformed = $false
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
-                if ($retryReason -match '(?i)WinGet nach Reparatur oder App-Installer-Registrierung') {
+                if ($retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)') {
                     # Nach einer AppX-Registrierung meldet Add-AppxPackage den
                     # Vorgang synchron als abgeschlossen, während App Installer
                     # und WinGet-Quelle im Remoting-Kontext noch kurz den neuen
@@ -2648,7 +2863,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $sourceResetPerformed = $true
                     Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen Sitzung."
                 }
-                $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $sourceResetPerformed
+                $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $sourceResetPerformed -or $wingetInstallScriptRan
 
                 $retryParameters = @{
                     ComputerName = $ComputerName
@@ -2688,14 +2903,15 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 } else {
                     'WinGet-Wiederholungsprüfung in neuer Sitzung erfolgreich.'
                 }
+                $initialBootstrapProperty = if ($firstWingetResult) { $firstWingetResult.PSObject.Properties['BootstrapMessage'] } else { $null }
+                $initialBootstrapMessage = if ($initialBootstrapProperty) { [string]$initialBootstrapProperty.Value } else { '' }
                 foreach ($wingetResult in $retryResults) {
                     $bootstrapProperty = $wingetResult.PSObject.Properties['BootstrapMessage']
                     $existingMessage = if ($bootstrapProperty) { [string]$bootstrapProperty.Value } else { '' }
-                    if ([string]::IsNullOrWhiteSpace($existingMessage)) {
-                        Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue $retryMessage -Force
-                    } else {
-                        Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue "$existingMessage $retryMessage" -Force
-                    }
+                    $combinedBootstrapMessage = @($initialBootstrapMessage, $existingMessage, $retryMessage) |
+                        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                        Select-Object -Unique
+                    Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue ($combinedBootstrapMessage -join ' ') -Force
                 }
                 $packageResults += $retryResults
             }
