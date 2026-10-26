@@ -174,9 +174,37 @@ function New-WindowsUpdateNuGetProviderPayload {
     }
     catch {
         if ($targetVersionPath) { Remove-Item -LiteralPath $targetVersionPath -Recurse -Force -ErrorAction SilentlyContinue }
-        $localProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
-            Where-Object { $_.ProviderPath -match '(?i)[\\/]PackageManagement[\\/]ProviderAssemblies[\\/]nuget[\\/]' } |
-            Sort-Object Version -Descending | Select-Object -First 1
+        # PowerShell 7 kann einen bereits vorhandenen klassischen NuGet-Provider
+        # aus dem Windows-PowerShell-Pfad über Get-PackageProvider nicht anzeigen.
+        # Deshalb die üblichen Providerverzeichnisse zusätzlich direkt prüfen.
+        $minimumFallbackVersion = [version]'2.8.5.201'
+        $providerRoots = @(
+            (Join-Path $env:ProgramFiles 'PackageManagement\ProviderAssemblies\nuget'),
+            (Join-Path $env:LOCALAPPDATA 'PackageManagement\ProviderAssemblies\nuget')
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+        $localCandidates = foreach ($root in $providerRoots) {
+            if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+            foreach ($versionDirectory in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+                $parsedVersion = $null
+                if (-not [version]::TryParse([string]$versionDirectory.Name, [ref]$parsedVersion)) { continue }
+                if ($parsedVersion -lt $minimumFallbackVersion) { continue }
+                $candidatePath = Join-Path $versionDirectory.FullName 'Microsoft.PackageManagement.NuGetProvider.dll'
+                if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+                    [pscustomobject]@{ Version = $parsedVersion; ProviderPath = $candidatePath }
+                }
+            }
+        }
+        $localProvider = @($localCandidates | Sort-Object Version -Descending | Select-Object -First 1)[0]
+        if (-not $localProvider -or -not $localProvider.ProviderPath) {
+            # Preserve support for provider locations surfaced by PackageManagement
+            # that do not follow the standard version-directory layout.
+            $localProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Version -ge $minimumFallbackVersion -and $_.ProviderPath -and
+                    (Test-Path -LiteralPath $_.ProviderPath -PathType Leaf)
+                } |
+                Sort-Object Version -Descending | Select-Object -First 1
+        }
         if (-not $localProvider -or -not $localProvider.ProviderPath -or
             -not (Test-Path -LiteralPath $localProvider.ProviderPath -PathType Leaf)) {
             Remove-Item -LiteralPath $providerRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -186,7 +214,7 @@ function New-WindowsUpdateNuGetProviderPayload {
         $fallbackPath = Join-Path $providerRoot $fallbackVersion
         New-Item -ItemType Directory -Path $fallbackPath -Force -ErrorAction Stop | Out-Null
         Copy-Item -LiteralPath $localProvider.ProviderPath -Destination (Join-Path $fallbackPath 'Microsoft.PackageManagement.NuGetProvider.dll') -Force -ErrorAction Stop
-        if ($WriteLog) { & $WriteLog "NuGet-Provider online nicht erreichbar; lokale Version $fallbackVersion als Offline-Fallback vorbereitet. Ursache: $($_.Exception.Message)" 'WARN' }
+        if ($WriteLog) { & $WriteLog "NuGet-Provider online nicht erreichbar; lokale Version $fallbackVersion aus '$($localProvider.ProviderPath)' als Offline-Fallback vorbereitet. Ursache: $($_.Exception.Message)" 'WARN' }
         return [pscustomobject]@{ Root = $providerRoot; Version = $fallbackVersion; Source = 'Fallback' }
     }
 }
