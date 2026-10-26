@@ -119,12 +119,25 @@ function Get-WindowsUpdateOnlineNuGetProviderVersion {
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     try {
-        $provider = Find-PackageProvider -Name NuGet -AllVersions -ForceBootstrap -Force `
-            -ErrorAction SilentlyContinue -WarningAction SilentlyContinue |
-            Where-Object { $_.Source -match '(?i)(cdn\.oneget\.org|onegetcdn\.azureedge\.net)/providers/nuget-\d+(\.\d+){1,3}\.package\.swidtag$' } |
+        # Der Bootstrap-Feed kann je nach PackageManagement-Version den
+        # umgeleiteten CDN-Link unterschiedlich in Source/FastPackageReference
+        # ausgeben. Da gezielt nach dem NuGet-Provider gesucht wird, darf die
+        # Versionssuche nicht vom Textformat dieser URL abhängen.
+        $providerResults = @(Find-PackageProvider -Name NuGet -AllVersions -ForceBootstrap -Force `
+            -ErrorAction Stop -WarningAction SilentlyContinue)
+        $provider = $providerResults |
+            Where-Object { $_.Name -ieq 'NuGet' -and [string]$_.Version -match '^\d+(\.\d+){1,3}$' } |
             Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
         if (-not $provider -or [string]$provider.Version -notmatch '^\d+(\.\d+){1,3}$') {
-            throw 'Der OneGet-Bootstrap-Feed lieferte keine gültige NuGet-Provider-Version.'
+            $reportedVersions = @($providerResults | ForEach-Object {
+                if ($_.Name -or $_.Version -or $_.Source) {
+                    '{0} {1} Quelle={2}' -f $_.Name, $_.Version, $_.Source
+                }
+            }) -join '; '
+            if ($reportedVersions) {
+                throw "Der OneGet-Bootstrap-Feed lieferte kein gültiges NuGet-Ergebnis. Rückgabe: $reportedVersions"
+            }
+            throw 'Der OneGet-Bootstrap-Feed lieferte keine NuGet-Ergebniszeile.'
         }
         return [pscustomobject]@{ Version = [version]$provider.Version; Error = $null }
     }
