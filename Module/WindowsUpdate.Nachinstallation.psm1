@@ -537,21 +537,57 @@ function Register-DeferredUpdateTask {
 `$taskName = '$taskName'
 `$workerFailed = `$false
 `$taskExpired = `$false
+`$completionConfirmed = `$false
 `$workerPhase = 'Initialisierung'
 `$schtasks = Join-Path `$env:WINDIR 'System32\schtasks.exe'
 `$scheduledTaskNames = @(`$taskName, (`$taskName + '-AtStartup'), (`$taskName + '-Expiry'))
+function Test-DeferredTaskRegistered {
+  param([Parameter(Mandatory)][string]`$CandidateName)
+  if (Get-Command -Name Get-ScheduledTask -ErrorAction SilentlyContinue) {
+    try {
+      `$registeredTask = @(Get-ScheduledTask -TaskName `$CandidateName -ErrorAction Stop)
+      if (`$registeredTask.Count -gt 0) { return `$true }
+    } catch { }
+  }
+  `$taskPath = '\' + `$CandidateName.TrimStart('\')
+  `$null = & `$schtasks /Query /TN `$taskPath /FO LIST 2>&1
+  `$queryExitCode = `$LASTEXITCODE
+  if (`$queryExitCode -eq 0) { return `$true }
+  if (`$queryExitCode -eq 1) { return `$false }
+  throw "Taskstatus für '`$taskPath' konnte nicht sicher ermittelt werden (schtasks-Exitcode `$queryExitCode)."
+}
 `$removeDeferredTask = {
   param([string]`$Name)
   `$candidateNames = @(`$Name, (`$Name + '-AtStartup'), (`$Name + '-Expiry'))
   `$removedAny = `$false
   foreach (`$candidateName in `$candidateNames) {
-    `$null = & `$schtasks /Query /TN `$candidateName /FO LIST 2>&1
-    if (`$LASTEXITCODE -ne 0) { continue }
+    `$taskPath = '\' + `$candidateName.TrimStart('\')
+    if (-not (Test-DeferredTaskRegistered -CandidateName `$candidateName)) {
+      Write-DeferredLog "Aufgabe '`$taskPath' war bereits nicht mehr registriert."
+      continue
+    }
 
-    `$deleteOutput = & `$schtasks /Delete /TN `$candidateName /F 2>&1
-    `$deleteExitCode = `$LASTEXITCODE
-    `$null = & `$schtasks /Query /TN `$candidateName /FO LIST 2>&1
-    if (`$LASTEXITCODE -eq 0) {
+    `$deleteOutput = @()
+    `$deleteExitCode = 0
+    if (Get-Command -Name Unregister-ScheduledTask -ErrorAction SilentlyContinue) {
+      try {
+        Unregister-ScheduledTask -TaskName `$candidateName -Confirm:`$false -ErrorAction Stop
+      } catch {
+        `$deleteOutput = @(`$_.Exception.Message)
+        `$deleteExitCode = 1
+      }
+    } else {
+      `$deleteOutput = @(& `$schtasks /Delete /TN `$taskPath /F 2>&1)
+      `$deleteExitCode = `$LASTEXITCODE
+    }
+
+    `$remainingAfterDelete = `$true
+    for (`$verifyAttempt = 1; `$verifyAttempt -le 5; `$verifyAttempt++) {
+      `$remainingAfterDelete = Test-DeferredTaskRegistered -CandidateName `$candidateName
+      if (-not `$remainingAfterDelete) { break }
+      if (`$verifyAttempt -lt 5) { Start-Sleep -Seconds 1 }
+    }
+    if (`$remainingAfterDelete) {
       throw "Geplante Aufgabe '`$candidateName' ist nach dem Löschversuch weiterhin vorhanden (Exitcode `$deleteExitCode; Ausgabe: `$((@(`$deleteOutput) -join ' ').Trim()))."
     }
     if (`$deleteExitCode -ne 0) {
@@ -641,6 +677,8 @@ try {
     Write-DeferredLog 'Die Nachinstallationsaufgabe hat die maximale Laufzeit von fünf Tagen erreicht und wird beendet.'
     if (-not (Send-DeferredFinalMail -Subject 'FEHLER Nachinstallation:' -Body "Die zurückgestellten Updates auf `$env:COMPUTERNAME wurden innerhalb von fünf Tagen nicht vollständig installiert. Bitte das Protokoll DeferredUpdates.log prüfen und manuell nacharbeiten.")) {
       `$workerFailed = `$true
+    } else {
+      `$completionConfirmed = `$true
     }
     return
   }
@@ -1032,6 +1070,8 @@ tr:nth-child(even) { background-color: #f9f9f9; }
         `$workerPhase = 'Abschluss-E-Mail senden'
         if (-not (Send-DeferredFinalMail -Subject 'Nachinstallation abgeschlossen:' -Body `$body -IsHtml `$true)) {
           `$workerFailed = `$true
+        } else {
+          `$completionConfirmed = `$true
         }
       }
     }
@@ -1049,7 +1089,7 @@ tr:nth-child(even) { background-color: #f9f9f9; }
   # bei Erfolg oder nach Ablauf der Fünf-Tage-Frist einmalig versendet.
 } finally {
   # Fehler und Wartephasen behalten Aufgabe, Worker und Starthelfer für den nächsten Versuch.
-  if (-not `$waitForReboot -and -not `$workerFailed) {
+  if (-not `$waitForReboot -and -not `$workerFailed -and `$completionConfirmed) {
     if (`$taskExpired) {
       Write-DeferredLog 'Fünf-Tage-Frist abgelaufen. Aufgabe wird entfernt.'
     } else {
@@ -1057,14 +1097,15 @@ tr:nth-child(even) { background-color: #f9f9f9; }
     }
     try {
       `$removedAnyTask = & `$removeDeferredTask `$taskName
-      `$remainingTasks = @(`$scheduledTaskNames | Where-Object {
-        `$null = & `$schtasks /Query /TN `$_ /FO LIST 2>&1
-        `$LASTEXITCODE -eq 0
-      })
+      `$remainingTasks = @(`$scheduledTaskNames | Where-Object { Test-DeferredTaskRegistered -CandidateName `$_ })
       if (`$remainingTasks.Count -gt 0) {
         throw "Aufgabenentfernung nicht bestätigt; weiterhin registriert: `$(`$remainingTasks -join ', ')."
       }
-      Write-DeferredLog "Taskentfernung bestätigt. Entfernte Aufgabe(n): `$removedAnyTask."
+      if (`$removedAnyTask) {
+        Write-DeferredLog 'Taskentfernung bestätigt; alle Aufgaben wurden entfernt.'
+      } else {
+        Write-DeferredLog 'Taskentfernung bestätigt; es war keine der zugehörigen Aufgaben mehr registriert.'
+      }
       foreach (`$stateName in @('DeferredUpdates.ps1', 'DeferredUpdates-LastFailureNotice.txt', 'DeferredUpdates-Results.json', 'DeferredUpdates-RebootPending.txt')) {
         `$statePath = Join-Path `$logDirectory `$stateName
         if (Test-Path -LiteralPath `$statePath) {
@@ -1085,6 +1126,9 @@ tr:nth-child(even) { background-color: #f9f9f9; }
       `$workerFailed = `$true
       Write-DeferredLog "FEHLER bei Task-/Dateibereinigung: `$(`$_.Exception.Message)"
     }
+  } elseif (-not `$waitForReboot -and -not `$workerFailed -and -not `$completionConfirmed) {
+    `$workerFailed = `$true
+    Write-DeferredLog "FEHLER in Phase '`$workerPhase': Abschlussbedingungen wurden nicht bestätigt. Aufgabe, Worker und Starthelfer bleiben für Diagnose und Wiederholung bestehen."
   } elseif (`$workerFailed) {
     try { Write-DeferredLog "Aufgabe bleibt nach Fehler in Phase '`$workerPhase' für einen erneuten Versuch bestehen." } catch { }
   }
