@@ -2000,8 +2000,22 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 catch {
                     $wingetPreparationSucceeded = $false
                     $wingetModuleUseAllowed = $false
-                    $wingetBootstrapMessage += ' App Installer konnte für den aktuellen Remoting-Benutzer nicht registriert werden; WinGet-Modulabfrage wird nicht gestartet.'
-                    $wingetDiagnosticOutput += "App-Installer-Registrierung:`r`n$($_.Exception.ToString())`r`n"
+                    $registrationFailure = $_.Exception.ToString()
+                    $wingetBootstrapMessage += ' Direkte AppX-Bereitstellung/Registrierung des App Installers fehlgeschlagen; winget-install.ps1 -Force wird als alternativer Reparaturweg über Windows PowerShell 5.1 angefordert.'
+                    $wingetDiagnosticOutput += "App-Installer-Registrierung (direkter GitHub/AppX-Weg):`r`n$registrationFailure`r`n"
+                    if ($ExecutionMode -in @('Check', 'Install') -and $wingetInstallScriptSupported) {
+                        $result += [PSCustomObject]@{
+                            Manager = 'Winget'; Available = $true; Success = $false; Skipped = $false; SkipReason = ''
+                            ExitCode = $null; Packages = @(); AvailableOutput = ''
+                            ActionOutput = 'Direkte AppX-Bereitstellung des App Installers fehlgeschlagen; winget-install.ps1 -Force wird als alternativer Reparaturweg ausgeführt.'
+                            DiagnosticOutput = $wingetDiagnosticOutput
+                            RequiresWinGetInstallScript = $true
+                        }
+                        return @($result)
+                    }
+                    else {
+                        $wingetBootstrapMessage += ' Das alternative winget-install.ps1 ist für dieses Ziel oder diesen Modus nicht verfügbar.'
+                    }
                 }
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
