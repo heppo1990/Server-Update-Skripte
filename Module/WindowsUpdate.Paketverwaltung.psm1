@@ -2,7 +2,7 @@
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Get-WindowsUpdateWinGetInstallScriptPayload {
-    <# Bezieht das aktuelle, signierte winget-install.ps1 zuerst von GitHub. #>
+    <# Prüft zuerst den lokalen Cache, vergleicht ihn mit der signierten GitHub-Version und aktualisiert ihn nur bei Bedarf. #>
     [CmdletBinding()]
     param()
 
@@ -12,6 +12,30 @@ function Get-WindowsUpdateWinGetInstallScriptPayload {
     $downloadFailure = $null
     $selectedPath = $null
     $source = ''
+    $cacheStatus = ''
+    $cacheValid = $false
+    $cachedVersion = $null
+    $cachedHash = ''
+
+    if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+        try {
+            $cacheSignature = Get-AuthenticodeSignature -FilePath $cachePath -ErrorAction Stop
+            if ($cacheSignature.Status -eq [Management.Automation.SignatureStatus]::Valid) {
+                $cachedText = [IO.File]::ReadAllText($cachePath)
+                $cachedVersionMatch = [regex]::Match($cachedText, '(?im)^\s*\$CurrentVersion\s*=\s*["''](?<Version>\d+(?:\.\d+){1,3})["'']')
+                if ($cachedVersionMatch.Success) {
+                    $cachedVersion = [version]$cachedVersionMatch.Groups['Version'].Value
+                    $cachedHash = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256 -ErrorAction Stop).Hash
+                    $cacheValid = $true
+                }
+            }
+        }
+        catch {
+            $cacheValid = $false
+            $cachedVersion = $null
+            $cachedHash = ''
+        }
+    }
 
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -23,26 +47,67 @@ function Get-WindowsUpdateWinGetInstallScriptPayload {
         if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
             throw "GitHub-Installationsskript hat keine gültige Authenticode-Signatur (Status: $($signature.Status))."
         }
-        $selectedPath = $downloadPath
-        $source = 'GitHub-Release'
-        try {
-            New-Item -Path $cacheRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
-            Copy-Item -LiteralPath $downloadPath -Destination $cachePath -Force -ErrorAction Stop
+        $downloadedText = [IO.File]::ReadAllText($downloadPath)
+        $downloadedVersionMatch = [regex]::Match($downloadedText, '(?im)^\s*\$CurrentVersion\s*=\s*["''](?<Version>\d+(?:\.\d+){1,3})["'']')
+        if (-not $downloadedVersionMatch.Success) {
+            throw 'Die Version des signierten GitHub-Installationsskripts konnte nicht ausgelesen werden.'
         }
-        catch {
-            # Die verifizierte Onlinekopie bleibt nutzbar, auch wenn der Cache
-            # auf dem Verwaltungsserver nicht geschrieben werden kann.
+        $downloadedVersion = [version]$downloadedVersionMatch.Groups['Version'].Value
+        $downloadedHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256 -ErrorAction Stop).Hash
+
+        if ($cacheValid -and $cachedVersion -gt $downloadedVersion) {
+            $selectedPath = $cachePath
+            $signature = Get-AuthenticodeSignature -FilePath $cachePath -ErrorAction Stop
+            $source = 'signierter lokaler Cache (neuer als die Onlineversion)'
+            $cacheStatus = "Cacheversion $cachedVersion ist neuer als Onlineversion $downloadedVersion; Cache beibehalten."
+        }
+        elseif ($cacheValid -and $cachedVersion -eq $downloadedVersion -and $cachedHash -eq $downloadedHash) {
+            $selectedPath = $cachePath
+            $signature = Get-AuthenticodeSignature -FilePath $cachePath -ErrorAction Stop
+            $source = 'signierter lokaler Cache (Onlineversion geprüft; unverändert)'
+            $cacheStatus = "Cacheversion $cachedVersion ist aktuell; keine Cacheaktualisierung erforderlich."
+        }
+        else {
+            $cacheStatus = if (-not $cacheValid) {
+                "Signierte Onlineversion $downloadedVersion wird erstmals im Cache abgelegt."
+            } elseif ($cachedVersion -lt $downloadedVersion) {
+                "Cache wird von Version $cachedVersion auf $downloadedVersion aktualisiert."
+            } else {
+                "Signierter Cacheinhalt wird bei unveränderter Version $downloadedVersion aktualisiert."
+            }
+            $selectedPath = $downloadPath
+            $source = 'GitHub-Release'
+            try {
+                New-Item -Path $cacheRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                $stagingPath = $cachePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+                try {
+                    Copy-Item -LiteralPath $downloadPath -Destination $stagingPath -Force -ErrorAction Stop
+                    if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
+                        [IO.File]::Replace($stagingPath, $cachePath, $null)
+                    } else {
+                        Move-Item -LiteralPath $stagingPath -Destination $cachePath -Force -ErrorAction Stop
+                    }
+                }
+                finally {
+                    if (Test-Path -LiteralPath $stagingPath -PathType Leaf) {
+                        Remove-Item -LiteralPath $stagingPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+            catch {
+                # Die verifizierte Onlinekopie bleibt nutzbar, auch wenn der Cache
+                # auf dem Verwaltungsserver nicht aktualisiert werden kann.
+                $cacheStatus += " Cache konnte nicht aktualisiert werden: $($_.Exception.Message)"
+            }
         }
     }
     catch {
         $downloadFailure = $_.Exception.Message
-        if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
-            $cacheSignature = Get-AuthenticodeSignature -FilePath $cachePath -ErrorAction SilentlyContinue
-            if ($cacheSignature -and $cacheSignature.Status -eq [Management.Automation.SignatureStatus]::Valid) {
-                $selectedPath = $cachePath
-                $signature = $cacheSignature
-                $source = 'signierter lokaler Cache (GitHub nicht erreichbar)'
-            }
+        if ($cacheValid) {
+            $selectedPath = $cachePath
+            $signature = Get-AuthenticodeSignature -FilePath $cachePath -ErrorAction Stop
+            $source = 'signierter lokaler Cache (GitHub nicht erreichbar)'
+            $cacheStatus = "GitHub-Prüfung fehlgeschlagen; gültige Cacheversion $cachedVersion wird weiterverwendet."
         }
         if (-not $selectedPath) {
             throw "winget-install.ps1 konnte nicht von GitHub bezogen werden und es gibt keine gültige lokale Kopie. GitHub: $downloadFailure"
@@ -63,6 +128,7 @@ function Get-WindowsUpdateWinGetInstallScriptPayload {
     $payload = [pscustomobject]@{
         Version = $versionMatch.Groups['Version'].Value
         Source = $source
+        CacheStatus = $cacheStatus
         Signer = [string]$signature.SignerCertificate.Subject
         Sha256 = (Get-FileHash -LiteralPath $selectedPath -Algorithm SHA256 -ErrorAction Stop).Hash
         ContentBase64 = [Convert]::ToBase64String($bytes)
@@ -2794,8 +2860,8 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $retryReason = 'WinGet-Installation/Reparatur über winget-install.ps1'
                 try {
                     $installPayload = Get-WindowsUpdateWinGetInstallScriptPayload
-                    $downloadState = if ($installPayload.Source -eq 'GitHub-Release') { 'aktuell online von GitHub bezogen' } else { $installPayload.Source }
-                    Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; winget-install.ps1 $($installPayload.Version) wurde $downloadState (Signatur gültig: $($installPayload.Signer)). Starte die Installation explizit mit Windows PowerShell 5.1."
+                    $downloadState = if ($installPayload.Source -eq 'GitHub-Release') { 'aktuelle signierte Onlineversion' } else { $installPayload.Source }
+                    Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; winget-install.ps1 $($installPayload.Version): $downloadState. $($installPayload.CacheStatus) Signatur gültig: $($installPayload.Signer). Starte die Installation explizit mit Windows PowerShell 5.1."
                     $installResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo -ScriptBlock $wingetInstallScriptWorker -ArgumentList @($installPayload.ContentBase64, $installPayload.Sha256, $installPayload.Version) -IsLocalTarget $isLocalTarget -TimeoutSeconds 1800 -OperationName "WinGet-Installation/Reparatur auf $ComputerName (Windows PowerShell 5.1)" -WriteLog $WriteLog)
                     if ($installResults.Count -eq 0) { throw 'Windows PowerShell 5.1 lieferte kein Ergebnis der WinGet-Installation.' }
                     $installResult = $installResults[-1]
