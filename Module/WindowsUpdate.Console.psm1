@@ -4,10 +4,11 @@
 function Write-CommonLog {
     param(
         [scriptblock]$WriteLog,
-        [string]$Message
+        [string]$Message,
+        [bool]$LogOnly = $false
     )
 
-    if ($WriteLog) { & $WriteLog $Message }
+    if ($WriteLog) { & $WriteLog $Message $LogOnly }
 }
 
 function Write-WindowsUpdateDiagnostic {

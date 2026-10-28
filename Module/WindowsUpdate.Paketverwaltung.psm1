@@ -1565,10 +1565,10 @@ finally {
         }
 
         function Get-WingetSourceResetState {
-            $sourceStateRoot = if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
-                $env:ProgramData
-            } elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            $sourceStateRoot = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
                 $env:LOCALAPPDATA
+            } elseif (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+                $env:ProgramData
             } else {
                 $env:USERPROFILE
             }
@@ -1583,7 +1583,7 @@ finally {
                     $lastResetUtc = [DateTime]::MinValue
                     $markerText = Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop
                     if ([DateTime]::TryParse($markerText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$lastResetUtc) -and
-                        ([DateTime]::UtcNow - $lastResetUtc.ToUniversalTime()).TotalHours -lt 24) {
+                        ([DateTime]::UtcNow - $lastResetUtc.ToUniversalTime()).TotalDays -lt 30) {
                         $allowed = $false
                     }
                 }
@@ -1642,6 +1642,8 @@ finally {
             if ($missingDefaults.Count -gt 0) {
                 throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')."
             }
+            $resetState = Get-WingetSourceResetState
+            Save-WingetSourceResetState -State $resetState
         }
 
         function Save-WingetSourceResetState {
@@ -2007,7 +2009,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $wingetPortableMode = $true
                     $wingetModuleUseAllowed = $false
                     $cacheState = if ($portableClient.Cached) { 'aus lokalem Cache' } else { 'neu aus dem aktuellen GitHub-Release entpackt' }
-                    $wingetBootstrapMessage += " AppX-Reparatur mit winget-install.ps1 fehlgeschlagen; verwende nachfolgenden portablen WinGet-CLI-Fallback aus dem offiziellen GitHub-Release ($($portableClient.Version), $cacheState). AppX-Paketbestand und Bereitstellung bleiben unverändert."
+                    $wingetBootstrapMessage += " Ergänze den AppX-Reparaturversuch mit winget-install.ps1 durch die portable WinGet-CLI aus dem offiziellen GitHub-Release ($($portableClient.Version), $cacheState); AppX-Paketbestand und Bereitstellung bleiben unverändert."
                 }
                 catch {
                     $portableFailure = $_.Exception.ToString()
@@ -2166,6 +2168,28 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $wingetPreparationSucceeded = $false
                     $wingetBootstrapMessage += ' WinGet-Quellenpaket konnte für den aktuellen Benutzer nicht registriert werden; Details im Log.'
                     $wingetDiagnosticOutput += "WinGet-Quellenpaket:`r`n$($_.Exception.ToString())`r`n"
+                }
+            }
+            if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
+                $monthlySourceResetState = Get-WingetSourceResetState
+                if ($SourceResetPerformed) {
+                    # Ein Quellenreset im vorgeschalteten Wiederherstellungspfad
+                    # zählt ebenfalls als Monatsreset.
+                    try { Save-WingetSourceResetState -State $monthlySourceResetState }
+                    catch { $wingetDiagnosticOutput += "Zeitpunkt des WinGet-Quellenresets konnte nicht gespeichert werden:`r`n$($_.Exception.ToString())`r`n" }
+                }
+                elseif ($monthlySourceResetState.Allowed) {
+                    try {
+                        Reset-WingetDefaultSources -Path $wingetPath
+                        $SourceResetPerformed = $true
+                        $SourcePackageRefreshPerformed = $true
+                        $wingetBootstrapMessage += ' WinGet-Standardquellen wurden wegen des 30-Tage-Intervalls zurückgesetzt und die Quelle winget aktualisiert.'
+                    }
+                    catch {
+                        $monthlyResetFailure = $_.Exception.ToString()
+                        $wingetBootstrapMessage += ' Monatlicher WinGet-Quellenreset war nicht möglich; die Paketprüfung wird mit dem vorhandenen Quellenstand ausgeführt.'
+                        $wingetDiagnosticOutput += "Monatlicher WinGet-Quellenreset:`r`n$monthlyResetFailure`r`n"
+                    }
                 }
             }
             if ($ExecutionMode -eq 'Check' -and $wingetPreparationSucceeded) {
@@ -2533,7 +2557,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                             $result += [PSCustomObject]@{
                                 Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
                                 Packages=@(); AvailableOutput=$availableOutput
-                                ActionOutput='WinGet-Suche war leer und der Quellenreset ist noch durch das 24-Stunden-Limit gesperrt; das Quellenpaket muss erneuert und die Abfrage wiederholt werden.'
+                                ActionOutput='WinGet-Suche war leer und der monatliche Quellenreset wurde bereits innerhalb der letzten 30 Tage ausgeführt; das Quellenpaket muss erneuert und die Abfrage wiederholt werden.'
                                 RetryAfterSourcePackageRefresh=$true
                             }
                             return @($result)
@@ -2916,7 +2940,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $retryRequired = $true
                         $retryPreferPortableWinGet = $true
                         $retryReason = 'AppX-Bereitstellung nach winget-install.ps1 weiterhin defekt; portablen WinGet-Fallback aus GitHub verwenden'
-                        Write-CommonLog $WriteLog "WinGet-AppX-Reparatur auf $ComputerName fehlgeschlagen. Da das Ziel Windows Server 2022 oder neuer ist, wird WinGet anschließend portabel aus dem aktuellen GitHub-Release in einer neuen Verbindung geprüft; der Fallback ändert keine provisionierten AppX-Pakete. Details des Reparaturversuchs: $failureDiagnostic"
+                        Write-CommonLog $WriteLog "Zwischenstufe winget-install.ps1 auf $ComputerName endete mit Fehler; der portable WinGet-Fallback wird in einer neuen Verbindung verwendet. Details des Reparaturversuchs: $failureDiagnostic" $true
                     }
                     else {
                         $failure = "WinGet-Installation/Reparatur auf $ComputerName fehlgeschlagen; Details im Log."
@@ -3077,7 +3101,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet meldete einen Abfragefehler.' }
                     throw "Wiederholungsprüfung fehlgeschlagen: $retryDetail"
                 }
-                $retryMessage = if ($sourcePackageRefreshPerformed -and @($retryResult.Packages).Count -eq 0) {
+                $retryMessage = if ($retryPreferPortableWinGet) {
+                    'WinGet-Wiederholungsprüfung mit portabler GitHub-CLI in neuer Sitzung erfolgreich.'
+                } elseif ($sourcePackageRefreshPerformed -and @($retryResult.Packages).Count -eq 0) {
                     'WinGet-Abfrage nach Prüfung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar.'
                 } elseif ($retryRequiresSourceReset) {
                     'WinGet-Wiederholungsprüfung nach Quellenreset und Erneuerung des Quellenpakets erfolgreich.'
@@ -3182,7 +3208,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         $bootstrapMessageProperty = $packageResult.PSObject.Properties['BootstrapMessage']
         if ($packageResult.Manager -eq 'Winget' -and $bootstrapMessageProperty -and -not [string]::IsNullOrWhiteSpace([string]$bootstrapMessageProperty.Value)) {
             $bootstrapMessage = [string]$bootstrapMessageProperty.Value
-            $logOnly = $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des 24-Stunden-Limits übersprungen\.|WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar\.|WinGet-Abfrage nach Prüfung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar\.'
+            $logOnly = $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des monatlichen Limits übersprungen\.|WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar\.|WinGet-Abfrage nach Prüfung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar\.'
             if ($WriteLog) { & $WriteLog $bootstrapMessage ([bool]$logOnly) }
         }
     }
