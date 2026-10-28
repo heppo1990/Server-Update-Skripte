@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 # Konsolenzustand bleibt im gemeinsamen Modulbereich, damit alle Fachmodule
 # dieselben Tabellen- und Zusammenfassungszustände verwenden.
