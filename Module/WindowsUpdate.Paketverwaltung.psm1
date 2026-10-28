@@ -212,6 +212,43 @@ function Invoke-WindowsUpdatePackageManagers {
                 throw "Authenticode-Signatur auf dem Ziel ist nicht gültig (Status: $($signature.Status))."
             }
 
+            # Ein beschädigter AppX-Provisionierungseintrag kann auf einen
+            # nicht mehr vorhandenen WindowsApps-Ordner zeigen. DISM kann dann
+            # beim Bereitstellen des aktuellen App Installers die alte Version
+            # nicht entfernen (0x80070003). Nur solche nachweislich verwaisten
+            # App-Installer-Einträge entfernen; vorhandene Benutzerregistrierungen
+            # bleiben laut Remove-AppxProvisionedPackage unangetastet.
+            $provisionedPackages = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop |
+                Where-Object {
+                    ([string]$_.DisplayName -eq 'Microsoft.DesktopAppInstaller' -or
+                     [string]$_.PackageName -like 'Microsoft.DesktopAppInstaller_*') -and
+                    [string]$_.PackageName -match '^Microsoft\.DesktopAppInstaller_[^\\/:]+$'
+                })
+            foreach ($provisionedPackage in $provisionedPackages) {
+                $packageFolder = Join-Path (Join-Path $env:ProgramFiles 'WindowsApps') ([string]$provisionedPackage.PackageName)
+                $bundleManifest = Join-Path $packageFolder 'AppxMetadata\AppxBundleManifest.xml'
+                $manifestMissing = $false
+                try {
+                    Get-Item -LiteralPath $bundleManifest -ErrorAction Stop | Out-Null
+                }
+                catch {
+                    if ($_.CategoryInfo.Category -ne [Management.Automation.ErrorCategory]::ObjectNotFound) {
+                        throw "Manifeststatus für provisioniertes Paket $($provisionedPackage.PackageName) konnte nicht sicher geprüft werden; es wird nichts entfernt. Ursache: $($_.Exception.Message)"
+                    }
+                    $manifestMissing = $true
+                }
+                if (-not $manifestMissing) { continue }
+
+                Write-Output "Verwaister App-Installer-Provisionierungseintrag erkannt: $($provisionedPackage.PackageName); fehlendes Manifest: $bundleManifest. Entferne nur den Provisionierungseintrag vor der erneuten Bereitstellung."
+                Remove-AppxProvisionedPackage -Online -PackageName ([string]$provisionedPackage.PackageName) -ErrorAction Stop | Out-Null
+                $remainingProvision = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop |
+                    Where-Object { [string]$_.PackageName -eq [string]$provisionedPackage.PackageName })
+                if ($remainingProvision.Count -gt 0) {
+                    throw "Verwaister App-Installer-Provisionierungseintrag $($provisionedPackage.PackageName) wurde trotz Bereinigungsaufruf weiterhin gemeldet."
+                }
+                Write-Output "Verwaister App-Installer-Provisionierungseintrag entfernt: $($provisionedPackage.PackageName)."
+            }
+
             $powerShell51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if (-not (Test-Path -LiteralPath $powerShell51 -PathType Leaf)) { throw "Windows PowerShell 5.1 wurde nicht gefunden: $powerShell51" }
             $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $scriptPath + '" -Force'
