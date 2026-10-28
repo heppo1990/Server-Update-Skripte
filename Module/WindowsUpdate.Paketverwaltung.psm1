@@ -270,7 +270,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true)
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true, [bool]$PreferPortableWinGet = $false)
 
         function Invoke-WinGetCurrentUserAppxTask {
             param(
@@ -1969,11 +1969,13 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $script:WindowsUpdatePortableWinGetPath = $null
             $wingetPortableMode = $false
             $isWindowsServer2019 = $false
+            $portableFallbackSupported = $false
             $wingetInstallScriptSupported = $true
             $wingetServerUnsupported = $false
             try {
                 $osInformation = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
                 $isWindowsServer2019 = ([int]$osInformation.ProductType -gt 1) -and ([int]$osInformation.BuildNumber -eq 17763)
+                $portableFallbackSupported = ([int]$osInformation.ProductType -gt 1) -and ([int]$osInformation.BuildNumber -ge 20348)
                 if ([int]$osInformation.ProductType -gt 1 -and [int]$osInformation.BuildNumber -lt 17763) {
                     $wingetInstallScriptSupported = $false
                     $wingetServerUnsupported = $true
@@ -1989,7 +1991,35 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $appInstallerRegistrationChanged = $false
             $wingetQuerySources = @()
             $wingetModuleUseAllowed = $true
-            if ($isWindowsServer2019) {
+            if ($PreferPortableWinGet) {
+                if (-not $portableFallbackSupported) {
+                    $result += [PSCustomObject]@{
+                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                        Packages=@(); AvailableOutput=''; ActionOutput='Der portable WinGet-Fallback ist nur für Windows Server 2022 oder neuer freigegeben.'
+                        DiagnosticOutput='Das Zielbetriebssystem erfüllt die Mindestversion des portablen WinGet-Fallbacks nicht.'
+                    }
+                    return @($result)
+                }
+                try {
+                    $portableClient = Get-WinGetPortableClientFromGitHub
+                    $script:WindowsUpdatePortableWinGetPath = [string]$portableClient.Path
+                    $wingetPath = [string]$portableClient.Path
+                    $wingetPortableMode = $true
+                    $wingetModuleUseAllowed = $false
+                    $cacheState = if ($portableClient.Cached) { 'aus lokalem Cache' } else { 'neu aus dem aktuellen GitHub-Release entpackt' }
+                    $wingetBootstrapMessage += " AppX-Reparatur mit winget-install.ps1 fehlgeschlagen; verwende nachfolgenden portablen WinGet-CLI-Fallback aus dem offiziellen GitHub-Release ($($portableClient.Version), $cacheState). AppX-Paketbestand und Bereitstellung bleiben unverändert."
+                }
+                catch {
+                    $portableFailure = $_.Exception.ToString()
+                    $result += [PSCustomObject]@{
+                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                        Packages=@(); AvailableOutput=''; ActionOutput='Portabler WinGet-Fallback aus GitHub konnte nicht bereitgestellt werden; Details im Laufprotokoll.'
+                        DiagnosticOutput=$portableFailure
+                    }
+                    return @($result)
+                }
+            }
+            elseif ($isWindowsServer2019) {
                 $installedWingetPath = $wingetPath
                 $installedWingetHealth = Test-WingetExecutable -Path $installedWingetPath
                 try {
@@ -2033,6 +2063,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         ActionOutput = 'WinGet fehlt oder startet nicht; Reparatur über das aktuelle winget-install.ps1 erforderlich.'
                         DiagnosticOutput = [string]$wingetPreflightHealth.DiagnosticOutput
                         RequiresWinGetInstallScript = $true
+                        PortableFallbackSupported = $portableFallbackSupported
                     }
                     return @($result)
                 }
@@ -2076,6 +2107,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                             ActionOutput = 'Direkte AppX-Bereitstellung des App Installers fehlgeschlagen; winget-install.ps1 -Force wird als alternativer Reparaturweg ausgeführt.'
                             DiagnosticOutput = $wingetDiagnosticOutput
                             RequiresWinGetInstallScript = $true
+                            PortableFallbackSupported = $portableFallbackSupported
                         }
                         return @($result)
                     }
@@ -2201,6 +2233,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                             ActionOutput = 'WinGet fehlt oder startet nicht; das aktuelle winget-install.ps1 muss in Windows PowerShell 5.1 ausgeführt und die Prüfung danach neu gestartet werden.'
                             DiagnosticOutput = [string]$wingetHealth.DiagnosticOutput
                             RequiresWinGetInstallScript = $true
+                            PortableFallbackSupported = $portableFallbackSupported
                         }
                         return $result
                     }
@@ -2827,6 +2860,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         $retryRequired = $false
         $retryRequiresSourceReset = $false
         $retryRequiresSourcePackageRefresh = $false
+        $retryPreferPortableWinGet = $false
         $wingetInstallScriptRan = $false
         $retryReason = ''
         $firstDiagnostic = ''
@@ -2839,7 +2873,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 ComputerName = $ComputerName
                 AuthInfo = $AuthInfo
                 ScriptBlock = $packageScript
-                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates)
+                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false)
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
                 WriteLog = $WriteLog
@@ -2875,15 +2909,23 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     }
                 }
                 catch {
-                    $retryRequired = $false
-                    $failure = "WinGet-Installation/Reparatur auf $ComputerName fehlgeschlagen; Details im Log."
                     $failureDiagnostic = $_.Exception.ToString()
                     $firstDiagnostic += [Environment]::NewLine + 'WinGet-Installationsskript:' + [Environment]::NewLine + $failureDiagnostic
-                    $packageResults += [pscustomobject]@{
-                        Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
-                        Packages=@(); AvailableOutput=''; ActionOutput=$failure; DiagnosticOutput=$firstDiagnostic
+                    $portableFallbackProperty = $firstWingetResult.PSObject.Properties['PortableFallbackSupported']
+                    if ($portableFallbackProperty -and [bool]$portableFallbackProperty.Value) {
+                        $retryRequired = $true
+                        $retryPreferPortableWinGet = $true
+                        $retryReason = 'AppX-Bereitstellung nach winget-install.ps1 weiterhin defekt; portablen WinGet-Fallback aus GitHub verwenden'
+                        Write-CommonLog $WriteLog "WinGet-AppX-Reparatur auf $ComputerName fehlgeschlagen. Da das Ziel Windows Server 2022 oder neuer ist, wird WinGet anschließend portabel aus dem aktuellen GitHub-Release in einer neuen Verbindung geprüft; der Fallback ändert keine provisionierten AppX-Pakete. Details des Reparaturversuchs: $failureDiagnostic"
                     }
-                    Write-CommonLog $WriteLog $failure 'WARN'
+                    else {
+                        $failure = "WinGet-Installation/Reparatur auf $ComputerName fehlgeschlagen; Details im Log."
+                        $packageResults += [pscustomobject]@{
+                            Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
+                            Packages=@(); AvailableOutput=''; ActionOutput=$failure; DiagnosticOutput=$firstDiagnostic
+                        }
+                        Write-CommonLog $WriteLog $failure 'WARN'
+                    }
                 }
             }
             elseif ($resetProperty -and [bool]$resetProperty.Value) {
@@ -2915,7 +2957,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         }
 
         if ($retryRequired) {
-            $retryDescription = if ($retryRequiresSourceReset) {
+            $retryDescription = if ($retryPreferPortableWinGet) {
+                'Bereitstellung der portablen WinGet-CLI aus dem aktuellen GitHub-Release und einmalige Wiederholung'
+            } elseif ($retryRequiresSourceReset) {
                 'Quellenreset, Erneuerung des WinGet-Quellenpakets und einmalige Wiederholung'
             } elseif ($retryRequiresSourcePackageRefresh) {
                 'Erneuerung des WinGet-Quellenpakets und einmalige Wiederholung'
@@ -2949,7 +2993,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     ComputerName = $ComputerName
                     AuthInfo = $AuthInfo
                     ScriptBlock = $packageScript
-                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates)
+                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet)
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
                     WriteLog = $WriteLog
@@ -2994,7 +3038,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         ComputerName = $ComputerName
                         AuthInfo = $AuthInfo
                         ScriptBlock = $packageScript
-                        ArgumentList = @($Mode, $true, $false, $followupResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates)
+                        ArgumentList = @($Mode, $true, $false, $followupResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet)
                         IsLocalTarget = $isLocalTarget
                         OperationName = "WinGet-Folgeprüfung auf $ComputerName"
                         WriteLog = $WriteLog
