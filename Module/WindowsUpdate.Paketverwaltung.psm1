@@ -1583,7 +1583,7 @@ finally {
                     $lastResetUtc = [DateTime]::MinValue
                     $markerText = Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop
                     if ([DateTime]::TryParse($markerText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$lastResetUtc) -and
-                        ([DateTime]::UtcNow - $lastResetUtc.ToUniversalTime()).TotalDays -lt 30) {
+                        ([DateTime]::UtcNow - $lastResetUtc.ToUniversalTime()).TotalHours -lt 24) {
                         $allowed = $false
                     }
                 }
@@ -1594,6 +1594,35 @@ finally {
                 $allowed = $true
             }
             return [PSCustomObject]@{ Allowed = $allowed; Directory = $sourceStateDirectory; MarkerPath = $markerPath }
+        }
+
+        function Get-WingetMonthlySourceResetState {
+            $sourceState = Get-WingetSourceResetState
+            $markerPath = Join-Path $sourceState.Directory 'WingetMonthlySourcesResetUtc.txt'
+            $allowed = $true
+            $markerToRead = if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+                $markerPath
+            } elseif (Test-Path -LiteralPath $sourceState.MarkerPath -PathType Leaf) {
+                # Bereits erfolgte Resets aus dem Übergangsstand zählen für den
+                # Monatsrhythmus, statt direkt einen zweiten Reset auszulösen.
+                $sourceState.MarkerPath
+            } else {
+                $null
+            }
+            try {
+                if ($markerToRead) {
+                    $lastResetUtc = [DateTime]::MinValue
+                    $markerText = Get-Content -LiteralPath $markerToRead -Raw -ErrorAction Stop
+                    if ([DateTime]::TryParse($markerText, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$lastResetUtc) -and
+                        ([DateTime]::UtcNow - $lastResetUtc.ToUniversalTime()).TotalDays -lt 30) {
+                        $allowed = $false
+                    }
+                }
+            }
+            catch {
+                $allowed = $true
+            }
+            return [PSCustomObject]@{ Allowed = $allowed; Directory = $sourceState.Directory; MarkerPath = $markerPath }
         }
 
         function Reset-WingetDefaultSources {
@@ -1642,8 +1671,8 @@ finally {
             if ($missingDefaults.Count -gt 0) {
                 throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')."
             }
-            $resetState = Get-WingetSourceResetState
-            Save-WingetSourceResetState -State $resetState
+            Save-WingetSourceResetState -State (Get-WingetSourceResetState)
+            Save-WingetSourceResetState -State (Get-WingetMonthlySourceResetState)
         }
 
         function Save-WingetSourceResetState {
@@ -2155,6 +2184,13 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         if ($sourceUpdateResult.ExitCode -ne 0) {
                             throw "WinGet-Quelle konnte nach Benutzerregistrierung nicht aktualisiert werden (Exitcode $($sourceUpdateResult.ExitCode)): $($sourceUpdateResult.Output)"
                         }
+                        try {
+                            Save-WingetSourceResetState -State (Get-WingetSourceResetState)
+                            Save-WingetSourceResetState -State (Get-WingetMonthlySourceResetState)
+                        }
+                        catch {
+                            $wingetDiagnosticOutput += "Zeitpunkt des Quellenresets nach Benutzerregistrierung konnte nicht gespeichert werden:`r`n$($_.Exception.ToString())`r`n"
+                        }
                         $wingetBootstrapMessage += " WinGet-Quellen im Benutzerkontext nach AppX-Komponentenänderung zurückgesetzt und Quelle 'winget' aktualisiert; Abfrage wird in einer frischen Verbindung wiederholt."
                         if ($refreshSourcePackage) {
                             $wingetBootstrapMessage += ' WinGet-Quellenpaket wurde im aktuellen Remoting-Kontext ergänzt.'
@@ -2171,25 +2207,32 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 }
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
-                $monthlySourceResetState = Get-WingetSourceResetState
+                $sourceResetState = Get-WingetSourceResetState
+                $monthlySourceResetState = Get-WingetMonthlySourceResetState
                 if ($SourceResetPerformed) {
                     # Ein Quellenreset im vorgeschalteten Wiederherstellungspfad
-                    # zählt ebenfalls als Monatsreset.
-                    try { Save-WingetSourceResetState -State $monthlySourceResetState }
+                    # zählt ebenfalls für beide Schutzintervalle.
+                    try {
+                        Save-WingetSourceResetState -State $sourceResetState
+                        Save-WingetSourceResetState -State $monthlySourceResetState
+                    }
                     catch { $wingetDiagnosticOutput += "Zeitpunkt des WinGet-Quellenresets konnte nicht gespeichert werden:`r`n$($_.Exception.ToString())`r`n" }
                 }
-                elseif ($monthlySourceResetState.Allowed) {
+                elseif ($monthlySourceResetState.Allowed -and $sourceResetState.Allowed) {
                     try {
                         Reset-WingetDefaultSources -Path $wingetPath
                         $SourceResetPerformed = $true
                         $SourcePackageRefreshPerformed = $true
-                        $wingetBootstrapMessage += ' WinGet-Standardquellen wurden wegen des 30-Tage-Intervalls zurückgesetzt und die Quelle winget aktualisiert.'
+                        $wingetBootstrapMessage += ' WinGet-Standardquellen wurden zurückgesetzt und die Quelle winget aktualisiert; der monatliche Reset ist vorgemerkt.'
                     }
                     catch {
                         $monthlyResetFailure = $_.Exception.ToString()
                         $wingetBootstrapMessage += ' Monatlicher WinGet-Quellenreset war nicht möglich; die Paketprüfung wird mit dem vorhandenen Quellenstand ausgeführt.'
                         $wingetDiagnosticOutput += "Monatlicher WinGet-Quellenreset:`r`n$monthlyResetFailure`r`n"
                     }
+                }
+                elseif ($monthlySourceResetState.Allowed -and -not $sourceResetState.Allowed) {
+                    $wingetBootstrapMessage += ' Monatlicher WinGet-Quellenreset ist fällig, wird aber wegen des 24-Stunden-Schutzes beim nächsten Lauf nachgeholt.'
                 }
             }
             if ($ExecutionMode -eq 'Check' -and $wingetPreparationSucceeded) {
@@ -2557,7 +2600,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                             $result += [PSCustomObject]@{
                                 Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
                                 Packages=@(); AvailableOutput=$availableOutput
-                                ActionOutput='WinGet-Suche war leer und der monatliche Quellenreset wurde bereits innerhalb der letzten 30 Tage ausgeführt; das Quellenpaket muss erneuert und die Abfrage wiederholt werden.'
+                                ActionOutput='WinGet-Suche war leer und der Quellenreset wurde innerhalb der letzten 24 Stunden bereits ausgeführt; das Quellenpaket muss erneuert und die Abfrage wiederholt werden.'
                                 RetryAfterSourcePackageRefresh=$true
                             }
                             return @($result)
