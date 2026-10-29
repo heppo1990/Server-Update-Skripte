@@ -1648,6 +1648,18 @@ finally {
                 throw "Kundeneigene WinGet-Quelle(n) erkannt ($($customSources -join ', ')); Reset wurde ausgelassen, damit diese erhalten bleiben."
             }
 
+            # Ein Quellenreset kann die aktuelle source.msix erkennen und
+            # registrieren wollen. Diese AppX-Registrierung scheitert in einer
+            # WinRM-Sitzung häufig mit 0x80070520 (keine gültige Anmeldesitzung).
+            # Die vorhandene Hilfsfunktion lädt deshalb zuerst die aktuelle
+            # Quelle online und registriert eine neuere Version über eine
+            # Aufgabe im Benutzerkontext. Danach sollte die CLI keinen
+            # AppX-Deployment-Schritt mehr aus dem Remoting-Host auslösen.
+            $sourcePackageState = Ensure-WinGetSourcePackageForCurrentUser -Refresh
+            if (-not $sourcePackageState -or [string]::IsNullOrWhiteSpace([string]$sourcePackageState.Version)) {
+                throw 'Das aktuelle WinGet-Quellenpaket konnte vor dem Quellenreset nicht für den Remoting-Benutzer bestätigt werden.'
+            }
+
             # Den explizit bewährten CLI-Reset verwenden. Anschließend wird die
             # Paketquelle vor dem Retry aktualisiert.
             $resetResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'reset', '--force', '--disable-interactivity')
