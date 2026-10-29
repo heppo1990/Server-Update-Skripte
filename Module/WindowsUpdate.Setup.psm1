@@ -3,12 +3,20 @@ function New-WindowsUpdateAdmDeploymentStatusModuleSource {
     param(
         [Parameter(Mandatory)]
         [ValidatePattern('^[0-9]+(?:\.[0-9]+)*$')]
-        [string]$Version
+        [string]$Version,
+        [Parameter(Mandatory)]
+        [ValidateRange(0, 100000)]
+        [int]$TargetBuild,
+        [string[]]$ClientCertificateUris = @('http://schemas.microsoft.com/powershell/WindowsUpdateAdm')
     )
 
+    $uriLiteralList = foreach ($uri in $ClientCertificateUris) {
+        "'{0}'" -f ([string]$uri).Replace("'", "''")
+    }
+    $uriLiterals = @($uriLiteralList) -join ', '
     @"
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '$Version' }
+    [PSCustomObject]@{ Version = '$Version'; TargetBuild = $TargetBuild; ClientCertificateUris = @($uriLiterals) }
 }
 Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
 "@

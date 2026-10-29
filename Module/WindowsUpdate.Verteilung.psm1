@@ -36,6 +36,8 @@ function Test-WindowsUpdateDeploymentConfiguration {
     )
 
     $certificate = $null
+    $requiredCertificateUri = 'http://schemas.microsoft.com/powershell/WindowsUpdateAdm'
+    $legacyCertificateUri = 'http://schemas.microsoft.com/powershell/Microsoft.PowerShell'
     if ($DeployType -ne 'AD') {
         $certificate = Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $ManagementComputerName
         if (-not $certificate) {
@@ -51,7 +53,12 @@ function Test-WindowsUpdateDeploymentConfiguration {
         ScriptBlock = {
             $updateCommand = Get-Command Get-WindowsUpdate -ErrorAction Stop | Select-Object -First 1
             $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
-            [PSCustomObject]@{ UpdateCommand = [string]$updateCommand.Name; DeploymentVersion = [string]$deploymentStatus.Version }
+            [PSCustomObject]@{
+                UpdateCommand = [string]$updateCommand.Name
+                DeploymentVersion = [string]$deploymentStatus.Version
+                TargetBuild = [int]$deploymentStatus.TargetBuild
+                ClientCertificateUris = [string[]]@($deploymentStatus.ClientCertificateUris)
+            }
         }
     }
     if ($certificate) {
@@ -59,13 +66,42 @@ function Test-WindowsUpdateDeploymentConfiguration {
         $endpointParameters.CertificateThumbprint = $certificate.Thumbprint
     }
 
+    $status = $null
     try {
         $status = Invoke-Command @endpointParameters
         if ($status.UpdateCommand -ne 'Get-WindowsUpdate') { throw 'Der WindowsUpdateAdm-Endpunkt stellt Get-WindowsUpdate nicht bereit.' }
-        if ($status.DeploymentVersion -eq $ExpectedDeploymentVersion) {
-            return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$status.DeploymentVersion }
+        $certificateMappingRefreshRequired = $false
+        if ($certificate) {
+            $reportedCertificateUris = @($status.ClientCertificateUris | ForEach-Object { [string]$_ } | Select-Object -Unique | Sort-Object)
+            $expectedCertificateUris = @($requiredCertificateUri)
+            if ([int]$status.TargetBuild -le 17763) {
+                $expectedCertificateUris += $legacyCertificateUri
+            }
+            $expectedCertificateUris = @($expectedCertificateUris | Sort-Object)
+            $unexpectedCertificateUris = @($reportedCertificateUris | Where-Object { $_ -notin $expectedCertificateUris })
+            $missingCertificateUris = @($expectedCertificateUris | Where-Object { $_ -notin $reportedCertificateUris })
+            $certificateMappingRefreshRequired =
+                [int]$status.TargetBuild -le 0 -or
+                $missingCertificateUris.Count -gt 0 -or
+                $unexpectedCertificateUris.Count -gt 0 -or
+                $reportedCertificateUris.Count -ne $expectedCertificateUris.Count
         }
-        $reason = "Konfigurationsversion $($status.DeploymentVersion) gefunden; erwartet wird $ExpectedDeploymentVersion."
+        if ($status.DeploymentVersion -eq $ExpectedDeploymentVersion) {
+            if (-not $certificateMappingRefreshRequired) {
+                return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$status.DeploymentVersion; CertificateMappingRefreshRequired = $false }
+            }
+            $reason = 'Die gespeicherten Clientzertifikat-Endpunkt-URIs stimmen nicht exakt mit den für dieses System erforderlichen URIs überein; Bootstrap-Anmeldedaten werden für die sichere Umstellung benötigt.'
+        } else {
+            $reason = "Konfigurationsversion $($status.DeploymentVersion) gefunden; erwartet wird $ExpectedDeploymentVersion."
+        }
+        if ($certificateMappingRefreshRequired) {
+            return [PSCustomObject]@{
+                IsCurrent = $false
+                Reason = $reason
+                Version = [string]$status.DeploymentVersion
+                CertificateMappingRefreshRequired = $true
+            }
+        }
     }
     catch { $reason = $_.Exception.Message }
 
@@ -79,15 +115,36 @@ function Test-WindowsUpdateDeploymentConfiguration {
                     $modulePath = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\JEA_Updates.psm1'
                     $moduleText = if (Test-Path -LiteralPath $modulePath -PathType Leaf) { Get-Content -LiteralPath $modulePath -Raw -ErrorAction Stop } else { '' }
                     $versionMatch = [regex]::Match($moduleText, "function\s+Get-WindowsUpdateAdmDeploymentStatus[\s\S]*?Version\s*=\s*'(?<Version>[^']+)'", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                    $uriListMatch = [regex]::Match($moduleText, 'ClientCertificateUris\s*=\s*@\((?<Uris>[^)]*)\)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                    $certificateUris = if ($uriListMatch.Success) {
+                        @([regex]::Matches($uriListMatch.Groups['Uris'].Value, "'(?<Uri>[^']*)'") | ForEach-Object { [string]$_.Groups['Uri'].Value })
+                    } else { @() }
                     [PSCustomObject]@{
                         Build = $build
                         HasStatusFunction = $versionMatch.Success
                         DeploymentVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['Version'].Value } else { '' }
+                        ClientCertificateUris = [string[]]$certificateUris
                     }
                 }
             if ([int]$legacyStatus.Build -le 17763) {
-                if ($legacyStatus.HasStatusFunction -and $legacyStatus.DeploymentVersion -eq $ExpectedDeploymentVersion) {
-                    return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$legacyStatus.DeploymentVersion }
+                $expectedLegacyUris = @($requiredCertificateUri)
+                if ([int]$legacyStatus.Build -le 17763) { $expectedLegacyUris += $legacyCertificateUri }
+                $expectedLegacyUris = @($expectedLegacyUris | Sort-Object)
+                $reportedLegacyUris = @($legacyStatus.ClientCertificateUris | ForEach-Object { [string]$_ } | Select-Object -Unique | Sort-Object)
+                $legacyUriMismatch =
+                    $reportedLegacyUris.Count -ne $expectedLegacyUris.Count -or
+                    @($expectedLegacyUris | Where-Object { $_ -notin $reportedLegacyUris }).Count -gt 0 -or
+                    @($reportedLegacyUris | Where-Object { $_ -notin $expectedLegacyUris }).Count -gt 0
+                if ($legacyStatus.HasStatusFunction -and $legacyStatus.DeploymentVersion -eq $ExpectedDeploymentVersion -and -not $legacyUriMismatch) {
+                    return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$legacyStatus.DeploymentVersion; CertificateMappingRefreshRequired = $false }
+                }
+                if ($legacyUriMismatch) {
+                    return [PSCustomObject]@{
+                        IsCurrent = $false
+                        Reason = "Die gespeicherten Clientzertifikat-Endpunkt-URIs auf Server-Build $($legacyStatus.Build) stimmen nicht exakt mit den erforderlichen URIs überein."
+                        Version = [string]$legacyStatus.DeploymentVersion
+                        CertificateMappingRefreshRequired = $true
+                    }
                 }
                 $reason = "Server-Build $($legacyStatus.Build): Modulversion '$($legacyStatus.DeploymentVersion)' gefunden; erwartet wird $ExpectedDeploymentVersion."
             }
@@ -95,7 +152,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
         catch { $reason += " Zertifikatsprüfung am normalen WinRM-Endpunkt ebenfalls fehlgeschlagen: $($_.Exception.Message)" }
     }
 
-    [PSCustomObject]@{ IsCurrent = $false; Reason = $reason; Version = '' }
+    [PSCustomObject]@{ IsCurrent = $false; Reason = $reason; Version = if ($status) { [string]$status.DeploymentVersion } else { '' }; CertificateMappingRefreshRequired = $false }
 }
 
 function Wait-WindowsUpdateDeploymentFinalization {
@@ -281,6 +338,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
     $targetModulePayloadRoot = $null
     $usedCertificate = $false
     $bootstrapCredential = $null
+    $certificateMappingRefreshRequired = $false
     try {
         if (-not $CleanupLegacyTempOnly) {
             Write-DeployLog "[$Servername] Prüfe vorhandene WindowsUpdateAdm-Version und Verbindung."
@@ -296,6 +354,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 }
             }
             Write-DeployLog "[$Servername] Vorabprüfung nicht erfolgreich; Einrichtung wird ausgeführt. $($preflight.Reason)" -LogOnly
+            $certificateMappingRefreshRequired = [bool]$preflight.CertificateMappingRefreshRequired
         }
 
         if ($DeployType -ne 'AD') {
@@ -307,7 +366,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
             # Bei Wiederholungen zuerst das bereits eingerichtete Client-Zertifikat testen.
             # Nur bei einer echten Ersteinrichtung werden Zugangsdaten benötigt.
             $clientCert = Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME
-            if ($clientCert) {
+            if ($clientCert -and -not $certificateMappingRefreshRequired) {
                 try {
                     Write-DeployLog "Prüfe Client-Zertifikatsverbindung zu $Servername." -LogOnly
                     $session = New-PSSession -ComputerName $Servername -UseSSL `
@@ -332,6 +391,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
                         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-Zertifikatsverbindung mit Vertrauensmigration' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Einrichtungsdaten')
                     }
                 }
+            } elseif ($clientCert -and $certificateMappingRefreshRequired) {
+                Write-DeployLog "[$Servername] Altes Clientzertifikat-Mapping ist nicht auf WindowsUpdateAdm begrenzt; erneuere es mit einmaligen Bootstrap-Anmeldedaten." -Level Warning
             }
 
             if (-not $session) {
