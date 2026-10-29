@@ -916,10 +916,12 @@ try {
                         }
                         $verifiedMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
                             Where-Object {
+                                $mappedUserName = [string](Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'UserName')
+                                $mappedLocalUserName = ($mappedUserName -split '\\')[-1]
                                 (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject') -eq $mappingSubject -and
                                 (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint -and
                                 (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI') -in $script:ClientCertificateEndpointUris -and
-                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'UserName') -ieq $localUser
+                                $mappedLocalUserName -ieq $localUser
                             })
                         $remainingIssuerMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
                             Where-Object {
@@ -928,7 +930,14 @@ try {
                         $verifiedUris = @($verifiedMappings | ForEach-Object { Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI' })
                         $missingVerifiedUris = @($script:ClientCertificateEndpointUris | Where-Object { $_ -notin $verifiedUris })
                         if ($verifiedMappings.Count -ne $script:ClientCertificateEndpointUris.Count -or $missingVerifiedUris.Count -gt 0 -or $remainingIssuerMappings.Count -ne $script:ClientCertificateEndpointUris.Count) {
-                            throw "Zertifikatsmapping ist nach dem Anlegen nicht eindeutig (gültige Zuordnungen: $($verifiedMappings.Count); Einträge für Zertifikat: $($remainingIssuerMappings.Count); erwartet: $($script:ClientCertificateEndpointUris.Count))."
+                            $mappingDetails = @($issuerMappings | ForEach-Object {
+                                'Subject={0}; URI={1}; Issuer={2}; UserName={3}' -f `
+                                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject'), `
+                                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI'), `
+                                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer'), `
+                                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'UserName')
+                            }) -join ' | '
+                            throw "Zertifikatsmapping ist nach dem Anlegen nicht eindeutig (gültige Zuordnungen: $($verifiedMappings.Count); Einträge für Zertifikat: $($remainingIssuerMappings.Count); erwartet: $($script:ClientCertificateEndpointUris.Count)). Vorhandene Einträge: $mappingDetails"
                         }
                         $certificateMappingConfirmed = $true
                         Write-SetupLog "Zertifikat mit Account '$localUser' eindeutig verknüpft und verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)')." "SUCCESS"
@@ -1030,6 +1039,14 @@ try {
         }
         if (-not [string]::IsNullOrWhiteSpace($script:CertificateMappedPrincipal)) {
             $arguments += ' -CertificateMappedPrincipal "{0}"' -f $script:CertificateMappedPrincipal
+        }
+        if (@($WinRMFirewallRemoteAddresses).Count -gt 0) {
+            # Die SYSTEM-Finalisierung führt das Setup erneut aus und muss
+            # dieselbe explizite Quellenliste für die HTTPS-Firewallregel erhalten.
+            $quotedFirewallAddresses = @($WinRMFirewallRemoteAddresses | ForEach-Object {
+                '"{0}"' -f ([string]$_).Replace('"', '')
+            })
+            $arguments += ' -WinRMFirewallRemoteAddresses {0}' -f ($quotedFirewallAddresses -join ' ')
         }
         $taskName = 'WindowsUpdateAdm-Finalize'
         $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and

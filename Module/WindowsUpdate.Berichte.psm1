@@ -190,5 +190,5 @@ function Add-WindowsUpdateTrustedHost {
 }
 
 function Get-WindowsUpdateAdmDeploymentVersion {
-    '6'
+    '7'
 }
