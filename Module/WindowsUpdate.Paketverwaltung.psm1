@@ -2973,14 +2973,11 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $connectionProperty = $firstWingetResult.PSObject.Properties['RetryFreshConnection']
             $firstPackageCount = @($firstWingetResult.Packages).Count
             $isMonthlyResetOnly = $monthlyResetProperty -and [bool]$monthlyResetProperty.Value
-            # Ein fehlgeschlagener WinGet-Aufruf läuft durch denselben
-            # Reparaturpfad, unabhängig davon, ob CLI, Modul, RPC oder Quelle
-            # den Fehler gemeldet hat. Paketbezogene Installerfehler mit einem
-            # konkreten Paketresultat bleiben davon getrennt: dort arbeitet
-            # WinGet und die manuelle Nacharbeit betrifft nur dieses Paket.
-            $genericWinGetFailure = -not [bool]$firstWingetResult.Success -and
-                -not $isMonthlyResetOnly -and
-                ($Mode -eq 'Check' -or $firstPackageCount -eq 0)
+            # Jeder fehlgeschlagene WinGet-Aufruf läuft durch denselben
+            # Reparaturpfad, unabhängig davon, ob CLI, Modul, RPC, Quelle oder
+            # ein einzelnes Paket den Fehler gemeldet hat. Der monatliche
+            # Wartungsreset wird unten ebenfalls auf diesen Pfad geleitet.
+            $genericWinGetFailure = -not [bool]$firstWingetResult.Success -and -not $isMonthlyResetOnly
             if (($installScriptRequiredProperty -and [bool]$installScriptRequiredProperty.Value) -or $genericWinGetFailure) {
                 $retryRequired = $true
                 $retryRuntimeRepairRequired = $true
@@ -3025,6 +3022,8 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             elseif ($sourceRepairProperty -and [bool]$sourceRepairProperty.Value) {
                 $retryRequired = $true
                 $retrySourcePackageRepair = $true
+                $retryRuntimeRepairRequired = $true
+                $retryRequiresSourceReset = $true
                 $reasonProperty = $firstWingetResult.PSObject.Properties['RetryReason']
                 $retryReason = if ($reasonProperty) { [string]$reasonProperty.Value } else { 'WinGet-Quellenpaket V2 gezielt repariert' }
             }
@@ -3043,9 +3042,10 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             }
             elseif ($monthlyResetProperty -and [bool]$monthlyResetProperty.Value) {
                 $retryRequired = $true
+                $retryRuntimeRepairRequired = $true
                 $retryRequiresSourceReset = $true
                 $retryAfterMonthlySourceReset = $true
-                $retryReason = 'Monatlicher Quellenreset abgeschlossen; WinGet-Prüfung in frischer Verbindung erforderlich'
+                $retryReason = 'Monatlicher WinGet-Wartungsreset fällig; zentralen Reparaturablauf ausführen'
             }
             elseif ($connectionProperty -and [bool]$connectionProperty.Value) {
                 $retryRequired = $true
@@ -3076,9 +3076,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $retryDescription = if ($retryPreferPortableWinGet) {
                 'Bereitstellung der portablen WinGet-CLI aus dem aktuellen GitHub-Release und einmalige Wiederholung'
             } elseif ($retrySourcePackageRepair) {
-                'Quellenpaket V2 gezielt neu registrieren, Quelle aktualisieren und einmalige Wiederholung ohne vollständigen Quellenreset'
+                'zentraler WinGet-Reparaturablauf einschließlich winget-install.ps1, Quellenreset, Quellenpaketprüfung und einmaliger Wiederholung'
             } elseif ($retryAfterMonthlySourceReset) {
-                'einmalige WinGet-Prüfung nach Quellenreset in frischer Verbindung'
+                'zentraler WinGet-Wartungsablauf einschließlich winget-install.ps1, Quellenreset, Quellenpaketprüfung und einmaliger Wiederholung'
             } elseif ($retryRequiresSourceReset) {
                 'Quellenreset, Erneuerung des WinGet-Quellenpakets und einmalige Wiederholung'
             } elseif ($retryRequiresSourcePackageRefresh) {
