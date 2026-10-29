@@ -2100,7 +2100,33 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
                 try {
-                    $refreshSourcePackage = $SourceResetPerformed -or $SourcePackageRefreshPerformed
+                    # Eine Quelle mit "Updated: Never" ist kein gültiger
+                    # Ausgangspunkt für eine Upgrade-Suche. Insbesondere darf
+                    # ein Teilergebnis (z. B. Notepad++) nicht darüber
+                    # hinwegtäuschen, dass weitere Pakete im alten Katalog
+                    # fehlen. In diesem Fall das aktuelle offizielle
+                    # Quellenpaket online vergleichen und bei Bedarf im
+                    # Benutzerkontext registrieren; der zentrale Resetpfad
+                    # prüft weiterhin den 24-Stunden-Schutz.
+                    $sourceNeedsRecovery = $false
+                    try {
+                        $sourceDetailsResult = Invoke-WingetCliHidden -Executable $wingetPath -Arguments @('source', 'list', '--name', 'winget', '--disable-interactivity')
+                        $sourceDetailsOutput = Remove-WingetProgressOutput -Text ([string]$sourceDetailsResult.Output)
+                        if ([int]$sourceDetailsResult.ExitCode -eq 0) {
+                            $updatedMatch = [regex]::Match($sourceDetailsOutput, '(?im)^\s*(?:Updated|Aktualisiert)\s+(?<Value>.+?)\s*$')
+                            if ($updatedMatch.Success -and $updatedMatch.Groups['Value'].Value.Trim() -match '^(?i:Never|Nie)$') {
+                                $sourceNeedsRecovery = $true
+                                $wingetBootstrapMessage += " WinGet-Quelle 'winget' meldet Aktualisiert=Nie; prüfe das aktuelle offizielle Quellenpaket und initialisiere die Quelle vor der Suche neu."
+                            }
+                        }
+                    }
+                    catch {
+                        # Diagnose der Quellenzeit ist ein zusätzlicher
+                        # Integritätscheck. Ein nicht auswertbarer Detailsaufruf
+                        # darf den regulären Check nicht selbst abbrechen.
+                        $wingetDiagnosticOutput += "WinGet-Quellenstatus konnte vorab nicht ausgewertet werden:`r`n$($_.Exception.ToString())`r`n"
+                    }
+                    $refreshSourcePackage = $SourceResetPerformed -or $SourcePackageRefreshPerformed -or $sourceNeedsRecovery
                     $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser -Refresh:$refreshSourcePackage
                     if ($sourcePackageRegistration.Output -match '__WINGETSOURCE__SUCCESS') {
                         if ($sourcePackageRegistration.Refreshed) {
@@ -2109,13 +2135,19 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                             $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer verfügbar (Version $($sourcePackageRegistration.Version))."
                         }
                     }
-                    if ($sourcePackageRegistration.Changed -or $appInstallerRegistrationChanged) {
+                    if ($sourcePackageRegistration.Changed -or $appInstallerRegistrationChanged -or $sourceNeedsRecovery) {
                         # Registrierung und Quellenpflege zentral außerhalb der
                         # ersten Abfrage abschließen. Der zentrale Ablauf führt
                         # den vollständigen Quellenreset aus und startet danach
                         # eine frische Verbindung.
                         $sourceVersionText = [string]$sourcePackageRegistration.Version
-                        $reasonText = if ($appInstallerRegistrationChanged) { 'App-Installer-Registrierung geändert' } else { "Quellenpaket $sourceVersionText registriert/erneuert" }
+                        $reasonText = if ($appInstallerRegistrationChanged) {
+                            'App-Installer-Registrierung geändert'
+                        } elseif ($sourceNeedsRecovery) {
+                            "WinGet-Quelle meldet Aktualisiert=Nie; Quellenpaket $sourceVersionText geprüft/erneuert"
+                        } else {
+                            "Quellenpaket $sourceVersionText registriert/erneuert"
+                        }
                         $result += [PSCustomObject]@{
                             Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
                             Packages=@(); AvailableOutput=''; ActionOutput="$reasonText; zentrale Quelleninitialisierung und Prüfung in frischer Verbindung erforderlich."
