@@ -204,6 +204,17 @@ function Set-WindowsUpdateLocalAccountTokenFilterPolicy {
     Write-SetupLog "LocalAccountTokenFilterPolicy=$Value ($Reason)." 'SUCCESS'
 }
 
+function Clear-WindowsUpdateLocalAccountTokenFilterPolicy {
+    param([Parameter(Mandatory)][string]$Reason)
+
+    $regPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    $current = Get-ItemProperty -LiteralPath $regPath -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue
+    if ($null -ne $current) {
+        Remove-ItemProperty -LiteralPath $regPath -Name LocalAccountTokenFilterPolicy -ErrorAction Stop
+    }
+    Write-SetupLog "LocalAccountTokenFilterPolicy entfernt ($Reason); Windows-Standard (0) gilt." 'SUCCESS'
+}
+
 try {
     $targetBuild = [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber
     $script:ClientCertificateEndpointUris = @('http://schemas.microsoft.com/powershell/WindowsUpdateAdm')
@@ -786,12 +797,15 @@ try {
             $regPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
             $tokenFilterValue = (Get-ItemProperty -LiteralPath $regPath -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue).LocalAccountTokenFilterPolicy
             if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting) {
-                Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 1 -Reason 'temporärer lokaler Konto-Bootstrap; Rückstellung auf 0 durch SYSTEM-Finalisierung'
+                # Einen vorhandenen lokalen Override vorübergehend entfernen;
+                # der SYSTEM-Finalizer stellt danach den Windows-Standard her.
+                Clear-WindowsUpdateLocalAccountTokenFilterPolicy -Reason 'vorübergehender Zertifikats-Bootstrap beginnt; vorherige lokale Überschreibung entfernt'
+                Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 1 -Reason 'temporärer lokaler Konto-Bootstrap; Registrywert wird nach der SYSTEM-Finalisierung entfernt'
             } else {
-                if ($null -eq $tokenFilterValue -or [int]$tokenFilterValue -ne 0) {
-                    Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 0 -Reason 'bereits funktionierender Zertifikatszugriff; keine globale Remote-UAC-Ausnahme'
+                if ($null -ne $tokenFilterValue) {
+                    Clear-WindowsUpdateLocalAccountTokenFilterPolicy -Reason 'Zertifikatszugriff eingerichtet; Windows-Standard wiederhergestellt'
                 } else {
-                    Write-SetupLog 'LocalAccountTokenFilterPolicy bleibt 0; die Zertifikatsverbindung funktioniert bereits.' 'SUCCESS'
+                    Write-SetupLog 'LocalAccountTokenFilterPolicy ist nicht gesetzt; Windows-Standard gilt.' 'SUCCESS'
                 }
             }
         }
@@ -1670,7 +1684,7 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
     }
 
     if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting) {
-        Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 0 -Reason 'JEA-Endpunkt erfolgreich finalisiert; temporäre Bootstrap-Ausnahme geschlossen'
+        Clear-WindowsUpdateLocalAccountTokenFilterPolicy -Reason 'JEA-Endpunkt erfolgreich finalisiert; temporäre Bootstrap-Ausnahme geschlossen'
     }
     
     # =========================================================
@@ -1772,15 +1786,11 @@ finally {
     if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting -and
         ($FinalizeJEA -or -not $script:CertificateBootstrapHandoff)) {
         try {
-            $currentTokenFilter = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
-                -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue).LocalAccountTokenFilterPolicy
-            if ($null -eq $currentTokenFilter -or [int]$currentTokenFilter -ne 0) {
-                Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 0 -Reason 'Sicherheitsrückstellung im Finally-Pfad'
-            }
+            Clear-WindowsUpdateLocalAccountTokenFilterPolicy -Reason 'Sicherheitsrückstellung im Finally-Pfad'
         }
         catch {
-            Write-SetupLog 'FEHLER: LocalAccountTokenFilterPolicy konnte im Finally-Pfad nicht auf 0 zurückgestellt werden.' 'ERROR'
-            Write-SetupDiagnostic -Operation 'Remote-UAC-Bootstrap zurückstellen' -ErrorRecord $_ -Context @('Sollwert=0', "FinalizeJEA=$FinalizeJEA")
+            Write-SetupLog 'FEHLER: LocalAccountTokenFilterPolicy konnte im Finally-Pfad nicht entfernt werden.' 'ERROR'
+            Write-SetupDiagnostic -Operation 'Remote-UAC-Bootstrap zurückstellen' -ErrorRecord $_ -Context @('Sollzustand=unconfigured (Windows-Standard 0)', "FinalizeJEA=$FinalizeJEA")
         }
     }
 
