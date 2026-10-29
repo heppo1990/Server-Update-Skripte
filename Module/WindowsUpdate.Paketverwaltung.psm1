@@ -2982,8 +2982,8 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     if ($portableFallbackProperty -and [bool]$portableFallbackProperty.Value) {
                         $retryRequired = $true
                         $retryPreferPortableWinGet = $true
-                        $retryReason = 'AppX-Bereitstellung nach winget-install.ps1 weiterhin defekt; portablen WinGet-Fallback aus GitHub verwenden'
-                        Write-CommonLog $WriteLog "Zwischenstufe winget-install.ps1 auf $ComputerName endete mit Fehler; der portable WinGet-Fallback wird in einer neuen Verbindung verwendet. Details des Reparaturversuchs: $failureDiagnostic" $true
+                        $retryReason = 'Portabler WinGet-Fallback aus GitHub als nächster Reparaturschritt'
+                        Write-CommonLog $WriteLog "winget-install.ps1-Reparaturversuch auf $ComputerName abgeschlossen; wechsle zur portablen WinGet-CLI aus GitHub und wiederhole die Prüfung in einer neuen Verbindung. Details des Reparaturversuchs: $failureDiagnostic"
                     }
                     else {
                         $failure = "WinGet-Installation/Reparatur auf $ComputerName fehlgeschlagen; Details im Log."
@@ -3034,7 +3034,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $sourceResetPerformed = $false
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
-                if ($retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)') {
+                if ($retryPreferPortableWinGet -or $retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)') {
                     # Nach einer AppX-Registrierung meldet Add-AppxPackage den
                     # Vorgang synchron als abgeschlossen, während App Installer
                     # und WinGet-Quelle im Remoting-Kontext noch kurz den neuen
