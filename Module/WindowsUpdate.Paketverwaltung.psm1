@@ -2110,15 +2110,43 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     # prüft weiterhin den 24-Stunden-Schutz.
                     $sourceNeedsRecovery = $false
                     try {
-                        $sourceDetailsResult = Invoke-WingetCliHidden -Executable $wingetPath -Arguments @('source', 'list', '--name', 'winget', '--disable-interactivity')
-                        $sourceDetailsOutput = Remove-WingetProgressOutput -Text ([string]$sourceDetailsResult.Output)
-                        if ([int]$sourceDetailsResult.ExitCode -eq 0) {
-                            $updatedMatch = [regex]::Match($sourceDetailsOutput, '(?im)^\s*(?:Updated|Aktualisiert)\s+(?<Value>.+?)\s*$')
+                        $sourceArgumentList = @('source', 'list', '--name', 'winget', '--disable-interactivity')
+                        $quotedSourceArguments = foreach ($sourceArgument in $sourceArgumentList) {
+                            $sourceArgument = [string]$sourceArgument
+                            if ($sourceArgument -match '[\s"]') { '"' + $sourceArgument.Replace('"', '\"') + '"' } else { $sourceArgument }
+                        }
+                        $sourceStartInfo = [Diagnostics.ProcessStartInfo]::new()
+                        $sourceStartInfo.FileName = $wingetPath
+                        $sourceStartInfo.Arguments = $quotedSourceArguments -join ' '
+                        $sourceStartInfo.WorkingDirectory = Split-Path -Parent $wingetPath
+                        $sourceStartInfo.UseShellExecute = $false
+                        $sourceStartInfo.CreateNoWindow = $true
+                        $sourceStartInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+                        $sourceStartInfo.RedirectStandardOutput = $true
+                        $sourceStartInfo.RedirectStandardError = $true
+                        $sourceProcess = [Diagnostics.Process]::new()
+                        try {
+                            $sourceProcess.StartInfo = $sourceStartInfo
+                            if (-not $sourceProcess.Start()) { throw 'WinGet-Quellendetails konnten nicht gestartet werden.' }
+                            $sourceStdoutTask = $sourceProcess.StandardOutput.ReadToEndAsync()
+                            $sourceStderrTask = $sourceProcess.StandardError.ReadToEndAsync()
+                            if (-not $sourceProcess.WaitForExit(180000)) {
+                                try { $sourceProcess.Kill() } catch { }
+                                throw 'WinGet-Quellendetails überschritten das Zeitlimit von 180 Sekunden.'
+                            }
+                            $sourceProcess.WaitForExit()
+                            $sourceDetailsOutput = @($sourceStdoutTask.GetAwaiter().GetResult(), $sourceStderrTask.GetAwaiter().GetResult()) |
+                                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+                            $sourceDetailsOutput = [regex]::Replace(($sourceDetailsOutput -join [Environment]::NewLine), '\x1B\[[0-?]*[ -/]*[@-~]', '')
+                            if ([int]$sourceProcess.ExitCode -eq 0) {
+                            $updatedMatch = [regex]::Match($sourceDetailsOutput, '(?im)^\s*(?:Updated|Aktualisiert)\s*:?\s+(?<Value>.+?)\s*$')
                             if ($updatedMatch.Success -and $updatedMatch.Groups['Value'].Value.Trim() -match '^(?i:Never|Nie)$') {
                                 $sourceNeedsRecovery = $true
                                 $wingetBootstrapMessage += " WinGet-Quelle 'winget' meldet Aktualisiert=Nie; prüfe das aktuelle offizielle Quellenpaket und initialisiere die Quelle vor der Suche neu."
                             }
+                            }
                         }
+                        finally { $sourceProcess.Dispose() }
                     }
                     catch {
                         # Diagnose der Quellenzeit ist ein zusätzlicher
