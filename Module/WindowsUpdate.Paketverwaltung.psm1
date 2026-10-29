@@ -590,7 +590,7 @@ if (-not $response.Success) { exit 1 }
         }
 
         function Ensure-WinGetSourcePackageForCurrentUser {
-            param([switch]$Refresh)
+            param([switch]$Refresh, [switch]$RepairStaleSource)
             # Quelle online im Remoting-Kontext beschaffen, AppX danach aber
             # in einer kurzlebigen Aufgabe unter demselben Benutzer registrieren.
             # So wird der auf SRVTS01 beobachtete PLM-Zugriff aus wsmprovhost vermieden.
@@ -599,6 +599,7 @@ if (-not $response.Success) { exit 1 }
             $sourcePath = $null
             $sourceChanged = $false
             $sourceRefreshed = $false
+            $sourceRepaired = $false
             $registrationTaskResult = $null
             try {
                 if ($registered.Count -eq 0 -or $Refresh) {
@@ -620,20 +621,45 @@ if (-not $response.Success) { exit 1 }
                             $downloadVersion = [version]$manifest.Package.Identity.Version
                         } finally { $archive.Dispose() }
                         $installedVersion = [version]$registered[0].Version
-                        $shouldRegister = $downloadVersion -gt $installedVersion
+                        $shouldRegister = ($downloadVersion -gt $installedVersion) -or [bool]$RepairStaleSource
                     }
 
                     if ($shouldRegister) {
                         $quotedSourcePath = "'" + $sourcePath.Replace("'", "''") + "'"
-                        $registrationTaskResult = Invoke-WinGetCurrentUserAppxTask -Purpose 'WinGet-Quellenpaket registrieren' -ScriptText @"
+                        $quotedWingetPath = "'" + ([string]$wingetPath).Replace("'", "''") + "'"
+                        $sourceTaskScript = if ($RepairStaleSource -and $sourceWasRegistered) {
+@"
+`$ErrorActionPreference = 'Stop'
+`$existingSource = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop)
+foreach (`$package in `$existingSource) { Remove-AppxPackage -Package `$package.PackageFullName -ErrorAction Stop }
+Add-AppxPackage -Path $quotedSourcePath -ErrorAction Stop
+`$sourceUpdateOutput = @(& $quotedWingetPath source update --name winget --disable-interactivity 2>&1)
+`$sourceUpdateExitCode = `$LASTEXITCODE
+`$sourceUpdateText = (`$sourceUpdateOutput | Out-String -Width 300).Trim()
+if (`$sourceUpdateExitCode -ne 0 -or `$sourceUpdateText -match '(?im)^\s*(?:Abgebrochen|Cancelled)\s*$|Fehler beim Versuch, die Quelle zu aktualisieren|Failed when attempting to update source') {
+    throw "Gezielter WinGet-Quellenrefresh fehlgeschlagen (Exitcode `$sourceUpdateExitCode): `$sourceUpdateText"
+}
+`$sourceDetailsOutput = @(& $quotedWingetPath source list --name winget --disable-interactivity 2>&1)
+`$sourceDetailsExitCode = `$LASTEXITCODE
+`$sourceDetailsText = (`$sourceDetailsOutput | Out-String -Width 300).Trim()
+if (`$sourceDetailsExitCode -ne 0 -or `$sourceDetailsText -match '(?im)^\s*(?:Updated|Aktualisiert)\s*:?\s+(?:Never|Nie)\s*$') {
+    throw "WinGet-Quelle meldet nach Neuinstallation weiterhin 'Aktualisiert: Nie' (Exitcode `$sourceDetailsExitCode): `$sourceDetailsText"
+}
+"Quellenpaket V2 gezielt entfernt und mit Version $downloadVersion neu registriert. Quellenupdate: `$sourceUpdateText`n`$sourceDetailsText"
+"@
+                        } else {
+@"
 `$ErrorActionPreference = 'Stop'
 Add-AppxPackage -Path $quotedSourcePath -ErrorAction Stop
 "@
+                        }
+                        $registrationTaskResult = Invoke-WinGetCurrentUserAppxTask -Purpose $(if ($RepairStaleSource) { 'WinGet-Quellenpaket V2 gezielt reparieren' } else { 'WinGet-Quellenpaket registrieren' }) -ScriptText $sourceTaskScript
                         $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
                             Where-Object { $_.Status -eq 'Ok' } | Sort-Object { [version]$_.Version } -Descending)
                         if ($registered.Count -eq 0) { throw 'Quellenpaket wurde nach der Benutzeraufgabe nicht registriert.' }
                         $sourceChanged = $true
                         $sourceRefreshed = $sourceWasRegistered
+                        $sourceRepaired = [bool]($RepairStaleSource -and $sourceWasRegistered)
                     }
                 }
                 if ($registered.Count -eq 0) { throw 'WinGet-Quellenpaket ist für den Remoting-Benutzer nicht registriert.' }
@@ -646,6 +672,7 @@ Add-AppxPackage -Path $quotedSourcePath -ErrorAction Stop
             }
             return [pscustomobject]@{
                 Changed = $sourceChanged
+                Repaired = $sourceRepaired
                 Version = [string]$registered[0].Version
                 Refreshed = $sourceRefreshed
                 Output = $marker
@@ -2155,13 +2182,23 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $wingetDiagnosticOutput += "WinGet-Quellenstatus konnte vorab nicht ausgewertet werden:`r`n$($_.Exception.ToString())`r`n"
                     }
                     $refreshSourcePackage = $SourceResetPerformed -or $SourcePackageRefreshPerformed -or $sourceNeedsRecovery
-                    $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser -Refresh:$refreshSourcePackage
+                    $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser -Refresh:$refreshSourcePackage -RepairStaleSource:$sourceNeedsRecovery
                     if ($sourcePackageRegistration.Output -match '__WINGETSOURCE__SUCCESS') {
                         if ($sourcePackageRegistration.Refreshed) {
                             $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer nach leerer Abfrage erneuert (Version $($sourcePackageRegistration.Version))."
                         } else {
                             $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer verfügbar (Version $($sourcePackageRegistration.Version))."
                         }
+                    }
+                    if ($sourcePackageRegistration.Repaired) {
+                        $sourceVersionText = [string]$sourcePackageRegistration.Version
+                        $reasonText = "WinGet-Quellenpaket V2 wurde gezielt neu registriert und die Quelle aktualisiert (Version $sourceVersionText)"
+                        $result += [PSCustomObject]@{
+                            Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                            Packages=@(); AvailableOutput=''; ActionOutput="$reasonText; Prüfung in frischer Verbindung erforderlich."
+                            BootstrapMessage=$wingetBootstrapMessage; RetryAfterSourceRepair=$true; RetryReason=$reasonText
+                        }
+                        return @($result)
                     }
                     if ($sourcePackageRegistration.Changed -or $appInstallerRegistrationChanged -or $sourceNeedsRecovery) {
                         # Registrierung und Quellenpflege zentral außerhalb der
@@ -2901,6 +2938,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         $retryRequiresSourceReset = $false
         $retryRequiresSourcePackageRefresh = $false
         $retryAfterMonthlySourceReset = $false
+        $retrySourcePackageRepair = $false
         $retryRuntimeRepairRequired = $false
         $retryPreferPortableWinGet = $false
         $wingetInstallScriptRan = $false
@@ -2929,6 +2967,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             if ($firstDiagnosticProperty) { $firstDiagnostic = [string]$firstDiagnosticProperty.Value }
             $installScriptRequiredProperty = $firstWingetResult.PSObject.Properties['RequiresWinGetInstallScript']
             $resetProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourceReset']
+            $sourceRepairProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourceRepair']
             $sourcePackageRefreshProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourcePackageRefresh']
             $monthlyResetProperty = $firstWingetResult.PSObject.Properties['RetryAfterMonthlySourceReset']
             $connectionProperty = $firstWingetResult.PSObject.Properties['RetryFreshConnection']
@@ -2983,6 +3022,12 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     }
                 }
             }
+            elseif ($sourceRepairProperty -and [bool]$sourceRepairProperty.Value) {
+                $retryRequired = $true
+                $retrySourcePackageRepair = $true
+                $reasonProperty = $firstWingetResult.PSObject.Properties['RetryReason']
+                $retryReason = if ($reasonProperty) { [string]$reasonProperty.Value } else { 'WinGet-Quellenpaket V2 gezielt repariert' }
+            }
             elseif ($resetProperty -and [bool]$resetProperty.Value) {
                 $retryRequired = $true
                 $retryRuntimeRepairRequired = $true
@@ -3030,6 +3075,8 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             if ($completedInitialPackages.Count -gt 0) { $packageResults += $completedInitialPackages }
             $retryDescription = if ($retryPreferPortableWinGet) {
                 'Bereitstellung der portablen WinGet-CLI aus dem aktuellen GitHub-Release und einmalige Wiederholung'
+            } elseif ($retrySourcePackageRepair) {
+                'Quellenpaket V2 gezielt neu registrieren, Quelle aktualisieren und einmalige Wiederholung ohne vollständigen Quellenreset'
             } elseif ($retryAfterMonthlySourceReset) {
                 'einmalige WinGet-Prüfung nach Quellenreset in frischer Verbindung'
             } elseif ($retryRequiresSourceReset) {
@@ -3054,7 +3101,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
                     }
                 }
-                if ($retryPreferPortableWinGet -or $retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)') {
+                if ($retrySourcePackageRepair -or $retryPreferPortableWinGet -or $retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)') {
                     # Nach einer AppX-Registrierung meldet Add-AppxPackage den
                     # Vorgang synchron als abgeschlossen, während App Installer
                     # und WinGet-Quelle im Remoting-Kontext noch kurz den neuen
