@@ -16,7 +16,7 @@ function New-WindowsUpdateAdmDeploymentStatusModuleSource {
     $uriLiterals = @($uriLiteralList) -join ', '
     @"
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '$Version'; TargetBuild = $TargetBuild; ClientCertificateUris = @($uriLiterals) }
+    @{ Version = '$Version'; TargetBuild = $TargetBuild; ClientCertificateUris = @($uriLiterals) }
 }
 Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
 "@

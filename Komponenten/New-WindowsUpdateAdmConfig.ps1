@@ -661,6 +661,33 @@ try {
                     }
                     if (-not $allowsWinRmHttps) { continue }
 
+                    # Port=Any ist bei anwendungs- oder dienstgebundenen
+                    # Regeln kein pauschaler WinRM-Zugriff. Nur Regeln, die
+                    # System/svchost/WinRM treffen können, werden weiter als
+                    # mögliche Freigabe für den Listener betrachtet.
+                    $applicationFilters = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $candidateRule -ErrorAction Stop)
+                    if (-not $applicationFilters) {
+                        throw "Anwendungsfilter für aktive Firewall-Regel '$($candidateRule.Name)' konnte nicht ermittelt werden."
+                    }
+                    $candidatePrograms = @($applicationFilters | ForEach-Object { [string]$_.Program } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    $candidatePackages = @($applicationFilters | ForEach-Object { [string]$_.Package } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -notin @('Any', '*') })
+                    if ($candidatePackages.Count -gt 0) { continue }
+                    $programsCouldMatchWinRm = $true
+                    if ($candidatePrograms.Count -gt 0) {
+                        $programsCouldMatchWinRm = @($candidatePrograms | Where-Object {
+                            $_ -in @('Any', '*', 'System') -or $_ -match '(?i)(^|\\)svchost\.exe$'
+                        }).Count -gt 0
+                    }
+                    if (-not $programsCouldMatchWinRm) { continue }
+
+                    $serviceFilters = @(Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $candidateRule -ErrorAction Stop)
+                    if (-not $serviceFilters) {
+                        throw "Dienstfilter für aktive Firewall-Regel '$($candidateRule.Name)' konnte nicht ermittelt werden."
+                    }
+                    $candidateServices = @($serviceFilters | ForEach-Object { [string]$_.Service } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    if ($candidateServices.Count -gt 0 -and
+                        @($candidateServices | Where-Object { $_ -in @('Any', '*', 'WinRM') }).Count -eq 0) { continue }
+
                     $candidateAddressFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $candidateRule -ErrorAction Stop
                     if (-not $candidateAddressFilter) {
                         throw "Adressfilter für aktive Firewall-Regel '$($candidateRule.Name)' konnte nicht ermittelt werden."

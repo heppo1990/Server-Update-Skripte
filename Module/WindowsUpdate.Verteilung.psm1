@@ -53,7 +53,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
         ScriptBlock = {
             $updateCommand = Get-Command Get-WindowsUpdate -ErrorAction Stop | Select-Object -First 1
             $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
-            [PSCustomObject]@{
+            @{
                 UpdateCommand = [string]$updateCommand.Name
                 DeploymentVersion = [string]$deploymentStatus.Version
                 TargetBuild = [int]$deploymentStatus.TargetBuild
@@ -813,7 +813,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
             ScriptBlock       = {
                 $updateCommand = Get-Command Get-WindowsUpdate -ErrorAction Stop | Select-Object -First 1
                 $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
-                [PSCustomObject]@{
+                @{
                     UpdateCommand     = [string]$updateCommand.Name
                     DeploymentVersion = [string]$deploymentStatus.Version
                 }
