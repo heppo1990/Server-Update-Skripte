@@ -366,7 +366,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
             # Bei Wiederholungen zuerst das bereits eingerichtete Client-Zertifikat testen.
             # Nur bei einer echten Ersteinrichtung werden Zugangsdaten benötigt.
             $clientCert = Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME
-            if ($clientCert -and -not $certificateMappingRefreshRequired) {
+            if ($clientCert) {
                 try {
                     Write-DeployLog "Prüfe Client-Zertifikatsverbindung zu $Servername." -LogOnly
                     $session = New-PSSession -ComputerName $Servername -UseSSL `
@@ -391,8 +391,25 @@ function Invoke-WindowsUpdateWinRMDeployment {
                         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-Zertifikatsverbindung mit Vertrauensmigration' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Einrichtungsdaten')
                     }
                 }
-            } elseif ($clientCert -and $certificateMappingRefreshRequired) {
-                Write-DeployLog "[$Servername] Altes Clientzertifikat-Mapping ist nicht auf WindowsUpdateAdm begrenzt; erneuere es mit einmaligen Bootstrap-Anmeldedaten." -Level Warning
+            }
+
+            # Ein bestehendes Zertifikat kann trotz eines veralteten oder zu
+            # weit gefassten Mappings den aktuellen Endpunkt erreichen. Nutze
+            # diesen sicheren Kanal zur Migration; Zugangsdaten werden dann
+            # nur zum Erstellen des eng begrenzten Mappings gebraucht.
+            if ($session -and $usedCertificate -and $certificateMappingRefreshRequired) {
+                Write-DeployLog "[$Servername] Zertifikatsverbindung steht; erneuere das alte Mapping auf den WindowsUpdateAdm-Endpunkt." -LogOnly
+                if ($BootstrapCredentials.ContainsKey($Servername)) {
+                    $bootstrapCredential = $BootstrapCredentials[$Servername]
+                    Write-DeployLog "Verwende gespeicherte Zugangsdaten für das Zertifikatsmapping auf $Servername." -LogOnly
+                } else {
+                    Write-DeployLog "Einmalige lokale Administratordaten werden für die Zertifikatsmapping-Migration auf $Servername benötigt." -Level Warning
+                    $bootstrapCredential = Get-WindowsUpdateDeploymentBootstrapCredential -Servername $Servername
+                }
+                if (-not $bootstrapCredential) {
+                    throw "Die Zugangsdaten zur Erneuerung des Clientzertifikat-Mappings auf $Servername wurden nicht eingegeben."
+                }
+                $BootstrapCredentials[$Servername] = $bootstrapCredential
             }
 
             if (-not $session) {
@@ -679,7 +696,12 @@ function Invoke-WindowsUpdateWinRMDeployment {
         }
         if ($modulesVerifiedCurrent) { $setupParameters.ModulesVerifiedCurrent = $true }
         if ($DeployType -ne 'AD') { $setupParameters.EnableClientCertificateRemoting = $true }
-        if ($DeployType -eq 'Hypervisor' -and -not $usedCertificate) {
+        if ($DeployType -ne 'AD' -and -not $usedCertificate) {
+            $setupParameters.TemporaryLocalAccountBootstrap = $true
+        }
+        if ($DeployType -ne 'AD' -and $certificateMappingRefreshRequired -and $usedCertificate) {
+            $setupParameters.CertificateMappingCredential = $bootstrapCredential
+        } elseif ($DeployType -eq 'Hypervisor' -and -not $usedCertificate) {
             $setupParameters.CertificateMappingCredential = $bootstrapCredential
         } elseif ($DeployType -eq 'Additional' -and -not $usedCertificate) {
             $setupParameters.CertificateMappingCredential = $bootstrapCredential

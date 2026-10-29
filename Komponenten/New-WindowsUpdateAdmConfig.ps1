@@ -105,6 +105,12 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$EnableClientCertificateRemoting,
 
+    # Nur beim Bootstrap ohne bereits funktionierende Zertifikatsverbindung:
+    # Remote-UAC während der Einrichtung temporär öffnen und in jedem
+    # Abschluss-/Fehlerpfad wieder schließen.
+    [Parameter(Mandatory=$false)]
+    [switch]$TemporaryLocalAccountBootstrap,
+
     # Interne Übergabe der zentral ermittelten WindowsUpdateAdm-Version.
     # Die Verteilung und das Setup protokollieren und registrieren denselben Wert.
     [Parameter(Mandatory=$false)]
@@ -136,6 +142,7 @@ catch {
 $OriginalCertificateCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
 $script:SetupLogPath = $null
 $script:SetupSucceeded = $false
+$script:CertificateBootstrapHandoff = $false
 try {
     $setupLogDirectory = Join-Path $env:ProgramData 'WindowsUpdateAdm\Logs'
     New-Item -Path $setupLogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
@@ -182,6 +189,19 @@ function Write-SetupDiagnostic {
     )
 
     Write-WindowsUpdateSetupDiagnostic -Operation $Operation -ErrorRecord $ErrorRecord -LogPath $script:SetupLogPath -TargetComputer $env:COMPUTERNAME -Context $Context
+}
+
+function Set-WindowsUpdateLocalAccountTokenFilterPolicy {
+    param(
+        [Parameter(Mandatory)][ValidateSet(0, 1)][int]$Value,
+        [Parameter(Mandatory)][string]$Reason
+    )
+
+    $regPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    New-Item -Path $regPath -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -LiteralPath $regPath -Name LocalAccountTokenFilterPolicy -Value $Value `
+        -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+    Write-SetupLog "LocalAccountTokenFilterPolicy=$Value ($Reason)." 'SUCCESS'
 }
 
 try {
@@ -757,25 +777,21 @@ try {
             Write-SetupDiagnostic -Operation 'WinRM-Zertifikatsauthentifizierung' -ErrorRecord $_
         }
 
-        # Remote-UAC nur im alten Server-2016/2019-Kompatibilitätsmodus lockern.
-        # Auf unterstützten Systemen erhält das konkrete Zertifikatskonto
-        # Endpunktzugriff über seine SID; als JEA-Virtual-Account laufen die
-        # Updatebefehle weiterhin mit den erforderlichen Rechten.
+        # Ohne bereits funktionierende Zertifikatsverbindung ist für den
+        # lokalen Konto-Bootstrap die Remote-UAC-Ausnahme erforderlich. Sie
+        # bleibt nur bis zur SYSTEM-Finalisierung geöffnet und wird dort sowie
+        # bei jedem erkannten Fehler wieder geschlossen. Mit nutzbarem
+        # Zertifikatskanal bleibt sie deaktiviert.
         try {
-            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
-            $legacyCertificateAdminMode = $EnableClientCertificateRemoting -and $targetBuild -le 17763
+            $regPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
             $tokenFilterValue = (Get-ItemProperty -LiteralPath $regPath -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue).LocalAccountTokenFilterPolicy
-            if ($legacyCertificateAdminMode) {
-                if ($null -eq $tokenFilterValue -or [int]$tokenFilterValue -ne 1) {
-                    New-ItemProperty -LiteralPath $regPath -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-                }
-                Write-SetupLog "LocalAccountTokenFilterPolicy=1 nur für den Server-2016/2019-Zertifikats- und SYSTEM-Aufgaben-Kompatibilitätsmodus gesetzt." 'WARN'
+            if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting) {
+                Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 1 -Reason 'temporärer lokaler Konto-Bootstrap; Rückstellung auf 0 durch SYSTEM-Finalisierung'
             } else {
-                if ($null -ne $tokenFilterValue -and [int]$tokenFilterValue -ne 0) {
-                    New-ItemProperty -LiteralPath $regPath -Name LocalAccountTokenFilterPolicy -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-                    Write-SetupLog 'Globale Remote-UAC-Ausnahme deaktiviert; Zertifikatszugriff wird über die konkrete Konten-SID erteilt.' 'SUCCESS'
+                if ($null -eq $tokenFilterValue -or [int]$tokenFilterValue -ne 0) {
+                    Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 0 -Reason 'bereits funktionierender Zertifikatszugriff; keine globale Remote-UAC-Ausnahme'
                 } else {
-                    Write-SetupLog 'Keine globale Remote-UAC-Ausnahme erforderlich.' 'SUCCESS'
+                    Write-SetupLog 'LocalAccountTokenFilterPolicy bleibt 0; die Zertifikatsverbindung funktioniert bereits.' 'SUCCESS'
                 }
             }
         }
@@ -1026,6 +1042,8 @@ try {
         # und darf weder erneut NuGet aufrufen noch temporäre Offlinepakete
         # benötigen.
         $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA -ModulesVerifiedCurrent -DeploymentVersion "{1}" -ResumeLogPath "{2}"' -f $PSCommandPath, $taskDeploymentVersion, $script:SetupLogPath
+        if ($EnableClientCertificateRemoting) { $arguments += ' -EnableClientCertificateRemoting' }
+        if ($TemporaryLocalAccountBootstrap) { $arguments += ' -TemporaryLocalAccountBootstrap' }
         if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
             # Die SYSTEM-Finalisierung muss dieselbe eingeschränkte JEA-Rolle
             # für den Verwaltungsserver registrieren wie der ursprüngliche Lauf.
@@ -1080,6 +1098,7 @@ try {
             }
         }
         Write-SetupLog 'JEA-Registrierung wurde in eine lokale SYSTEM-Task ausgelagert.' 'SUCCESS'
+        $script:CertificateBootstrapHandoff = $true
         exit 0
     }
 
@@ -1649,6 +1668,10 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
         if (-not $PSSCExists)       { $Missing += "PSSC-Datei fehlt: $PermanentPSSC" }
         throw "Konfiguration unvollstaendig: $($Missing -join '; ')"
     }
+
+    if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting) {
+        Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 0 -Reason 'JEA-Endpunkt erfolgreich finalisiert; temporäre Bootstrap-Ausnahme geschlossen'
+    }
     
     # =========================================================
     # === Finale Übersicht
@@ -1743,6 +1766,24 @@ catch {
     exit 1
 }
 finally {
+    # Ein abgebrochener Bootstrap darf die globale Remote-UAC-Ausnahme nicht
+    # offen lassen. Bei erfolgreicher Übergabe schließt die SYSTEM-Finalisierung
+    # sie; diese selbst schließt sie immer, auch bei einem Fehler.
+    if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting -and
+        ($FinalizeJEA -or -not $script:CertificateBootstrapHandoff)) {
+        try {
+            $currentTokenFilter = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+                -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue).LocalAccountTokenFilterPolicy
+            if ($null -eq $currentTokenFilter -or [int]$currentTokenFilter -ne 0) {
+                Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 0 -Reason 'Sicherheitsrückstellung im Finally-Pfad'
+            }
+        }
+        catch {
+            Write-SetupLog 'FEHLER: LocalAccountTokenFilterPolicy konnte im Finally-Pfad nicht auf 0 zurückgestellt werden.' 'ERROR'
+            Write-SetupDiagnostic -Operation 'Remote-UAC-Bootstrap zurückstellen' -ErrorRecord $_ -Context @('Sollwert=0', "FinalizeJEA=$FinalizeJEA")
+        }
+    }
+
     # Die SYSTEM-Task wird nur für die finale lokale JEA-Registrierung
     # angelegt und darf nach jedem Lauf – auch nach einem Fehler – nicht
     # bestehen bleiben.
