@@ -98,7 +98,12 @@ param(
     # Interne Übergabe der zentral ermittelten WindowsUpdateAdm-Version.
     # Die Verteilung und das Setup protokollieren und registrieren denselben Wert.
     [Parameter(Mandatory=$false)]
-    [string]$DeploymentVersion
+    [string]$DeploymentVersion,
+
+    # Ausschließlich erlaubte Verwaltungsserver-Adressen für WinRM HTTPS.
+    # Die Verteilung übergibt die expliziten Settings oder ermittelt sie zentral.
+    [Parameter(Mandatory=$false)]
+    [string[]]$WinRMFirewallRemoteAddresses = @()
 )
 # Dieses Setup wird auf Zielservern nur vorübergehend in %TEMP% ausgeführt.
 # Es lädt dort keine weiteren Repository-Skripte aus GitHub nach.
@@ -560,25 +565,94 @@ try {
             throw 'HTTP.sys-Clientzertifikataushandlung für WinRM HTTPS konnte nicht sicher eingerichtet werden; Details stehen im Setup-Protokoll.'
         }
 
-        # Firewall-Regel für Port 5986
-        $fwRule = Get-NetFirewallRule -DisplayName "WinRM HTTPS" -ErrorAction SilentlyContinue
-        if ($fwRule) {
-            Write-SetupLog "Firewall-Regel für WinRM HTTPS bereits vorhanden." "SUCCESS"
-        } else {
-            try {
-                New-NetFirewallRule `
-                    -DisplayName "WinRM HTTPS" `
+        # Firewall-Regel für Port 5986 ausschließlich aus den freigegebenen
+        # Verwaltungsserver-Adressen erreichbar machen. Ohne ermittelte oder
+        # konfigurierte Quellen wird keine breite Freigabe angelegt.
+        try {
+            $allowedRemoteAddresses = @($WinRMFirewallRemoteAddresses | ForEach-Object { ([string]$_).Trim() } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+            if ($allowedRemoteAddresses.Count -eq 0) {
+                throw 'Es wurden keine zulässigen Verwaltungsserver-IP-Adressen übergeben; eine offene Freigabe wird aus Sicherheitsgründen nicht erstellt.'
+            }
+
+            $fwRules = @(Get-NetFirewallRule -DisplayName 'WinRM HTTPS' -ErrorAction SilentlyContinue)
+            if ($fwRules.Count -eq 0) {
+                $null = New-NetFirewallRule `
+                    -DisplayName 'WinRM HTTPS' `
                     -Direction Inbound `
                     -Protocol TCP `
                     -LocalPort 5986 `
+                    -RemoteAddress $allowedRemoteAddresses `
+                    -Profile Any `
                     -Action Allow `
-                    -ErrorAction Stop | Out-Null
-                Write-SetupLog "Firewall-Regel für Port 5986 (WinRM HTTPS) erstellt." "SUCCESS"
+                    -Enabled True `
+                    -ErrorAction Stop
+                $fwRules = @(Get-NetFirewallRule -DisplayName 'WinRM HTTPS' -ErrorAction Stop)
+                Write-SetupLog "Eingehende WinRM-HTTPS-Regel erstellt; erlaubte Quellen: $($allowedRemoteAddresses -join ', ')." 'INFO'
+            } else {
+                foreach ($rule in $fwRules) {
+                    Set-NetFirewallRule -InputObject $rule -Enabled True -Direction Inbound -Action Allow -Profile Any -ErrorAction Stop
+                    $addressFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+                    Set-NetFirewallAddressFilter -InputObject $addressFilter -RemoteAddress $allowedRemoteAddresses -ErrorAction Stop
+                    $portFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+                    Set-NetFirewallPortFilter -InputObject $portFilter -Protocol TCP -LocalPort 5986 -ErrorAction Stop
+                }
+                Write-SetupLog "Vorhandene WinRM-HTTPS-Regel(n) auf die erlaubten Verwaltungsquellen eingeschränkt: $($allowedRemoteAddresses -join ', ')." 'INFO'
+            }
+
+            foreach ($rule in $fwRules) {
+                $actualFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+                $actualAddresses = @($actualFilter.RemoteAddress | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+                $expectedAddresses = @($allowedRemoteAddresses | Sort-Object -Unique)
+                if (Compare-Object -ReferenceObject $expectedAddresses -DifferenceObject $actualAddresses) {
+                    throw "Firewall-Regel '$($rule.Name)' besitzt nach dem Setzen nicht die erwarteten Quelladressen. Erwartet: $($expectedAddresses -join ', '); gefunden: $($actualAddresses -join ', ')."
+                }
+                $actualPortFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop
+                if ([string]$actualPortFilter.Protocol -notin @('TCP', '6') -or
+                    (@($actualPortFilter.LocalPort | ForEach-Object { [string]$_ }) -notcontains '5986')) {
+                    throw "Firewall-Regel '$($rule.Name)' ist nicht auf TCP-Port 5986 begrenzt."
+                }
+            }
+            Write-SetupLog 'WinRM-HTTPS-Firewallregel und Quelladressbeschränkung erfolgreich verifiziert.' 'SUCCESS'
+
+            try {
+                $managedRuleNames = @($fwRules | ForEach-Object { [string]$_.Name })
+                $otherHttpsRules = [System.Collections.Generic.List[object]]::new()
+                foreach ($candidateRule in @(Get-NetFirewallRule -PolicyStore ActiveStore -Enabled True -Direction Inbound -Action Allow -ErrorAction Stop)) {
+                    if ($candidateRule.Name -in $managedRuleNames) { continue }
+                    $candidatePortFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $candidateRule -ErrorAction SilentlyContinue
+                    if (-not $candidatePortFilter) { continue }
+                    $candidateProtocol = [string]$candidatePortFilter.Protocol
+                    $candidatePorts = @($candidatePortFilter.LocalPort | ForEach-Object { [string]$_ })
+                    if ($candidateProtocol -notin @('TCP', '6', 'Any', '256') -or
+                        ($candidatePorts -notcontains '5986' -and $candidatePorts -notcontains 'Any')) { continue }
+                    $candidateAddressFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $candidateRule -ErrorAction SilentlyContinue
+                    $candidateRemoteAddresses = if ($candidateAddressFilter) {
+                        @($candidateAddressFilter.RemoteAddress | ForEach-Object { [string]$_ })
+                    } else { @('nicht ermittelbar') }
+                    $otherHttpsRules.Add([pscustomobject]@{
+                        Name = [string]$candidateRule.Name
+                        DisplayName = [string]$candidateRule.DisplayName
+                        Profile = [string]$candidateRule.Profile
+                        Protocol = $candidateProtocol
+                        LocalPort = ($candidatePorts -join ',')
+                        RemoteAddress = ($candidateRemoteAddresses -join ',')
+                    })
+                }
+                foreach ($candidateRule in $otherHttpsRules) {
+                    $level = if ($candidateRule.RemoteAddress -match '(?i)(^|,)(Any|\*|nicht ermittelbar)(,|$)') { 'WARN' } else { 'INFO' }
+                    Write-SetupLog "Zusätzliche aktive WinRM-HTTPS-Regel inventarisiert: Name=$($candidateRule.Name); Anzeige=$($candidateRule.DisplayName); Profil=$($candidateRule.Profile); Protokoll=$($candidateRule.Protocol); Port=$($candidateRule.LocalPort); RemoteAddress=$($candidateRule.RemoteAddress)." $level
+                }
             }
             catch {
-                Write-SetupLog 'Firewall-Regel konnte nicht erstellt werden; Details im Setup-Protokoll.' 'WARN'
-                Write-SetupDiagnostic -Operation 'WinRM-Firewallregel' -ErrorRecord $_
+                Write-SetupLog 'Weitere aktive WinRM-HTTPS-Regeln konnten nicht vollständig inventarisiert werden; eigene Regel ist eingeschränkt, Details im Setup-Diagnoseprotokoll.' 'WARN'
+                Write-SetupDiagnostic -Operation 'WinRM-Firewall-Inventar' -ErrorRecord $_
             }
+        }
+        catch {
+            Write-SetupLog 'WinRM-HTTPS-Firewallregel konnte nicht sicher eingeschränkt oder verifiziert werden; Setup wird abgebrochen.' 'ERROR'
+            Write-SetupDiagnostic -Operation 'WinRM-Firewallregel' -ErrorRecord $_ -Context @("RemoteAddresses=$($WinRMFirewallRemoteAddresses -join ', ')")
+            throw 'WinRM-HTTPS-Firewallregel konnte nicht sicher eingerichtet werden; Details stehen im Setup-Protokoll.'
         }
 
         Write-SetupLog "WinRM HTTPS Setup abgeschlossen." "SUCCESS"

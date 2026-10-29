@@ -28,6 +28,7 @@
 			"SrvHV01"
 		],
 		"ClientCertThumbprint": "",
+		"WinRMFirewallRemoteAddresses": [],
 		"DeferredUpdateCategories": [
 			"Exchange Server",
 			"SQL Server"

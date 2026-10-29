@@ -197,6 +197,57 @@ function Add-WindowsUpdateTrustedWinRMServerCertificate {
     }
 }
 
+function Resolve-WindowsUpdateDeploymentFirewallRemoteAddresses {
+    param([Parameter(Mandatory)][object]$UpdateSettings)
+
+    $configured = @()
+    $configuredProperty = $UpdateSettings.PSObject.Properties['WinRMFirewallRemoteAddresses']
+    if ($configuredProperty -and $null -ne $configuredProperty.Value) {
+        $configured = @($configuredProperty.Value | ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+
+    if ($configured.Count -gt 0) {
+        $addresses = @($configured | Select-Object -Unique)
+        $addressSource = 'settings.json'
+    } else {
+        $found = [System.Collections.Generic.List[string]]::new()
+        foreach ($networkInterface in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($networkInterface.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            foreach ($unicast in $networkInterface.GetIPProperties().UnicastAddresses) {
+                $ip = $unicast.Address
+                if ([System.Net.IPAddress]::IsLoopback($ip) -or $ip.IsIPv6LinkLocal -or $ip.IsIPv6Multicast) { continue }
+                if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+                    $octets = $ip.GetAddressBytes()
+                    if ($octets[0] -eq 0 -or $octets[0] -eq 127 -or $octets[0] -eq 169 -and $octets[1] -eq 254 -or $octets[0] -ge 224) { continue }
+                }
+                $found.Add($ip.ToString())
+            }
+        }
+        $addresses = @($found | Select-Object -Unique | Sort-Object)
+        $addressSource = 'automatisch ermittelte Verwaltungsserver-Adressen'
+    }
+
+    foreach ($address in $addresses) {
+        $parts = @($address -split '/', 2)
+        $parsedAddress = $null
+        if (-not [System.Net.IPAddress]::TryParse($parts[0], [ref]$parsedAddress)) {
+            throw "Ungültige WinRM-Firewall-Quelladresse '$address' in UpdateSettings.WinRMFirewallRemoteAddresses."
+        }
+        if ($parts.Count -eq 2) {
+            $prefixLength = 0
+            $maxPrefix = if ($parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { 32 } else { 128 }
+            if (-not [int]::TryParse($parts[1], [ref]$prefixLength) -or $prefixLength -lt 0 -or $prefixLength -gt $maxPrefix) {
+                throw "Ungültige CIDR-Präfixlänge in WinRM-Firewall-Quelladresse '$address'."
+            }
+        }
+    }
+    if ($addresses.Count -eq 0) {
+        throw 'Es konnten keine nutzbaren IPv4- oder IPv6-Adressen des Verwaltungsservers für die WinRM-HTTPS-Firewallregel ermittelt werden.'
+    }
+    return [PSCustomObject]@{ Addresses = [string[]]$addresses; Source = $addressSource }
+}
+
 function Invoke-WindowsUpdateWinRMDeployment {
     param(
         [string]$Servername,
@@ -208,6 +259,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
         [switch]$CleanupLegacyTempOnly,
         [Parameter(Mandatory)][string]$ExpectedDeploymentVersion,
         [Parameter(Mandatory)][object]$UpdateSettings,
+        [string[]]$WinRMFirewallRemoteAddresses = @(),
         [Parameter(Mandatory)][bool]$EnableWingetUpdates,
         [Parameter(Mandatory)][System.Collections.IDictionary]$ExpectedModuleVersions,
         [Parameter(Mandatory)][System.Collections.IDictionary]$BootstrapCredentials,
@@ -218,6 +270,11 @@ function Invoke-WindowsUpdateWinRMDeployment {
     function Write-DeployLog {
         param([AllowEmptyString()][string]$Message, [ValidateSet('Info', 'Success', 'Warning', 'Error')][string]$Level = 'Info', [switch]$LogOnly, [switch]$ConsoleOnly)
         & $writeLogCallback -Message $Message -Level $Level -LogOnly:$LogOnly -ConsoleOnly:$ConsoleOnly
+    }
+    if (-not $CleanupLegacyTempOnly -and $WinRMFirewallRemoteAddresses.Count -eq 0) {
+        $resolvedFirewallAddresses = Resolve-WindowsUpdateDeploymentFirewallRemoteAddresses -UpdateSettings $UpdateSettings
+        $WinRMFirewallRemoteAddresses = [string[]]$resolvedFirewallAddresses.Addresses
+        Write-DeployLog "WinRM-HTTPS-Firewallquellen für $Servername ($($resolvedFirewallAddresses.Source)): $($WinRMFirewallRemoteAddresses -join ', ')." -LogOnly
     }
     $session = $null
     $remoteTemp = $null
@@ -554,6 +611,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
 
         $setupParameters = @{}
         $setupParameters.DeploymentVersion = $ExpectedDeploymentVersion
+        $setupParameters.WinRMFirewallRemoteAddresses = [string[]]$WinRMFirewallRemoteAddresses
         if ($EnableWingetUpdates) { $setupParameters.InstallWinGetClientModule = $true }
         if (-not $modulesVerifiedCurrent -and $targetModulePayloadRoot) {
             $setupParameters.OfflineModuleRoot = $remoteTemp
@@ -840,6 +898,7 @@ function Invoke-WindowsUpdateServerDeployment {
         [switch]$CleanupLegacyTempOnly,
         [Parameter(Mandatory)][string]$ExpectedDeploymentVersion,
         [Parameter(Mandatory)][object]$UpdateSettings,
+        [string[]]$WinRMFirewallRemoteAddresses = @(),
         [Parameter(Mandatory)][bool]$EnableWingetUpdates,
         [Parameter(Mandatory)][System.Collections.IDictionary]$ExpectedModuleVersions,
         [Parameter(Mandatory)][System.Collections.IDictionary]$BootstrapCredentials,
@@ -850,6 +909,11 @@ function Invoke-WindowsUpdateServerDeployment {
     function Write-DeployLog {
         param([AllowEmptyString()][string]$Message, [ValidateSet('Info', 'Success', 'Warning', 'Error')][string]$Level = 'Info', [switch]$LogOnly, [switch]$ConsoleOnly)
         & $writeLogCallback -Message $Message -Level $Level -LogOnly:$LogOnly -ConsoleOnly:$ConsoleOnly
+    }
+    if (-not $CleanupLegacyTempOnly -and $WinRMFirewallRemoteAddresses.Count -eq 0) {
+        $resolvedFirewallAddresses = Resolve-WindowsUpdateDeploymentFirewallRemoteAddresses -UpdateSettings $UpdateSettings
+        $WinRMFirewallRemoteAddresses = [string[]]$resolvedFirewallAddresses.Addresses
+        Write-DeployLog "WinRM-HTTPS-Firewallquellen für $Servername ($($resolvedFirewallAddresses.Source)): $($WinRMFirewallRemoteAddresses -join ', ')." -LogOnly
     }
     $result = [PSCustomObject]@{
         Status  = "Pending"
@@ -884,6 +948,7 @@ function Invoke-WindowsUpdateServerDeployment {
                 -CleanupLegacyTempOnly:$CleanupLegacyTempOnly `
                 -ExpectedDeploymentVersion $ExpectedDeploymentVersion `
                 -UpdateSettings $UpdateSettings `
+                -WinRMFirewallRemoteAddresses $WinRMFirewallRemoteAddresses `
                 -EnableWingetUpdates $EnableWingetUpdates `
                 -ExpectedModuleVersions $ExpectedModuleVersions `
                 -BootstrapCredentials $BootstrapCredentials `
@@ -914,6 +979,7 @@ function Invoke-WindowsUpdateServerDeployment {
     try {
         Write-DeployLog "[$Servername] Führe lokales Setup aus."
         $localParameters = @{}
+        $localParameters.WinRMFirewallRemoteAddresses = [string[]]$WinRMFirewallRemoteAddresses
         if ($EnableWingetUpdates) { $localParameters.InstallWinGetClientModule = $true }
         if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
             $localParameters.OfflineModuleRoot = $OfflineModulePayloadRoot
