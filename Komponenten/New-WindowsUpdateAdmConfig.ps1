@@ -874,7 +874,17 @@ try {
                 })
                 $certificateMappingConfirmed = $false
 
-                if ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
+                if ($FinalizeJEA -and
+                    -not [string]::IsNullOrWhiteSpace($script:CertificateMappedPrincipal) -and
+                    -not [string]::IsNullOrWhiteSpace($script:CertificateMappingSid)) {
+                    # Die SYSTEM-Finalisierung besitzt absichtlich keine
+                    # Bootstrap-Anmeldedaten. Sie muss deshalb die Principal-
+                    # und SID-Werte aus dem ersten Setup-Lauf verwenden und
+                    # darf sie nicht aus einem eventuell unvollständigen
+                    # WSMan-Mapping mit leerem UserName zurückberechnen.
+                    Write-SetupLog "SYSTEM-Finalisierung übernimmt die Bootstrap-Identität '$($script:CertificateMappedPrincipal)' und SID '$($script:CertificateMappingSid)' unverändert." 'INFO'
+                    $certificateMappingConfirmed = $false
+                } elseif ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
                     $mappingUris = @($currentMapping | ForEach-Object { Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI' })
                     $missingMappingUris = @($script:ClientCertificateEndpointUris | Where-Object { $_ -notin $mappingUris })
                     if ($currentMapping.Count -ne $script:ClientCertificateEndpointUris.Count -or $missingMappingUris.Count -gt 0) {
