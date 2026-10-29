@@ -2019,6 +2019,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $wingetInteractiveUserDiagnosticOutput = ''
             $wingetPreparationSucceeded = $true
             $wingetReconnectRequired = $false
+            $monthlySourceResetPerformed = $false
             $appInstallerRegistrationChanged = $false
             $wingetQuerySources = @()
             $wingetModuleUseAllowed = $true
@@ -2223,7 +2224,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         Reset-WingetDefaultSources -Path $wingetPath
                         $SourceResetPerformed = $true
                         $SourcePackageRefreshPerformed = $true
-                        $wingetBootstrapMessage += ' WinGet-Standardquellen wurden zurückgesetzt und die Quelle winget aktualisiert; der monatliche Reset ist vorgemerkt.'
+                        $monthlySourceResetPerformed = $true
+                        $wingetReconnectRequired = $true
+                        $wingetBootstrapMessage += ' WinGet-Standardquellen wurden zurückgesetzt und die Quelle winget aktualisiert; die Prüfung wird nach dem Monatsreset in einer frischen Verbindung wiederholt.'
                     }
                     catch {
                         $monthlyResetFailure = $_.Exception.ToString()
@@ -2344,6 +2347,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
                     Packages=@(); AvailableOutput=''; ActionOutput=$wingetBootstrapMessage; BootstrapMessage=$wingetBootstrapMessage; DiagnosticOutput=$wingetDiagnosticOutput
                     RetryFreshConnection=$retryFreshConnection; RetryReason=$retryReason
+                    RetryAfterMonthlySourceReset=$monthlySourceResetPerformed
                 }
             }
             else {
@@ -2927,6 +2931,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         $retryRequired = $false
         $retryRequiresSourceReset = $false
         $retryRequiresSourcePackageRefresh = $false
+        $retryAfterMonthlySourceReset = $false
         $retryPreferPortableWinGet = $false
         $wingetInstallScriptRan = $false
         $retryReason = ''
@@ -2955,6 +2960,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $installScriptRequiredProperty = $firstWingetResult.PSObject.Properties['RequiresWinGetInstallScript']
             $resetProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourceReset']
             $sourcePackageRefreshProperty = $firstWingetResult.PSObject.Properties['RetryAfterSourcePackageRefresh']
+            $monthlyResetProperty = $firstWingetResult.PSObject.Properties['RetryAfterMonthlySourceReset']
             $connectionProperty = $firstWingetResult.PSObject.Properties['RetryFreshConnection']
             if ($installScriptRequiredProperty -and [bool]$installScriptRequiredProperty.Value) {
                 $retryRequired = $true
@@ -3005,6 +3011,11 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $retryRequiresSourcePackageRefresh = $true
                 $retryReason = 'WinGet-Quellenpaket muss im Remoting-Benutzerkontext erneuert werden'
             }
+            elseif ($monthlyResetProperty -and [bool]$monthlyResetProperty.Value) {
+                $retryRequired = $true
+                $retryAfterMonthlySourceReset = $true
+                $retryReason = 'Monatlicher Quellenreset abgeschlossen; WinGet-Prüfung in frischer Verbindung erforderlich'
+            }
             elseif ($connectionProperty -and [bool]$connectionProperty.Value) {
                 $retryRequired = $true
                 $reasonProperty = $firstWingetResult.PSObject.Properties['RetryReason']
@@ -3026,12 +3037,14 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         if ($retryRequired) {
             $retryDescription = if ($retryPreferPortableWinGet) {
                 'Bereitstellung der portablen WinGet-CLI aus dem aktuellen GitHub-Release und einmalige Wiederholung'
+            } elseif ($retryAfterMonthlySourceReset) {
+                'einmalige WinGet-Prüfung nach Quellenreset in frischer Verbindung'
             } elseif ($retryRequiresSourceReset) {
                 'Quellenreset, Erneuerung des WinGet-Quellenpakets und einmalige Wiederholung'
             } elseif ($retryRequiresSourcePackageRefresh) {
                 'Erneuerung des WinGet-Quellenpakets und einmalige Wiederholung'
             } else { 'einmalige Wiederholung' }
-            $sourceResetPerformed = $false
+            $sourceResetPerformed = $retryAfterMonthlySourceReset
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
                 if ($retryPreferPortableWinGet -or $retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)') {
