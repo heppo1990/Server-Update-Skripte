@@ -1658,6 +1658,9 @@ finally {
             $updateOutput = [string]$updateResult.Output
             $updateExitCode = [int]$updateResult.ExitCode
             if ($updateExitCode -ne 0) { throw "WinGet-Quelle 'winget' konnte nach dem Reset nicht aktualisiert werden (Exitcode $updateExitCode): $updateOutput" }
+            if ($updateOutput -match '(?im)^\s*(?:Abgebrochen|Cancelled)\s*$|Fehler beim Versuch, die Quelle zu aktualisieren|Failed when attempting to update source') {
+                throw "WinGet-Quelle 'winget' meldete trotz Exitcode 0 einen abgebrochenen/fehlgeschlagenen Aktualisierungsvorgang: $updateOutput"
+            }
             $sourcesAfterResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'list', '--disable-interactivity')
             $sourcesAfterOutput = [string]$sourcesAfterResult.Output
             $sourcesAfterExitCode = [int]$sourcesAfterResult.ExitCode
@@ -1670,6 +1673,20 @@ finally {
             $missingDefaults = @($requiredDefaultSources | Where-Object { $_ -notin $sourcesAfterReset })
             if ($missingDefaults.Count -gt 0) {
                 throw "WinGet-Standardquelle(n) fehlen nach dem Reset: $($missingDefaults -join ', ')."
+            }
+            $wingetDetailsResult = Invoke-WindowsUpdateHiddenProcess -Path $Path -Arguments @('source', 'list', '--name', 'winget', '--disable-interactivity')
+            $wingetDetailsOutput = [string]$wingetDetailsResult.Output
+            $wingetDetailsExitCode = [int]$wingetDetailsResult.ExitCode
+            if ($wingetDetailsExitCode -ne 0) {
+                throw "Details der WinGet-Quelle konnten nach dem Reset nicht gelesen werden (Exitcode $wingetDetailsExitCode): $wingetDetailsOutput"
+            }
+            $updatedMatch = [regex]::Match($wingetDetailsOutput, '(?im)^\s*(?:Updated|Aktualisiert)\s+(?<Value>.+?)\s*$')
+            if (-not $updatedMatch.Success) {
+                throw "WinGet-Quelle 'winget' liefert nach dem Reset keinen prüfbaren Aktualisierungszeitpunkt: $wingetDetailsOutput"
+            }
+            $updatedValue = $updatedMatch.Groups['Value'].Value.Trim()
+            if ($updatedValue -match '(?i)^(?:never|nie|unknown|unbekannt|not updated|nicht aktualisiert)$') {
+                throw "WinGet-Quelle 'winget' wurde nach dem Reset nicht aktualisiert (Aktualisiert=$updatedValue)."
             }
             Save-WingetSourceResetState -State (Get-WingetSourceResetState)
             Save-WingetSourceResetState -State (Get-WingetMonthlySourceResetState)
