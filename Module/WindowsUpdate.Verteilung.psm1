@@ -881,6 +881,24 @@ function Invoke-WindowsUpdateWinRMDeployment {
             }
         }
 
+        # Diese Abfragen benötigen noch den bisherigen Bootstrap-Endpunkt.
+        # Das Setup begrenzt das Zertifikatsmapping anschließend auf den
+        # WindowsUpdateAdm-Endpunkt; danach wäre der alte PowerShell-Endpunkt
+        # absichtlich nicht mehr autorisiert.
+        $targetBuild = $null
+        if ($DeployType -ne 'AD') {
+            Add-WindowsUpdateTrustedWinRMServerCertificate -Session $session -Servername $Servername -WriteLog $WriteLog
+            try {
+                $targetBuild = [int](Invoke-Command -Session $session -ScriptBlock {
+                    (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber
+                } -ErrorAction Stop)
+                Write-DeployLog "[$Servername] Ziel-Build vor der Mapping-Einschränkung ermittelt: $targetBuild." -LogOnly
+            }
+            catch {
+                Write-DeployLog "[$Servername] Ziel-Build vor dem Setup nicht ermittelbar; der abschließende JEA-Endpunkttest wird verwendet. Ursache: $($_.Exception.Message)" -Level Warning
+            }
+        }
+
         Write-DeployLog "[$Servername] Führe Setup aus ($DeployType)."
         $remoteSetupOutput = @(Invoke-Command -Session $session -ScriptBlock {
             param($path, $scriptName, $parameters)
@@ -906,10 +924,6 @@ function Invoke-WindowsUpdateWinRMDeployment {
             throw "Setup auf $Servername meldete einen Fehler: $setupErrorText"
         }
 
-        if ($DeployType -ne 'AD') {
-            Add-WindowsUpdateTrustedWinRMServerCertificate -Session $session -Servername $Servername -WriteLog $WriteLog
-        }
-
         # Das Remote-Setup plant den WinRM-Neustart absichtlich verzögert,
         # damit diese erste Sitzung sauber enden kann. Auf Nicht-AD Server
         # 2016/2019 wird Windows Update später bewusst via SYSTEM-Aufgabe
@@ -917,20 +931,10 @@ function Invoke-WindowsUpdateWinRMDeployment {
         # Voraussetzung für eine erfolgreiche Einrichtung.
         $requiresJeaEndpointTest = $DeployType -eq 'AD'
         if ($DeployType -ne 'AD') {
-            try {
-                $versionProbe = Invoke-Command -Session $session -ScriptBlock {
-                    [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber
-                } -ErrorAction Stop
-                if ([int]$versionProbe -gt 17763) { $requiresJeaEndpointTest = $true }
-                else {
-                    Write-DeployLog "[$Servername] Windows Server 2016/2019: JEA-Test entfällt."
-                }
-            }
-            catch {
-                # Kann die Version nicht bestimmt werden, wird der etablierte
-                # Endpunkttest beibehalten statt eine unvollständige Einrichtung
-                # als erfolgreich zu melden.
+            if ($null -eq $targetBuild -or $targetBuild -gt 17763) {
                 $requiresJeaEndpointTest = $true
+            } else {
+                Write-DeployLog "[$Servername] Windows Server 2016/2019: JEA-Test entfällt."
             }
         }
 
