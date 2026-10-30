@@ -956,12 +956,9 @@ try {
                         }
                         $verifiedMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
                             Where-Object {
-                                $mappedUserName = [string](Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'UserName')
-                                $mappedLocalUserName = ($mappedUserName -split '\\')[-1]
                                 (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject') -eq $mappingSubject -and
                                 (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint -and
-                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI') -in $script:ClientCertificateEndpointUris -and
-                                $mappedLocalUserName -ieq $localUser
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI') -in $script:ClientCertificateEndpointUris
                             })
                         $remainingIssuerMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
                             Where-Object {
@@ -994,7 +991,7 @@ try {
                             throw "Nach dem Bereinigen bleiben $($remainingIssuerMappings.Count) Mappings für das Zertifikat bestehen; erwartet werden exakt $($script:ClientCertificateEndpointUris.Count)."
                         }
                         $certificateMappingConfirmed = $true
-                        Write-SetupLog "Zertifikat mit Account '$localUser' eindeutig verknüpft und verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)')." "SUCCESS"
+                        Write-SetupLog "Zertifikat-Mapping für Account '$localUser' anhand von Subject, Issuer und exakt begrenzten Endpunkt-URIs verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)'). Der abschließende Zertifikat-Endpunkttest bestätigt die Kontoanmeldung." "SUCCESS"
                     }
                     catch {
                         Write-SetupLog 'FEHLER: Zertifikat-Mapping konnte nicht sicher eingerichtet und bestätigt werden.' 'ERROR'
