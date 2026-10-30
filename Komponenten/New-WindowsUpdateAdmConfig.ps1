@@ -946,6 +946,18 @@ try {
                             $localUser,
                             $CertificateMappingCredential.Password
                         )
+                    # Ein vorheriger Lauf kann das genaue Mapping bereits
+                    # angelegt haben und erst bei der anschließenden Prüfung
+                    # gescheitert sein. Diese kollidierenden Ziel-URIs gezielt
+                    # ersetzen; ein altes URI='*'-Mapping bleibt bis zur
+                    # erfolgreichen Erstellung und Verifikation bestehen.
+                    $exactMappingCollisions = @($allMappings | Where-Object {
+                        (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint -and
+                        (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI') -in $script:ClientCertificateEndpointUris
+                    })
+                    foreach ($mappingCollision in $exactMappingCollisions) {
+                        Remove-Item $mappingCollision.PSPath -Recurse -Force -ErrorAction Stop
+                    }
                         foreach ($mappingUri in $script:ClientCertificateEndpointUris) {
                             New-Item -Path WSMan:\localhost\ClientCertificate `
                                 -Subject    $mappingSubject `
@@ -977,7 +989,11 @@ try {
                             throw "Zertifikatsmapping ist nach dem Anlegen nicht eindeutig (gültige Zuordnungen: $($verifiedMappings.Count); Einträge für Zertifikat: $($remainingIssuerMappings.Count); erwartet: $($script:ClientCertificateEndpointUris.Count)). Vorhandene Einträge: $mappingDetails"
                         }
                         $verifiedMappingPaths = @($verifiedMappings | ForEach-Object { $_.PSPath })
-                        $staleMappings = @($subjectMappings + $issuerMappings | Where-Object {
+                        $mappingsAfterCreate = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue)
+                        $staleMappings = @($mappingsAfterCreate | Where-Object {
+                            $mappingSubjectValue = Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject'
+                            $mappingIssuerValue = Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer'
+                            ($mappingSubjectValue -eq $mappingSubject -or $mappingIssuerValue -eq $clientCert.Thumbprint) -and
                             $_.PSPath -notin $verifiedMappingPaths
                         } | Sort-Object -Property PSPath -Unique)
                         foreach ($staleMapping in $staleMappings) {
