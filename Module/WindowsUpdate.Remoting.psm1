@@ -41,23 +41,59 @@ function Test-WindowsUpdateWinRmPorts {
     )
 
     $uniquePorts = @($Ports | Select-Object -Unique)
+    $resolvedAddresses = @()
+    $resolutionError = $null
+    try {
+        $resolvedAddresses = @([System.Net.Dns]::GetHostAddresses($ComputerName) | Select-Object -Unique)
+    }
+    catch {
+        $resolutionError = $_.Exception.Message
+    }
+
+    $allResults = [System.Collections.Generic.List[object]]::new()
+    if ($resolvedAddresses.Count -eq 0) {
+        return [pscustomobject]@{
+            ComputerName = $ComputerName
+            Ports = $uniquePorts
+            OpenPorts = @()
+            Reachable = $false
+            AttemptsPerformed = 0
+            ResolvedAddresses = @()
+            AddressResults = @()
+            ResolutionError = $resolutionError
+        }
+    }
+
     for ($attemptNumber = 1; $attemptNumber -le $Attempts; $attemptNumber++) {
         $pendingConnections = [System.Collections.Generic.List[object]]::new()
         $openPorts = [System.Collections.Generic.List[int]]::new()
+        $openEndpoints = [System.Collections.Generic.List[object]]::new()
         $allClients = [System.Collections.Generic.List[System.Net.Sockets.TcpClient]]::new()
         try {
-            foreach ($port in $uniquePorts) {
-                $client = [System.Net.Sockets.TcpClient]::new()
-                $allClients.Add($client)
-                try {
-                    $asyncResult = $client.BeginConnect($ComputerName, [int]$port, $null, $null)
-                    $pendingConnections.Add([pscustomobject]@{
-                        Port = [int]$port
-                        Client = $client
-                        AsyncResult = $asyncResult
-                    })
+            foreach ($address in $resolvedAddresses) {
+                foreach ($port in $uniquePorts) {
+                    $client = [System.Net.Sockets.TcpClient]::new($address.AddressFamily)
+                    $allClients.Add($client)
+                    try {
+                        $asyncResult = $client.BeginConnect($address, [int]$port, $null, $null)
+                        $pendingConnections.Add([pscustomobject]@{
+                            Address = $address.ToString()
+                            Port = [int]$port
+                            Client = $client
+                            AsyncResult = $asyncResult
+                        })
+                    }
+                    catch {
+                        $allResults.Add([pscustomobject]@{
+                            Attempt = $attemptNumber
+                            Address = $address.ToString()
+                            Port = [int]$port
+                            Result = 'Fehler'
+                            Detail = $_.Exception.Message
+                        })
+                        $client.Dispose()
+                    }
                 }
-                catch { $client.Dispose() }
             }
 
             $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
@@ -72,11 +108,39 @@ function Test-WindowsUpdateWinRmPorts {
                 $pending = $pendingConnections[$completedIndex]
                 try {
                     $pending.Client.EndConnect($pending.AsyncResult)
-                    if ($pending.Client.Connected) { $openPorts.Add([int]$pending.Port) }
+                    if ($pending.Client.Connected) {
+                        if ($pending.Port -notin $openPorts) { $openPorts.Add([int]$pending.Port) }
+                        $openEndpoints.Add([pscustomobject]@{ Address = $pending.Address; Port = $pending.Port })
+                        $allResults.Add([pscustomobject]@{
+                            Attempt = $attemptNumber
+                            Address = $pending.Address
+                            Port = [int]$pending.Port
+                            Result = 'Offen'
+                            Detail = ''
+                        })
+                    }
                 }
-                catch { }
+                catch {
+                    $allResults.Add([pscustomobject]@{
+                        Attempt = $attemptNumber
+                        Address = $pending.Address
+                        Port = [int]$pending.Port
+                        Result = 'Geschlossen/Fehler'
+                        Detail = $_.Exception.Message
+                    })
+                }
                 $pending.AsyncResult.AsyncWaitHandle.Close()
                 $pendingConnections.RemoveAt($completedIndex)
+            }
+
+            foreach ($pending in $pendingConnections) {
+                $allResults.Add([pscustomobject]@{
+                    Attempt = $attemptNumber
+                    Address = $pending.Address
+                    Port = [int]$pending.Port
+                    Result = 'Zeitüberschreitung'
+                    Detail = "Timeout nach $TimeoutMilliseconds ms"
+                })
             }
 
             if ($openPorts.Count -gt 0 -or $attemptNumber -ge $Attempts) {
@@ -86,6 +150,10 @@ function Test-WindowsUpdateWinRmPorts {
                     OpenPorts = @($openPorts.ToArray())
                     Reachable = ($openPorts.Count -gt 0)
                     AttemptsPerformed = $attemptNumber
+                    ResolvedAddresses = @($resolvedAddresses | ForEach-Object { $_.ToString() })
+                    AddressResults = @($allResults.ToArray())
+                    OpenEndpoints = @($openEndpoints.ToArray())
+                    ResolutionError = $resolutionError
                 }
             }
         }

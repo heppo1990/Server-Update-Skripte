@@ -1355,17 +1355,29 @@ if ($ServerADList -ne $null) {
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
         $winRmProbe = Test-WindowsUpdateWinRmPorts -ComputerName $Servername -Ports @(5985, 5986) -TimeoutMilliseconds 1500
+        $probeAddressSummary = @($winRmProbe.AddressResults |
+          Where-Object { $_.Attempt -eq $winRmProbe.AttemptsPerformed } |
+          ForEach-Object { "$($_.Address):$($_.Port)=$($_.Result)" }) -join '; '
+        $resolvedAddressSummary = @($winRmProbe.ResolvedAddresses) -join ', '
         if (-not $winRmProbe.Reachable) {
           $WindowsUnreachableHosts++
           $skipMessage = "WinRM über HTTP (5985) und HTTPS (5986) ist nach $($winRmProbe.AttemptsPerformed) Prüfversuch(en) nicht erreichbar; Ziel wird in diesem Lauf übersprungen."
+          if ($resolvedAddressSummary) { $skipMessage += " Aufgelöste IP-Adressen: $resolvedAddressSummary." }
+          if ($probeAddressSummary) { $skipMessage += " TCP-Ergebnisse: $probeAddressSummary." }
+          if ($winRmProbe.ResolutionError) { $skipMessage += " DNS-Fehler: $($winRmProbe.ResolutionError)." }
           Write-ScriptLog "HINWEIS: $Servername – $skipMessage"
-          Write-WindowsUpdateConsoleLine -Message "  [Übersprungen] WinRM-Ports 5985/5986 auch nach $($winRmProbe.AttemptsPerformed) Prüfversuchen nicht erreichbar." -AlreadyFiltered
+          $skipConsoleMessage = "  [Übersprungen] WinRM-Ports 5985/5986 auch nach $($winRmProbe.AttemptsPerformed) Prüfversuchen nicht erreichbar."
+          if ($resolvedAddressSummary) { $skipConsoleMessage += " IPs: $resolvedAddressSummary." }
+          if ($probeAddressSummary) { $skipConsoleMessage += " TCP: $probeAddressSummary." }
+          if ($winRmProbe.ResolutionError) { $skipConsoleMessage += " DNS: $($winRmProbe.ResolutionError)." }
+          Write-WindowsUpdateConsoleLine -Message $skipConsoleMessage -AlreadyFiltered
           $serverHtml = [System.Net.WebUtility]::HtmlEncode([string]$Servername)
           $skipHtml = [System.Net.WebUtility]::HtmlEncode($skipMessage)
           $RepBody += "<div class='warning-box'><strong>Installation auf $serverHtml übersprungen.</strong> $skipHtml</div>"
           continue
         }
-        Write-ScriptLog -Message "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); erfolgreich nach $($winRmProbe.AttemptsPerformed) Prüfversuch(en)." -LogOnly
+        $openEndpointSummary = @($winRmProbe.OpenEndpoints | ForEach-Object { "$($_.Address):$($_.Port)" }) -join ', '
+        Write-ScriptLog -Message "WinRM-Portprüfung auf ${Servername}: 5985=$(if (5985 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); 5986=$(if (5986 -in $winRmProbe.OpenPorts) { 'offen' } else { 'geschlossen' }); erfolgreich nach $($winRmProbe.AttemptsPerformed) Prüfversuch(en). Erreichbare Endpunkte: $openEndpointSummary. Aufgelöste IP-Adressen: $resolvedAddressSummary." -LogOnly
 
         # Nicht-AD-Ziele erhalten TrustedHosts und Zertifikatsauthentifizierung
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.

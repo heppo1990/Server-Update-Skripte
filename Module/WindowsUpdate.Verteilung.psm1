@@ -7,42 +7,42 @@ function Get-WindowsUpdateDeploymentBootstrapCredential {
 function New-WindowsUpdateDeploymentBootstrapSession {
     param(
         [Parameter(Mandatory)][string]$Servername,
-        [Parameter(Mandatory)][System.Management.Automation.PSCredential]$Credential,
-        [Parameter(Mandatory)][scriptblock]$WriteLog,
-        [switch]$UseVersion3Bootstrap
+        [System.Management.Automation.PSCredential]$Credential,
+        [Parameter(Mandatory)][scriptblock]$WriteLog
     )
 
-    if ($UseVersion3Bootstrap) {
-        # Hypervisor-Bootstrap wie in Verteilungsversion 3: zuerst den
-        # Standard-PowerShell-Endpunkt über HTTPS, danach HTTP versuchen.
-        # Der Endpunktname wird bewusst nicht fest vorgegeben, damit Windows
-        # PowerShell und eine lokal registrierte Standardkonfiguration genutzt
-        # werden können. Auf PS7-only-Systemen folgt anschließend die
-        # dynamische Endpunkterkennung als Kompatibilitäts-Fallback.
-        foreach ($useSsl in @($true, $false)) {
-            $transportName = if ($useSsl) { 'HTTPS' } else { 'HTTP' }
-            & $WriteLog -Message "[$Servername] Hypervisor-Bootstrap Version 3 über $transportName (Standard-Endpunkt)." -LogOnly
-            try {
-                $parameters = @{
-                    ComputerName  = $Servername
-                    Credential    = $Credential
-                    Authentication = 'Negotiate'
-                    ErrorAction   = 'Stop'
-                }
-                if ($useSsl) {
-                    $parameters.UseSSL = $true
-                    $parameters.SessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck
-                }
-                $session = New-PSSession @parameters
-                & $WriteLog -Message "[$Servername] Hypervisor-Bootstrap Version 3 über $transportName erfolgreich." -Level Success -LogOnly
-                return $session
-            }
-            catch {
-                $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
-                & $WriteLog -Message "[$Servername] Hypervisor-Bootstrap Version 3 über $transportName fehlgeschlagen: $detail" -LogOnly
-            }
+    $authentication = if ($Credential) { 'Negotiate' } else { 'Kerberos' }
+    $standardEndpointErrors = [System.Collections.Generic.List[string]]::new()
+
+    # Die Ersteinrichtung hängt bei keinem Zieltyp vom WindowsUpdateAdm-JEA ab.
+    # Zuerst wird der eingebaute Standardendpunkt versucht: Windows PowerShell
+    # Microsoft.PowerShell über HTTPS, danach HTTP. Ein explizites Credential
+    # wird nur für zusätzliche/Hypervisor-Ziele übergeben; AD nutzt Kerberos
+    # unter der aktuellen Identität.
+    foreach ($useSsl in @($true, $false)) {
+        $transportName = if ($useSsl) { 'HTTPS' } else { 'HTTP' }
+        & $WriteLog -Message "[$Servername] Standard-Bootstrap über $transportName mit Endpunkt 'Microsoft.PowerShell'." -LogOnly
+        $parameters = @{
+            ComputerName      = $Servername
+            ConfigurationName = 'Microsoft.PowerShell'
+            Authentication    = $authentication
+            ErrorAction       = 'Stop'
         }
-        & $WriteLog -Message "[$Servername] Version-3-Standardweg nicht verfügbar; ermittle als Fallback den installierten PowerShell-Endpunkt." -LogOnly
+        if ($Credential) { $parameters.Credential = $Credential }
+        if ($useSsl) {
+            $parameters.UseSSL = $true
+            $parameters.SessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck
+        }
+        try {
+            $session = New-PSSession @parameters
+            & $WriteLog -Message "[$Servername] Standard-Bootstrap über $transportName mit 'Microsoft.PowerShell' erfolgreich." -Level Success -LogOnly
+            return $session
+        }
+        catch {
+            $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+            $standardEndpointErrors.Add(('{0}/Microsoft.PowerShell: {1}' -f $transportName, $detail))
+            & $WriteLog -Message "[$Servername] Standard-Bootstrap über $transportName fehlgeschlagen: $detail" -LogOnly
+        }
     }
 
     # Nicht von der aufrufenden PowerShell-Version oder einer bestimmten
@@ -57,10 +57,10 @@ function New-WindowsUpdateDeploymentBootstrapSession {
                 ResourceURI    = 'winrm/config/plugin'
                 Enumerate      = $true
                 ComputerName   = $Servername
-                Credential     = $Credential
-                Authentication = 'Negotiate'
+                Authentication = $authentication
                 ErrorAction    = 'Stop'
             }
+            if ($Credential) { $enumerationParameters.Credential = $Credential }
             if ($useSsl) {
                 $enumerationParameters.UseSSL = $true
                 $enumerationParameters.SessionOption = New-WSManSessionOption -SkipCACheck -SkipCNCheck
@@ -117,10 +117,10 @@ function New-WindowsUpdateDeploymentBootstrapSession {
             $parameters = @{
                 ComputerName      = $Servername
                 ConfigurationName = $configurationName
-                Credential        = $Credential
-                Authentication    = 'Negotiate'
+                Authentication    = $authentication
                 ErrorAction       = 'Stop'
             }
+            if ($Credential) { $parameters.Credential = $Credential }
             if ($useSsl) {
                 $parameters.UseSSL = $true
                 $parameters.SessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck
@@ -140,7 +140,8 @@ function New-WindowsUpdateDeploymentBootstrapSession {
     }
 
     $discoveryState = if ($pluginEnumerationSucceeded) { 'Endpunkte wurden dynamisch ermittelt' } else { 'Endpunkterkennung fehlgeschlagen; Standardnamen als Fallback versucht' }
-    throw ("Kein verwendbarer Windows-PowerShell- oder PowerShell-7-Remoting-Endpunkt auf $Servername erreichbar ($discoveryState). " + ($attemptErrors -join ' | '))
+    $allAttemptErrors = @($standardEndpointErrors.ToArray()) + @($attemptErrors.ToArray())
+    throw ("Kein verwendbarer Standard-PowerShell-Remoting-Endpunkt auf $Servername erreichbar ($discoveryState). " + ($allAttemptErrors -join ' | '))
 }
 
 function Get-WindowsUpdateDeploymentClientCertificate {
@@ -579,7 +580,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
                 try {
                     $session = New-WindowsUpdateDeploymentBootstrapSession -Servername $Servername `
-                        -Credential $bootstrapCredential -UseVersion3Bootstrap:($DeployType -eq 'Hypervisor') `
+                        -Credential $bootstrapCredential `
                         -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
                 }
                 catch {
@@ -594,14 +595,15 @@ function Invoke-WindowsUpdateWinRMDeployment {
                     }
                     Write-DeployLog "Erneuter WinRM-Bootstrap für $Servername mit Benutzer '$($bootstrapCredential.UserName)'." -LogOnly
                     $session = New-WindowsUpdateDeploymentBootstrapSession -Servername $Servername `
-                        -Credential $bootstrapCredential -UseVersion3Bootstrap:($DeployType -eq 'Hypervisor') `
+                        -Credential $bootstrapCredential `
                         -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
                 }
                 $BootstrapCredentials[$Servername] = $bootstrapCredential
             }
         } else {
             Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
-            $session = New-PSSession -ComputerName $Servername -ErrorAction Stop
+            $session = New-WindowsUpdateDeploymentBootstrapSession -Servername $Servername `
+                -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
         }
 
         # Alte Ablagerungen der früheren benutzerspezifischen TEMP-Ablage bereinigen.
