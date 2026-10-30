@@ -669,6 +669,1221 @@ try {
                     }
                     if (-not $allowsWinRmHttps) { continue }
 
+                    # Windows-AppX-Netzwerkisolation erzeugt eigene
+                    # ServerCapability-Regeln. Auf manchen Systemen liefert
+                    # Get-NetFirewallApplicationFilter deren Package-SID
+                    # nicht zurück; der Any-Portfilter darf dann nicht als
+                    # allgemeine WinRM-Freigabe interpretiert werden.
+                    # Das Windows-Regelsuffix kennzeichnet diese
+                    # paketgebundenen App-Regeln eindeutig.
+                    if ([string]$candidateRule.Name -match '(?i)^.+_[A-Za-z0-9.-]+-In-Allow-ServerCapability ist bei anwendungs- oder dienstgebundenen
+                    # Regeln kein pauschaler WinRM-Zugriff. Nur Regeln, die
+                    # System/svchost/WinRM treffen können, werden weiter als
+                    # mögliche Freigabe für den Listener betrachtet.
+                    $applicationFilters = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $candidateRule -ErrorAction Stop)
+                    if (-not $applicationFilters) {
+                        throw "Anwendungsfilter für aktive Firewall-Regel '$($candidateRule.Name)' konnte nicht ermittelt werden."
+                    }
+                    $candidatePrograms = @($applicationFilters | ForEach-Object { [string]$_.Program } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    $candidatePackages = @($applicationFilters | ForEach-Object { [string]$_.Package } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -notin @('Any', '*') })
+                    if ($candidatePackages.Count -gt 0) { continue }
+                    $programsCouldMatchWinRm = $true
+                    if ($candidatePrograms.Count -gt 0) {
+                        $programsCouldMatchWinRm = @($candidatePrograms | Where-Object {
+                            $_ -in @('Any', '*', 'System') -or $_ -match '(?i)(^|\\)svchost\.exe$'
+                        }).Count -gt 0
+                    }
+                    if (-not $programsCouldMatchWinRm) { continue }
+
+                    $serviceFilters = @(Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $candidateRule -ErrorAction Stop)
+                    if (-not $serviceFilters) {
+                        throw "Dienstfilter für aktive Firewall-Regel '$($candidateRule.Name)' konnte nicht ermittelt werden."
+                    }
+                    $candidateServices = @($serviceFilters | ForEach-Object { [string]$_.Service } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    if ($candidateServices.Count -gt 0 -and
+                        @($candidateServices | Where-Object { $_ -in @('Any', '*', 'WinRM') }).Count -eq 0) { continue }
+
+                    $candidateAddressFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $candidateRule -ErrorAction Stop
+                    if (-not $candidateAddressFilter) {
+                        throw "Adressfilter für aktive Firewall-Regel '$($candidateRule.Name)' konnte nicht ermittelt werden."
+                    }
+                    $candidateRemoteAddresses = @($candidateAddressFilter.RemoteAddress | ForEach-Object { [string]$_ })
+                    if ($candidateRemoteAddresses.Count -eq 0) { $candidateRemoteAddresses = @('nicht ermittelbar') }
+                    $hasBroadOrUnverifiedSource = $false
+                    foreach ($source in $candidateRemoteAddresses) {
+                        # Zusätzliche Regeln sind nur dann kompatibel mit der
+                        # Quellenbeschränkung, wenn jede Quelle exakt in der
+                        # für diese Verteilung freigegebenen Liste enthalten ist.
+                        # Any, LocalSubnet, größere Netze und nicht auflösbare
+                        # Adressformen fallen damit fail-closed durch.
+                        if ($source -notin $allowedRemoteAddresses) {
+                            $hasBroadOrUnverifiedSource = $true
+                        }
+                    }
+                    $otherHttpsRules.Add([pscustomobject]@{
+                        Name = [string]$candidateRule.Name
+                        DisplayName = [string]$candidateRule.DisplayName
+                        Profile = [string]$candidateRule.Profile
+                        Protocol = $candidateProtocol
+                        LocalPort = ($candidatePorts -join ',')
+                        RemoteAddress = ($candidateRemoteAddresses -join ',')
+                        BroadOrUnverifiedSource = $hasBroadOrUnverifiedSource
+                    })
+                }
+                foreach ($candidateRule in $otherHttpsRules) {
+                    $level = if ($candidateRule.BroadOrUnverifiedSource) { 'WARN' } else { 'INFO' }
+                    Write-SetupLog "Zusätzliche aktive WinRM-HTTPS-Regel inventarisiert: Name=$($candidateRule.Name); Anzeige=$($candidateRule.DisplayName); Profil=$($candidateRule.Profile); Protokoll=$($candidateRule.Protocol); Port=$($candidateRule.LocalPort); RemoteAddress=$($candidateRule.RemoteAddress)." $level
+                }
+                $broadHttpsRules = @($otherHttpsRules | Where-Object { $_.BroadOrUnverifiedSource })
+                if ($broadHttpsRules.Count -gt 0) {
+                    $broadNames = ($broadHttpsRules | ForEach-Object { $_.Name }) -join ', '
+                    throw "Weitere aktive WinRM-HTTPS-Regeln erlauben beliebige oder nicht prüfbare Quellen ($broadNames); diese Regel(n) müssen eingeschränkt oder entfernt werden, bevor die Verteilung als sicher gilt."
+                }
+            }
+            catch {
+                Write-SetupLog 'Weitere aktive WinRM-HTTPS-Regeln konnten nicht sicher inventarisiert werden; Setup wird abgebrochen.' 'ERROR'
+                Write-SetupDiagnostic -Operation 'WinRM-Firewall-Inventar' -ErrorRecord $_
+                throw
+            }
+        }
+        catch {
+            Write-SetupLog 'WinRM-HTTPS-Firewallregel konnte nicht sicher eingeschränkt oder verifiziert werden; Setup wird abgebrochen.' 'ERROR'
+            Write-SetupDiagnostic -Operation 'WinRM-Firewallregel' -ErrorRecord $_ -Context @("RemoteAddresses=$($WinRMFirewallRemoteAddresses -join ', ')")
+            throw 'WinRM-HTTPS-Firewallregel konnte nicht sicher eingerichtet werden; Details stehen im Setup-Protokoll.'
+        }
+
+        Write-SetupLog "WinRM HTTPS Setup abgeschlossen." "SUCCESS"
+
+        # =========================================================
+        # === Zertifikat-Authentifizierung einrichten
+        # Client-Zertifikat vom Verwaltungsserver importieren und
+        # mit dem bei der Einrichtung verwendeten lokalen Administrator verknüpfen
+        # =========================================================
+        Write-SetupLog "" "INFO"
+        Write-SetupLog "=== Zertifikat-Authentifizierung Setup ===" "INFO"
+
+        # Zertifikat-Auth in WinRM aktivieren
+        try {
+            Set-Item WSMan:\localhost\Service\Auth\Certificate -Value $true -ErrorAction Stop
+            Write-SetupLog "WinRM Zertifikat-Authentifizierung aktiviert." "SUCCESS"
+        }
+        catch {
+            Write-SetupLog 'Zertifikatsauthentifizierung konnte nicht aktiviert werden; Details im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'WinRM-Zertifikatsauthentifizierung' -ErrorRecord $_
+        }
+
+        # Ohne bereits funktionierende Zertifikatsverbindung ist für den
+        # lokalen Konto-Bootstrap die Remote-UAC-Ausnahme erforderlich. Sie
+        # bleibt nur bis zur SYSTEM-Finalisierung geöffnet und wird dort sowie
+        # bei jedem erkannten Fehler wieder geschlossen. Mit nutzbarem
+        # Zertifikatskanal bleibt sie deaktiviert.
+        try {
+            $regPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+            $tokenFilterSettings = Get-ItemProperty -LiteralPath $regPath -ErrorAction SilentlyContinue
+            $tokenFilterProperty = if ($null -ne $tokenFilterSettings) {
+                $tokenFilterSettings.PSObject.Properties['LocalAccountTokenFilterPolicy']
+            } else { $null }
+            $tokenFilterValue = if ($null -ne $tokenFilterProperty) { $tokenFilterProperty.Value } else { $null }
+            if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting) {
+                if ($FinalizeJEA) {
+                    $script:OriginalTokenFilterPolicyPresent = [bool]$OriginalLocalAccountTokenFilterPolicyPresent
+                    $script:OriginalTokenFilterPolicyValue = $OriginalLocalAccountTokenFilterPolicyValue
+                } else {
+                    $script:OriginalTokenFilterPolicyPresent = $null -ne $tokenFilterProperty
+                    if ($script:OriginalTokenFilterPolicyPresent) {
+                        $script:OriginalTokenFilterPolicyValue = [int]$tokenFilterProperty.Value
+                    }
+                }
+                Set-WindowsUpdateLocalAccountTokenFilterPolicy -Value 1 -Reason 'temporärer lokaler Konto-Bootstrap; vorheriger Zustand wird für die Wiederherstellung gespeichert'
+            } else {
+                if ($null -ne $tokenFilterValue) {
+                    Write-SetupLog "Vorhandene LocalAccountTokenFilterPolicy=$tokenFilterValue bleibt unverändert." 'INFO'
+                } else {
+                    Write-SetupLog 'LocalAccountTokenFilterPolicy ist nicht gesetzt; Windows-Standard gilt.' 'SUCCESS'
+                }
+            }
+        }
+        catch {
+            Write-SetupLog 'LocalAccountTokenFilterPolicy konnte nicht gesetzt werden; Details im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'LocalAccountTokenFilterPolicy' -ErrorRecord $_
+        }
+
+        # Client-Zertifikat (Public Key) aus Skriptordner importieren
+        $clientCertPath = Join-Path $PSScriptRoot 'WinRM-ClientCert.cer'
+        if (Test-Path $clientCertPath) {
+            Write-SetupLog "Importiere Client-Zertifikat: $clientCertPath" "INFO"
+            try {
+                # In Trusted Root und TrustedPeople importieren
+                $clientCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($clientCertPath)
+
+                $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
+                $rootStore.Open("ReadWrite")
+                $rootClientCertExists = @($rootStore.Certificates | Where-Object Thumbprint -eq $clientCert.Thumbprint).Count -gt 0
+                if (-not $rootClientCertExists) {
+                    $rootStore.Add($clientCert)
+                }
+                $rootStore.Close()
+
+                $trustedStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "LocalMachine")
+                $trustedStore.Open("ReadWrite")
+                $trustedClientCertExists = @($trustedStore.Certificates | Where-Object Thumbprint -eq $clientCert.Thumbprint).Count -gt 0
+                if (-not $trustedClientCertExists) {
+                    $trustedStore.Add($clientCert)
+                }
+                $trustedStore.Close()
+
+                Write-SetupLog "Client-Zertifikat importiert: $($clientCert.Thumbprint)" "SUCCESS"
+
+                # Ein Mapping gilt nur dann als aktuell, wenn auch sein Issuer
+                # auf den gerade importierten Zertifikat-Thumbprint zeigt.
+                # Der WSMan-Provider liefert diese Werte je nach Windows-Version
+                # direkt als Eigenschaften oder gebündelt in der Keys-Auflistung.
+                function Get-WUAdmClientCertificateMappingValue {
+                    param($Mapping, [string]$Name)
+                    $property = $Mapping.PSObject.Properties[$Name]
+                    if ($null -ne $property -and $null -ne $property.Value) {
+                        return [string]$property.Value
+                    }
+                    $keysProperty = $Mapping.PSObject.Properties['Keys']
+                    if ($null -ne $keysProperty -and $null -ne $keysProperty.Value) {
+                        foreach ($key in @($keysProperty.Value)) {
+                            $parts = ([string]$key) -split '=', 2
+                            if ($parts.Count -eq 2 -and $parts[0] -ieq $Name) {
+                                return [string]$parts[1]
+                            }
+                        }
+                    }
+                    return $null
+                }
+                $mappingSubject = "$($clientCert.Subject.Replace('CN=',''))@localhost"
+                $allMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue)
+                $subjectMappings = @($allMappings |
+                    Where-Object {
+                        (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject') -eq $mappingSubject
+                    })
+                # Der Issuerwert ist bei unserem selbstsignierten Clientzertifikat
+                # dessen Thumbprint. Alte Wildcard- oder anders benannte Einträge
+                # mit derselben Zertifikatidentität können eine neue Zuordnung
+                # überlagern und WinRM mit HTTP 12186 ablehnen lassen.
+                $issuerMappings = @($allMappings | Where-Object {
+                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
+                })
+                $currentMapping = @($subjectMappings | Where-Object {
+                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint -and
+                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI') -in $script:ClientCertificateEndpointUris
+                })
+                $certificateMappingConfirmed = $false
+
+                if ($FinalizeJEA -and
+                    -not [string]::IsNullOrWhiteSpace($script:CertificateMappedPrincipal) -and
+                    -not [string]::IsNullOrWhiteSpace($script:CertificateMappingSid)) {
+                    # Die SYSTEM-Finalisierung besitzt absichtlich keine
+                    # Bootstrap-Anmeldedaten. Sie muss deshalb die Principal-
+                    # und SID-Werte aus dem ersten Setup-Lauf verwenden und
+                    # darf sie nicht aus einem eventuell unvollständigen
+                    # WSMan-Mapping mit leerem UserName zurückberechnen.
+                    Write-SetupLog "SYSTEM-Finalisierung übernimmt die Bootstrap-Identität '$($script:CertificateMappedPrincipal)' und SID '$($script:CertificateMappingSid)' unverändert." 'INFO'
+                    $certificateMappingConfirmed = $false
+                } elseif ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
+                    $mappingUris = @($currentMapping | ForEach-Object { Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI' })
+                    $missingMappingUris = @($script:ClientCertificateEndpointUris | Where-Object { $_ -notin $mappingUris })
+                    if ($currentMapping.Count -ne $script:ClientCertificateEndpointUris.Count -or
+                        $missingMappingUris.Count -gt 0 -or
+                        $issuerMappings.Count -ne $script:ClientCertificateEndpointUris.Count -or
+                        $subjectMappings.Count -ne $script:ClientCertificateEndpointUris.Count) {
+                        throw "Das bestehende Zertifikatsmapping ist nicht eindeutig auf die benötigten Endpunkte begrenzt (Mappings: $($currentMapping.Count); erwartet: $($script:ClientCertificateEndpointUris.Count)); Einrichtung mit Bootstrap-Anmeldedaten erneut ausführen."
+                    }
+                    $mappedUserName = [string](Get-WUAdmClientCertificateMappingValue -Mapping $currentMapping[0] -Name 'UserName')
+                    $mappedLocalUser = ($mappedUserName -split '\\')[-1]
+                    $script:CertificateMappedPrincipal = "$env:COMPUTERNAME\$mappedLocalUser"
+                    $script:CertificateMappingSid = (New-Object System.Security.Principal.NTAccount($script:CertificateMappedPrincipal)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                    Write-SetupLog "Zertifikatverbindung wurde vor dem Setup bestätigt; Mapping für den aktuellen Thumbprint bleibt erhalten." "SUCCESS"
+                    $certificateMappingConfirmed = $true
+                } elseif ($currentMapping.Count -gt 0 -and -not $CertificateMappingCredential -and -not $ForceUpdate) {
+                    # Ohne Einrichtungsdaten kann ein vorhandener Eintrag nicht
+                    # erneuert werden. Die Verteilung bestätigt die Verbindung
+                    # normalerweise vorher und setzt dann PreserveExisting... .
+                    if ($currentMapping.Count -eq $script:ClientCertificateEndpointUris.Count -and
+                        $issuerMappings.Count -eq $script:ClientCertificateEndpointUris.Count -and
+                        $subjectMappings.Count -eq $script:ClientCertificateEndpointUris.Count) {
+                        $mappedUserName = [string](Get-WUAdmClientCertificateMappingValue -Mapping $currentMapping[0] -Name 'UserName')
+                        $mappedLocalUser = ($mappedUserName -split '\\')[-1]
+                        $script:CertificateMappedPrincipal = "$env:COMPUTERNAME\$mappedLocalUser"
+                        $script:CertificateMappingSid = (New-Object System.Security.Principal.NTAccount($script:CertificateMappedPrincipal)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                        $certificateMappingConfirmed = $false
+                        Write-SetupLog "Ein Zertifikat-Mapping für den aktuellen Thumbprint ist vorhanden; seine Funktion wird anschließend durch den zentralen Verbindungstest bestätigt." "INFO"
+                    } else {
+                        throw "Zertifikatsmapping ist mehrdeutig (passende Subject/Issuer-Einträge: $($currentMapping.Count); alle Einträge mit Zertifikat-Issuer: $($issuerMappings.Count)); Einrichtungsdaten zum Bereinigen und Erneuern fehlen."
+                    }
+                } elseif (-not $CertificateMappingCredential) {
+                    throw "Für ein neues oder zu erneuerndes Zertifikat-Mapping wurden keine Einrichtungs-Administrator-Anmeldedaten übergeben."
+                } else {
+                    # WinRM-Zertifikatsmappings nehmen einen lokalen Kontonamen
+                    # an. Ein Präfix wie COMPUTER\Benutzer oder .\Benutzer gehört
+                    # nicht in das Mapping; es kann zwar als Eintrag gespeichert
+                    # werden, lässt sich danach aber nicht zuverlässig auflösen.
+                    $credentialUserName = [string]$CertificateMappingCredential.UserName
+                    $localUser = ($credentialUserName -split '\\')[-1]
+                    if ([string]::IsNullOrWhiteSpace($localUser)) {
+                        throw 'Der lokale Kontoname für das WinRM-Zertifikatsmapping ist leer.'
+                    }
+                    $script:CertificateMappedPrincipal = "$env:COMPUTERNAME\$localUser"
+                    $script:CertificateMappingSid = (New-Object System.Security.Principal.NTAccount($script:CertificateMappedPrincipal)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                    try {
+                        # Diese Anmeldedaten wurden vom Aufrufer verwendet, wenn
+                        # die Client-Zertifikatsverbindung nicht funktioniert hat.
+                        # Vorhandene Mappings werden nie entfernt oder
+                        # überschrieben. Bei einer Kollision wird abgebrochen.
+                        $mappingCredential = New-Object System.Management.Automation.PSCredential(
+                            $localUser,
+                            $CertificateMappingCredential.Password
+                        )
+                    $exactMappingCollisions = @($allMappings | Where-Object {
+                        (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint -and
+                        (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI') -in $script:ClientCertificateEndpointUris
+                    })
+                    if ($exactMappingCollisions.Count -gt 0) {
+                        $collisionUris = @($exactMappingCollisions | ForEach-Object { Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI' })
+                        $collisionUsers = @($exactMappingCollisions | ForEach-Object { Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'UserName' } | Sort-Object -Unique)
+                        $missingCollisionUris = @($script:ClientCertificateEndpointUris | Where-Object { $_ -notin $collisionUris })
+                        if ($missingCollisionUris.Count -gt 0 -or $collisionUsers.Count -ne 1 -or
+                            (($collisionUsers[0] -split '\\')[-1] -ine $localUser) -or
+                            $subjectMappings.Count -ne $exactMappingCollisions.Count -or
+                            $issuerMappings.Count -ne $exactMappingCollisions.Count) {
+                            throw 'Vorhandene WinRM-Zertifikatszuordnungen kollidieren mit dem benötigten Mapping. Sie bleiben unverändert; bitte Zuordnungen manuell prüfen, bevor erneut verteilt wird.'
+                        }
+                        Write-SetupLog 'Passende exakte Zertifikatszuordnungen sind bereits vorhanden und bleiben unverändert.' 'INFO'
+                    } else {
+                        if ($subjectMappings.Count -gt 0 -or $issuerMappings.Count -gt 0) {
+                            throw 'Vorhandene WinRM-Zertifikatszuordnungen verwenden bereits Subject oder Issuer dieses Zertifikats. Sie bleiben unverändert; das neue Mapping wird wegen möglicher Mehrdeutigkeit nicht angelegt.'
+                        }
+                        foreach ($mappingUri in $script:ClientCertificateEndpointUris) {
+                            New-Item -Path WSMan:\localhost\ClientCertificate `
+                                -Subject    $mappingSubject `
+                                -URI        $mappingUri `
+                                -Issuer     $clientCert.Thumbprint `
+                                -Credential $mappingCredential `
+                                -ErrorAction Stop | Out-Null
+                        }
+                    }
+                        $verifiedMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                            Where-Object {
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject') -eq $mappingSubject -and
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint -and
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI') -in $script:ClientCertificateEndpointUris
+                            })
+                        $remainingIssuerMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                            Where-Object {
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
+                            })
+                        $verifiedUris = @($verifiedMappings | ForEach-Object { Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI' })
+                        $missingVerifiedUris = @($script:ClientCertificateEndpointUris | Where-Object { $_ -notin $verifiedUris })
+                        if ($verifiedMappings.Count -ne $script:ClientCertificateEndpointUris.Count -or $missingVerifiedUris.Count -gt 0) {
+                            $mappingDetails = @($issuerMappings | ForEach-Object {
+                                'Subject={0}; URI={1}; Issuer={2}; UserName={3}' -f `
+                                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject'), `
+                                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI'), `
+                                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer'), `
+                                    (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'UserName')
+                            }) -join ' | '
+                            throw "Zertifikatsmapping ist nach dem Anlegen nicht eindeutig (gültige Zuordnungen: $($verifiedMappings.Count); Einträge für Zertifikat: $($remainingIssuerMappings.Count); erwartet: $($script:ClientCertificateEndpointUris.Count)). Vorhandene Einträge: $mappingDetails"
+                        }
+                        $remainingIssuerMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                            Where-Object {
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
+                            })
+                        if ($remainingIssuerMappings.Count -ne $script:ClientCertificateEndpointUris.Count) {
+                            throw "Die vorhandenen Mappings für das Zertifikat sind mehrdeutig ($($remainingIssuerMappings.Count)); erwartet werden exakt $($script:ClientCertificateEndpointUris.Count). Vorhandene Einträge wurden nicht entfernt."
+                        }
+                        $certificateMappingConfirmed = $true
+                        Write-SetupLog "Zertifikat-Mapping für Account '$localUser' anhand von Subject, Issuer und exakt begrenzten Endpunkt-URIs verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)'). Der abschließende Zertifikat-Endpunkttest bestätigt die Kontoanmeldung." "SUCCESS"
+                    }
+                    catch {
+                        Write-SetupLog 'FEHLER: Zertifikat-Mapping konnte nicht sicher eingerichtet und bestätigt werden.' 'ERROR'
+                        Write-SetupDiagnostic -Operation 'WinRM-Zertifikatmapping' -ErrorRecord $_ -Context @("User=$localUser")
+                        throw
+                    }
+                }
+
+                # Bereits vorhandene öffentliche Zertifikate werden nie
+                # entfernt; erforderliche Zertifikate werden nur ergänzt.
+                if ($certificateMappingConfirmed) {
+                    Write-SetupLog "WinRM-Zertifikatsmapping für Thumbprint $($clientCert.Thumbprint) bestätigt." 'SUCCESS'
+                    Write-SetupLog 'Vorhandene öffentliche Zertifikate bleiben unverändert; benötigte Zertifikate wurden nur ergänzt.' 'INFO'
+                } else {
+                    Write-SetupLog 'Vorhandene öffentliche Zertifikate bleiben erhalten; Mapping für den aktuellen Thumbprint konnte nicht bestätigt werden.' 'WARN'
+                }
+            }
+            catch {
+                $certificateFailureLevel = if ($EnableClientCertificateRemoting) { 'ERROR' } else { 'WARN' }
+                Write-SetupLog 'Client-Zertifikat oder dessen WinRM-Mapping konnte nicht vollständig eingerichtet werden; Details im Setup-Protokoll.' $certificateFailureLevel
+                Write-SetupDiagnostic -Operation 'WinRM-Clientzertifikat-Import' -ErrorRecord $_ -Context @("Path=$clientCertPath")
+                if ($EnableClientCertificateRemoting) { throw }
+                Write-SetupLog "Passwort-Authentifizierung bleibt als Fallback aktiv." "INFO"
+            }
+        } else {
+            Write-SetupLog "Kein Client-Zertifikat gefunden ($clientCertPath)." "INFO"
+            Write-SetupLog "Zuerst Komponenten\Setup-ClientCertificate.ps1 auf dem Verwaltungsserver ausführen," "INFO"
+            Write-SetupLog "dann Komponenten\WinRM-ClientCert.cer bereitstellen und dieses Skript erneut ausführen." "INFO"
+            if ($EnableClientCertificateRemoting) {
+                throw "Client-Zertifikat fehlt, obwohl Clientzertifikat-Remoting aktiviert ist: $clientCertPath"
+            }
+            Write-SetupLog "Passwort-Authentifizierung bleibt aktiv." "INFO"
+        }
+
+    } else {
+        Write-SetupLog "" "INFO"
+        Write-SetupLog "=== WinRM HTTPS Zertifikat ===" "INFO"
+        Write-SetupLog "Ziel wird per Kerberos in der Verwaltungs-AD verwaltet - HTTPS-Zertifikat wird nicht benötigt." "INFO"
+    }
+
+    
+    # Register-PSSessionConfiguration trennt laut WinRM alle aktiven
+    # PowerShell-Sitzungen, wenn ein Endpoint neu registriert wird. Daher den
+    # finalen JEA-Schritt bei einer Remote-Einrichtung in eine lokale Task
+    # auslagern. Ein gewöhnlicher Child-Prozess wird beim Ende einer WinRM-
+    # Sitzung nicht auf allen Systemen zuverlässig weitergeführt.
+    if ($IsRemoteSetup -and -not $FinalizeJEA) {
+        # Keinen App-Ausführungsalias verwenden: Auf Systemen mit der
+        # Microsoft-Store-Version von PowerShell 7 kann dieser auf
+        # WindowsApps zeigen. JEA/WinRM-SessionConfigs müssen jedoch über
+        # Windows PowerShell 5.1 registriert werden.
+        $localPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $localPowerShell)) {
+            throw "Windows PowerShell 5.1 wurde nicht gefunden: $localPowerShell"
+        }
+        # Die SYSTEM-Finalisierung erhält denselben Sollwert wie der
+        # Remote-Prozess. Sie soll die Version nicht aus einem eventuell
+        # anders aufgelösten Modulpfad ableiten.
+        $taskDeploymentVersion = if (-not [string]::IsNullOrWhiteSpace($DeploymentVersion)) {
+            $DeploymentVersion
+        } else {
+            Get-WindowsUpdateAdmDeploymentVersion
+        }
+        # Der initiale Remote-Lauf hat Modul- und NuGet-Pflege bereits
+        # abgeschlossen. Die lokale SYSTEM-Finalisierung registriert nur JEA
+        # und darf weder erneut NuGet aufrufen noch temporäre Offlinepakete
+        # benötigen.
+        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA -ModulesVerifiedCurrent -DeploymentVersion "{1}" -ResumeLogPath "{2}"' -f $PSCommandPath, $taskDeploymentVersion, $script:SetupLogPath
+        if ($EnableClientCertificateRemoting) { $arguments += ' -EnableClientCertificateRemoting' }
+        if ($TemporaryLocalAccountBootstrap) {
+            $arguments += ' -TemporaryLocalAccountBootstrap'
+            if ($script:OriginalTokenFilterPolicyPresent) {
+                $arguments += ' -OriginalLocalAccountTokenFilterPolicyPresent -OriginalLocalAccountTokenFilterPolicyValue {0}' -f $script:OriginalTokenFilterPolicyValue
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
+            # Die SYSTEM-Finalisierung muss dieselbe eingeschränkte JEA-Rolle
+            # für den Verwaltungsserver registrieren wie der ursprüngliche Lauf.
+            $arguments += ' -ManagementComputerAccount "{0}"' -f $ManagementComputerAccount
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ManagementComputerSid)) {
+            $arguments += ' -ManagementComputerSid "{0}"' -f $ManagementComputerSid
+        }
+        if (-not [string]::IsNullOrWhiteSpace($script:CertificateMappingSid)) {
+            $arguments += ' -CertificateMappingSid "{0}"' -f $script:CertificateMappingSid
+        }
+        if (-not [string]::IsNullOrWhiteSpace($script:CertificateMappedPrincipal)) {
+            $arguments += ' -CertificateMappedPrincipal "{0}"' -f $script:CertificateMappedPrincipal
+        }
+        if (@($WinRMFirewallRemoteAddresses).Count -gt 0) {
+            # Die SYSTEM-Finalisierung führt das Setup erneut aus und muss
+            # dieselbe explizite Quellenliste für die HTTPS-Firewallregel erhalten.
+            $quotedFirewallAddresses = @($WinRMFirewallRemoteAddresses | ForEach-Object {
+                '"{0}"' -f ([string]$_).Replace('"', '')
+            })
+            $arguments += ' -WinRMFirewallRemoteAddresses {0}' -f ($quotedFirewallAddresses -join ' ')
+        }
+        $taskName = 'WindowsUpdateAdm-Finalize'
+        $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name Start-ScheduledTask -ErrorAction SilentlyContinue)
+        if ($scheduledTaskCmdletsAvailable) {
+            $action = New-ScheduledTaskAction -Execute $localPowerShell -Argument $arguments
+            $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName $taskName
+        }
+        else {
+            # Windows 7 besitzt nicht zuverlässig das ScheduledTasks-Modul;
+            # schtasks.exe kann dort dieselbe einmalige SYSTEM-Aufgabe anlegen.
+            $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
+            if (-not (Test-Path -LiteralPath $schtasks -PathType Leaf)) {
+                throw 'Weder ScheduledTasks-Cmdlets noch schtasks.exe sind verfügbar.'
+            }
+            $startAt = (Get-Date).AddMinutes(1)
+            $startDate = $startAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
+            $startTime = $startAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+            $taskCommand = '"{0}" {1}' -f $localPowerShell, $arguments
+            $createOutput = & $schtasks /Create /TN $taskName /SC ONCE /SD $startDate /ST $startTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "Die JEA-Finalisierungsaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())"
+            }
+            $runOutput = & $schtasks /Run /TN $taskName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "Die JEA-Finalisierungsaufgabe konnte mit schtasks.exe nicht gestartet werden: $((@($runOutput) -join ' ').Trim())"
+            }
+        }
+        Write-SetupLog 'JEA-Registrierung wurde in eine lokale SYSTEM-Task ausgelagert.' 'SUCCESS'
+        $script:CertificateBootstrapHandoff = $true
+        exit 0
+    }
+
+    # === Stabiles JEA-Trägermodul erstellen (FIX aus v3.2)
+    # Verhindert "Role Capability not found" Fehler
+    # =========================================================
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "=== JEA Role Capability Setup ===" "INFO"
+    
+    $JeaModuleName = "JEA_Updates"
+    $JeaBaseDir    = "$env:ProgramFiles\WindowsPowerShell\Modules\$JeaModuleName"
+    $RoleCapDir    = Join-Path $JeaBaseDir "RoleCapabilities"
+
+    $JeaModuleFile = Join-Path $JeaBaseDir "$JeaModuleName.psm1"
+    if ([string]::IsNullOrWhiteSpace($DeploymentVersion)) {
+        # Die Verteilung übergibt die zentral ermittelte Version ausdrücklich.
+        # Das Setup wird auf älteren Zielsystemen als einzelne Datei ausgeführt;
+        # dort muss die Versionsfunktion aus dem übertragenen Fachmodul nicht
+        # zwingend im Skriptbereich verfügbar sein.
+        $deploymentVersionCommand = Get-Command -Name Get-WindowsUpdateAdmDeploymentVersion -ErrorAction SilentlyContinue
+        if (-not $deploymentVersionCommand) {
+            throw 'Keine WindowsUpdateAdm-Version übergeben und Get-WindowsUpdateAdmDeploymentVersion ist nicht verfügbar.'
+        }
+        $deploymentVersion = [string](Get-WindowsUpdateAdmDeploymentVersion)
+    } else {
+        $deploymentVersion = [string]$DeploymentVersion
+    }
+    if ([string]::IsNullOrWhiteSpace($deploymentVersion)) {
+        throw 'Die WindowsUpdateAdm-Bereitstellungsversion ist leer.'
+    }
+    $JeaModuleSource = New-WindowsUpdateAdmDeploymentStatusModuleSource -Version $deploymentVersion -TargetBuild $targetBuild -ClientCertificateUris $script:ClientCertificateEndpointUris
+    if (-not (Test-Path -LiteralPath $JeaBaseDir)) { New-Item -Path $JeaBaseDir -ItemType Directory -Force | Out-Null }
+    [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
+    Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"
+    
+    if (!(Test-Path $RoleCapDir)) { New-Item -Path $RoleCapDir -ItemType Directory -Force | Out-Null }
+    
+    $JeaManifest = Join-Path $JeaBaseDir "$JeaModuleName.psd1"
+    $manifestExists = Test-Path -LiteralPath $JeaManifest -PathType Leaf
+    $manifestNeedsRebuild = -not $manifestExists
+    if ($manifestExists) {
+        if ($ForceUpdate) {
+            $manifestNeedsRebuild = $true
+            Write-SetupLog 'Force-Update: JEA-Trägermodul-Manifest wird neu erstellt.' 'UPDATE'
+        } else {
+            try {
+                Test-ModuleManifest -Path $JeaManifest -ErrorAction Stop | Out-Null
+            }
+            catch {
+                $manifestNeedsRebuild = $true
+                $manifestLength = (Get-Item -LiteralPath $JeaManifest -ErrorAction Stop).Length
+                Write-SetupLog "Ungültiges JEA-Trägermodul-Manifest erkannt (Dateigröße: $manifestLength Byte); es wird gesichert und neu erstellt." 'WARN'
+            }
+        }
+    }
+
+    if ($manifestNeedsRebuild -and $manifestExists) {
+        $manifestBackupDirectory = Join-Path $env:ProgramData 'WindowsUpdateAdm\Logs'
+        if (-not (Test-Path -LiteralPath $manifestBackupDirectory -PathType Container)) {
+            New-Item -Path $manifestBackupDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        $manifestBackupPath = Join-Path $manifestBackupDirectory ("JEA_Updates.psd1.invalid-{0}.bak" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
+        Copy-Item -LiteralPath $JeaManifest -Destination $manifestBackupPath -ErrorAction Stop
+        Remove-Item -LiteralPath $JeaManifest -Force -ErrorAction Stop
+        Write-SetupLog "Vorheriges JEA-Manifest zur Diagnose gesichert: $manifestBackupPath" 'INFO'
+    }
+
+    if ($manifestNeedsRebuild) {
+        New-ModuleManifest -Path $JeaManifest `
+                           -RootModule "$JeaModuleName.psm1" `
+                           -Guid ([Guid]::NewGuid()) `
+                           -Author "IT-Administration" `
+                           -ModuleVersion "1.0" `
+                           -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus') `
+                           -Description "Stabiler JEA Endpunkt fuer Windows Update Verwaltung"
+        Write-SetupLog "JEA-Trägermodul-Manifest neu erstellt: $JeaManifest" 'SUCCESS'
+    } else {
+        try {
+            # Vorhandene Manifeste stammen teils aus älteren Verteilungen und
+            # enthielten weder RootModule noch den Export der Statusfunktion.
+            # Ohne beide Angaben wird die erzeugte .psm1 bei ModulesToImport
+            # nicht mit der Statusfunktion in die JEA-Sitzung geladen.
+            Update-ModuleManifest -Path $JeaManifest `
+                                  -RootModule "$JeaModuleName.psm1" `
+                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus') `
+                                  -ErrorAction Stop
+            Write-SetupLog "JEA-Trägermodul-Manifest aktualisiert (RootModule und Statusfunktion): $JeaManifest" "SUCCESS"
+        }
+        catch {
+            Write-SetupDiagnostic -Operation 'JEA-Trägermodul-Manifest' -ErrorRecord $_ -Context @("Path=$JeaManifest")
+            throw 'JEA-Trägermodul-Manifest konnte nicht auf die Statusfunktion aktualisiert werden; Details stehen im Setup-Protokoll.'
+        }
+    }
+
+    try {
+        Test-ModuleManifest -Path $JeaManifest -ErrorAction Stop | Out-Null
+        Write-SetupLog 'JEA-Trägermodul-Manifest ist gültig.' 'SUCCESS'
+    }
+    catch {
+        Write-SetupDiagnostic -Operation 'JEA-Trägermodul-Manifest validieren' -ErrorRecord $_ -Context @("Path=$JeaManifest")
+        throw 'Das JEA-Trägermodul-Manifest ist nach der Erstellung/Aktualisierung weiterhin ungültig.'
+    }
+    
+    # Role Capability Datei erstellen
+    $RoleCapabilityFile = Join-Path $RoleCapDir "WindowsUpdateRole.psrc"
+    $CheckRoleCapabilityFile = Join-Path $RoleCapDir "WindowsUpdateCheckRole.psrc"
+    
+    $VisibleCmdlets = @(
+        # Nur Updateverwaltung und die minimal für die Skriptblöcke nötigen
+        # Pipeline-/Ausgabebefehle veröffentlichen. Keine Registry-Schreib-,
+        # Modulimport-, Prozess-, Dienst-, WMI-/CIM- oder externen Befehle.
+        'Get-WindowsUpdate',
+        'Get-WURebootStatus',
+        'Get-Command',
+        'Select-Object',
+        'Where-Object',
+        'ForEach-Object',
+        'Write-Output',
+        'Write-Verbose',
+        'Write-Warning',
+        'Write-Host',
+        'Out-Null',
+        'Out-Default'
+    )
+    
+    Write-SetupLog "Erlaubte Cmdlets: $($VisibleCmdlets.Count)" "INFO"
+    
+    # New-PSRoleCapabilityFile hat keinen -Force Parameter -> Datei vorher loeschen
+    if (Test-Path $RoleCapabilityFile) {
+        Remove-Item -Path $RoleCapabilityFile -Force -ErrorAction Stop
+        Write-SetupLog "Alte Role Capability Datei entfernt" "INFO"
+    }
+    # ModuleVersion NICHT angeben - PowerShell findet das Modul sonst nicht wenn
+    # es unter einem anderen Pfad installiert ist (z.B. SYSTEM-Profil vs. ProgramFiles)
+    New-PSRoleCapabilityFile -Path $RoleCapabilityFile `
+                             -ModulesToImport @('PSWindowsUpdate', $JeaModuleName) `
+                             -VisibleCmdlets $VisibleCmdlets `
+                             -VisibleFunctions @('Get-WindowsUpdateAdmDeploymentStatus') `
+                             -VisibleExternalCommands @() `
+                             -VisibleAliases @()
+    Write-SetupLog "Role Capability erstellt: $RoleCapabilityFile" "SUCCESS"
+
+    # Für geplante Checks unter SYSTEM authentifiziert sich der Verwaltungsserver
+    # per Kerberos mit seinem Computerkonto. Diese Rolle erlaubt genau den vom
+    # Check verwendeten Get-WindowsUpdate-Aufruf und keine Installations-Cmdlets.
+    $checkRoleCmdlets = @(
+        @{
+            Name = 'Get-WindowsUpdate'
+            Parameters = @(@{ Name = 'MicrosoftUpdate' })
+        }
+    )
+    if (Test-Path -LiteralPath $CheckRoleCapabilityFile) {
+        Remove-Item -LiteralPath $CheckRoleCapabilityFile -Force -ErrorAction Stop
+    }
+    New-PSRoleCapabilityFile -Path $CheckRoleCapabilityFile `
+                             -ModulesToImport @('PSWindowsUpdate', $JeaModuleName) `
+                             -VisibleCmdlets $checkRoleCmdlets `
+                             -VisibleFunctions @('Get-WindowsUpdateAdmDeploymentStatus') `
+                             -VisibleExternalCommands @() `
+                             -VisibleAliases @()
+    Write-SetupLog "Eingeschränkte Check-Rolle erstellt: $CheckRoleCapabilityFile" "SUCCESS"
+    
+    # =========================================================
+    # === Session Configuration File erstellen (permanent im JEA-Modul)
+    # =========================================================
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "=== Session Configuration Setup ===" "INFO"
+    
+    $PermanentPSSC = Join-Path $JeaBaseDir "WindowsUpdateAdm.pssc"
+    
+    # New-PSSessionConfigurationFile hat keinen -Force Parameter -> Datei vorher loeschen
+    if (Test-Path $PermanentPSSC) {
+        Remove-Item -Path $PermanentPSSC -Force -ErrorAction Stop
+        Write-SetupLog "Alte Session Configuration Datei entfernt" "INFO"
+    }
+    # Windows Server 2016 (Build 14393) verarbeitet JEA mit
+    # RunAsVirtualAccount und WinRM-Clientzertifikaten nicht zuverlässig.
+    # Das betrifft ausschließlich Nicht-AD-Systeme. AD-Systeme behalten auch
+    # auf Server 2016 den virtuellen SYSTEM-Kontext, den Windows Update für
+    # Download und Installation benötigt.
+    $osBuild = [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber
+    $sessionConfigurationParameters = @{
+        Path              = $PermanentPSSC
+        SessionType       = 'Default'
+        ModulesToImport   = @('PSWindowsUpdate', $JeaModuleName)
+        ExecutionPolicy   = 'RemoteSigned'
+        LanguageMode      = 'ConstrainedLanguage'
+    }
+    if (-not $IsInDomain -and $osBuild -le 14393) {
+        Write-SetupLog "Windows Server 2016-Kompatibilitätsmodus: JEA verwendet den zertifikatsgemappten Administrator-Kontext." "WARN"
+    } else {
+        $sessionConfigurationParameters['RunAsVirtualAccount'] = $true
+        Write-SetupLog "JEA verwendet einen virtuellen SYSTEM-Kontext." "INFO"
+    }
+    New-PSSessionConfigurationFile @sessionConfigurationParameters
+    Write-SetupLog "Session Configuration File erstellt: $PermanentPSSC" "SUCCESS"
+    
+    # Sprachunabhängige SID-Auflösung für Administratoren
+    Write-SetupLog "Ermittle Administrators-Gruppe (SID S-1-5-32-544)..." "INFO"
+    try {
+        $AdminsSID  = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
+        $AdminsName = $AdminsSID.Translate([System.Security.Principal.NTAccount]).Value
+        Write-SetupLog "Administrators-Gruppe erkannt als: $AdminsName" "SUCCESS"
+    }
+    catch {
+        Write-SetupLog "SID-Aufloesung fehlgeschlagen, versuche Fallback..." "WARN"
+        foreach ($Name in @("$env:COMPUTERNAME\Administratoren","$env:COMPUTERNAME\Administrators","BUILTIN\Administratoren","BUILTIN\Administrators")) {
+            try {
+                $null = (New-Object System.Security.Principal.NTAccount($Name)).Translate([System.Security.Principal.SecurityIdentifier])
+                $AdminsName = $Name
+                Write-SetupLog "Administrators-Gruppe gefunden: $AdminsName" "SUCCESS"
+                break
+            } catch { continue }
+        }
+        if (-not $AdminsName) {
+            $AdminsName = "BUILTIN\Administrators"
+            Write-SetupLog "Fallback auf: $AdminsName" "WARN"
+        }
+    }
+    
+    # PSSC-Datei einlesen und RoleDefinitions hinzufügen
+    Write-SetupLog "Fuege RoleDefinitions zur Session Configuration hinzu..." "INFO"
+    $PsscContent = Get-Content $PermanentPSSC -Raw
+    
+    # Vorhandene RoleDefinitions entfernen, um Duplikate zu vermeiden
+    $PsscContent = $PsscContent -replace 'RoleDefinitions = @\{.*?\}', ''
+    
+    $checkRoleDefinition = ''
+    if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
+        if ($ManagementComputerAccount -notmatch '^[^\\]+\\[^\\]+\$$') {
+            throw "Ungültiges Verwaltungsserver-Computerkonto: '$ManagementComputerAccount'. Erwartet wird DOMAIN\COMPUTER$."
+        }
+        if ($ManagementComputerSid -notmatch '^S-1-5-21-(?:\d+-){3}\d+$') {
+            throw "Ungültige oder fehlende SID für das Verwaltungsserver-Computerkonto '$ManagementComputerAccount': '$ManagementComputerSid'. Die SID muss zentral aus AD übergeben werden."
+        }
+
+        # Windows PowerShell 5.1 versucht beim Registrieren einer PSSC,
+        # RoleDefinitions-Schlüssel selbst per NTAccount in SIDs umzuwandeln.
+        # Bei einem defekten/gestörten Domänen-Trust scheitert das selbst dann,
+        # wenn eine explizite Endpoint-SDDL mit der bereits bekannten SID
+        # übergeben wird. Deshalb wird die Rolle an eine lokale Gruppe gebunden
+        # und die vom Verwaltungsserver zentral gelesene SID direkt als
+        # Gruppenmitglied eingetragen (ohne Namensauflösung).
+        $checkGroupName = 'WindowsUpdateAdmCheck'
+        $localComputerEntry = [ADSI]("WinNT://$env:COMPUTERNAME,computer")
+        try {
+            $checkGroup = $localComputerEntry.Children.Find($checkGroupName, 'group')
+        }
+        catch {
+            $checkGroup = $localComputerEntry.Create('group', $checkGroupName)
+            $checkGroup.SetInfo()
+            Write-SetupLog "Lokale JEA-Gruppe erstellt: $checkGroupName" "SUCCESS"
+        }
+
+        $nativeClassName = 'WUAdmNetApi_' + [guid]::NewGuid().ToString('N')
+        $nativeSource = @"
+using System;
+using System.Runtime.InteropServices;
+public static class $nativeClassName
+{
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    public static extern int NetLocalGroupAddMembers(string servername, string groupname, int level, IntPtr buffer, int totalentries);
+}
+"@
+        $nativeType = Add-Type -TypeDefinition $nativeSource -PassThru -ErrorAction Stop
+        $managerSidObject = [System.Security.Principal.SecurityIdentifier]::new($ManagementComputerSid)
+        $managerSidBytes = New-Object byte[] $managerSidObject.BinaryLength
+        $managerSidObject.GetBinaryForm($managerSidBytes, 0)
+        $sidPointer = [IntPtr]::Zero
+        $memberInfoPointer = [IntPtr]::Zero
+        try {
+            $sidPointer = [Runtime.InteropServices.Marshal]::AllocHGlobal($managerSidBytes.Length)
+            [Runtime.InteropServices.Marshal]::Copy($managerSidBytes, 0, $sidPointer, $managerSidBytes.Length)
+            $memberInfoPointer = [Runtime.InteropServices.Marshal]::AllocHGlobal([IntPtr]::Size)
+            [Runtime.InteropServices.Marshal]::WriteIntPtr($memberInfoPointer, $sidPointer)
+            $addMemberMethod = $nativeType.GetMethod('NetLocalGroupAddMembers')
+            $addMemberResult = $addMemberMethod.Invoke($null, [object[]]@($null, $checkGroupName, 0, $memberInfoPointer, 1))
+            if ($addMemberResult -notin 0, 1378) {
+                throw "Verwaltungsserver-SID konnte nicht zur lokalen JEA-Gruppe hinzugefügt werden (NetLocalGroupAddMembers: $addMemberResult)."
+            }
+        }
+        finally {
+            if ($memberInfoPointer -ne [IntPtr]::Zero) {
+                [Runtime.InteropServices.Marshal]::FreeHGlobal($memberInfoPointer)
+            }
+            if ($sidPointer -ne [IntPtr]::Zero) {
+                [Runtime.InteropServices.Marshal]::FreeHGlobal($sidPointer)
+            }
+        }
+
+        $checkRolePrincipal = "$env:COMPUTERNAME\$checkGroupName"
+        $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        if ([int]$operatingSystem.ProductType -eq 2) {
+            # Domänencontroller besitzen keine lokale SAM. Die dort erstellte
+            # Gruppe wird im Domänenkontext geführt, daher ist COMPUTERNAME\Gruppe
+            # für RoleDefinitions nicht auflösbar. Den kanonischen Namen aus der
+            # Gruppen-SID ermitteln, statt einen Domänennamen fest einzutragen.
+            $checkGroup.RefreshCache(@('objectSid'))
+            $checkGroupSidBytes = [byte[]]$checkGroup.Properties['objectSid'].Value
+            if (-not $checkGroupSidBytes -or $checkGroupSidBytes.Length -eq 0) {
+                throw "Die SID der JEA-Prüfgruppe '$checkGroupName' konnte auf dem Domänencontroller nicht gelesen werden."
+            }
+            $checkGroupSid = [System.Security.Principal.SecurityIdentifier]::new($checkGroupSidBytes, 0)
+            $checkRolePrincipal = $checkGroupSid.Translate([System.Security.Principal.NTAccount]).Value
+            if ([string]::IsNullOrWhiteSpace($checkRolePrincipal) -or
+                $checkRolePrincipal -notmatch ('\\' + [regex]::Escape($checkGroupName) + '$')) {
+                throw "Die JEA-Prüfgruppe konnte auf dem Domänencontroller nicht in einen gültigen Kontonamen übersetzt werden: '$checkRolePrincipal'."
+            }
+            Write-SetupLog "Domänencontroller erkannt; JEA-Prüfgruppe über SID als '$checkRolePrincipal' aufgelöst." 'INFO'
+        }
+        $escapedCheckRolePrincipal = $checkRolePrincipal.Replace("'", "''")
+        $checkRoleDefinition = @"
+    '$escapedCheckRolePrincipal' = @{
+        RoleCapabilities = 'WindowsUpdateCheckRole'
+    }
+"@
+        Write-SetupLog "Verwaltungsserver $ManagementComputerAccount (SID $ManagementComputerSid) ist Mitglied der lokalen JEA-Gruppe $checkGroupName; diese erhält ausschließlich die eingeschränkte Abfrage-Rolle." "INFO"
+    }
+
+    $certificateRoleDefinition = ''
+    if (-not [string]::IsNullOrWhiteSpace($script:CertificateMappedPrincipal)) {
+        $escapedCertificatePrincipal = $script:CertificateMappedPrincipal.Replace("'", "''")
+        $certificateRoleDefinition = @"
+    '$escapedCertificatePrincipal' = @{
+        RoleCapabilities = 'WindowsUpdateRole'
+    }
+"@
+    }
+
+    $RoleDefinitionsBlock = @"
+
+# Role Definitions for WindowsUpdateRole
+RoleDefinitions = @{
+    '$AdminsName' = @{
+        RoleCapabilities = 'WindowsUpdateRole'
+    }
+$checkRoleDefinition$certificateRoleDefinition}
+"@
+    $PsscContent = [regex]::Replace(
+        $PsscContent,
+        '(\s*)}\s*$',
+        [System.Text.RegularExpressions.MatchEvaluator]{
+            param($match)
+            $RoleDefinitionsBlock + "`n" + $match.Groups[1].Value + '}'
+        }
+    )
+    Set-Content -Path $PermanentPSSC -Value $PsscContent -Force
+    Write-SetupLog "RoleDefinitions erfolgreich eingefuegt" "SUCCESS"
+    
+    # =========================================================
+    # === WinRM / Session Configuration registrieren
+    # =========================================================
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "=== WinRM Endpunkt Registrierung ===" "INFO"
+    
+    $ExistingConfig    = Get-PSSessionConfiguration -Name 'WindowsUpdateAdm' -ErrorAction SilentlyContinue
+    $NeedWinRMRestart  = $false
+    
+    if ($ExistingConfig) {
+        Write-SetupLog "Entferne alte Configuration..." "INFO"
+        try {
+            Unregister-PSSessionConfiguration -Name 'WindowsUpdateAdm' -NoServiceRestart -Force -Confirm:$false -ErrorAction Stop
+            Write-SetupLog "Alte Configuration entfernt" "SUCCESS"
+            $NeedWinRMRestart = $true
+        }
+        catch {
+            Write-SetupLog 'Alte WinRM-Endpunktregistrierung konnte nicht entfernt werden; Details im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'WinRM-Endpunktbereinigung' -ErrorRecord $_
+            $NeedWinRMRestart = $true
+        }
+    }
+    
+    # Prüfe WinRM-Plugin direkt
+    try {
+        $winrmCheckOutput = @(& winrm get 'winrm/config/plugin?Name=WindowsUpdateAdm' 2>&1)
+        $winrmCheckExitCode = $LASTEXITCODE
+        if ($winrmCheckExitCode -eq 0) {
+            Write-SetupLog "Plugin in WinRM gefunden, entferne..." "INFO"
+            $winrmDeleteOutput = @(& winrm delete 'winrm/config/plugin?Name=WindowsUpdateAdm' 2>&1)
+            $winrmDeleteExitCode = $LASTEXITCODE
+            if ($winrmDeleteExitCode -ne 0) {
+                $deleteDetails = ($winrmDeleteOutput | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ' | '
+                Write-SetupLog "Altes WinRM-Plugin konnte nicht entfernt werden (Exit-Code $winrmDeleteExitCode); Setup wird abgebrochen." "ERROR"
+                if ($deleteDetails) { Write-SetupLog "winrm delete-Ausgabe: $deleteDetails" "INFO" -LogOnly }
+                throw "winrm delete für WindowsUpdateAdm ist mit Exit-Code $winrmDeleteExitCode fehlgeschlagen."
+            }
+            Write-SetupLog "Plugin aus WinRM entfernt" "SUCCESS"
+            $NeedWinRMRestart = $true
+        } else {
+            Write-SetupLog "winrm get für das alte Plugin lieferte Exit-Code $winrmCheckExitCode; Ausgabe wird zur Diagnose protokolliert." "INFO" -LogOnly
+            foreach ($line in $winrmCheckOutput) {
+                $lineText = ([string]$line).Trim()
+                if ($lineText) { Write-SetupLog "winrm get-Ausgabe: $lineText" "INFO" -LogOnly }
+            }
+        }
+    } catch {
+        Write-SetupLog 'Prüfung oder Bereinigung des alten WinRM-Plugins ist fehlgeschlagen; Setup wird abgebrochen.' 'ERROR'
+        Write-SetupDiagnostic -Operation 'WinRM-Pluginprüfung und -bereinigung' -ErrorRecord $_
+        throw
+    }
+    
+    if ($NeedWinRMRestart) {
+        if ($IsRemoteSetup) {
+            Write-SetupLog "WinRM-Neustart wird bis zum Abschluss des Remote-Setups verschoben." "INFO"
+        } else {
+            Write-SetupLog "Starte WinRM neu..." "INFO"
+            Restart-Service WinRM -Force -ErrorAction Stop
+            Start-Sleep -Seconds 5
+            if ((Get-Service WinRM).Status -ne 'Running') {
+                Start-Service WinRM -ErrorAction Stop
+                Start-Sleep -Seconds 3
+            }
+            Write-SetupLog "WinRM neu gestartet" "SUCCESS"
+        }
+    }
+    
+    # Neue Configuration registrieren
+    Write-SetupLog "Registriere WindowsUpdateAdm Configuration..." "INFO"
+    # PowerShell 7 (insbesondere die AppX-/Store-Version) verwendet für
+    # Register-PSSessionConfiguration einen eigenen, geschützten SessionConfig-
+    # Pfad. JEA/WinRM-Konfigurationen müssen deshalb auch bei einem lokalen
+    # Start aus PowerShell 7 über Windows PowerShell 5.1 registriert werden.
+    # Die Cmdlets geben dabei pauschale Neustart-/Trennungswarnungen aus,
+    # obwohl -NoServiceRestart gesetzt ist und der Neustart unten gezielt
+    # gesteuert wird. Nur diese vorsorglichen Warnungen werden unterdrückt;
+    # Fehler bleiben durch -ErrorAction Stop sichtbar.
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $windowsPowerShell)) {
+            throw "Windows PowerShell 5.1 wurde nicht gefunden: $windowsPowerShell"
+        }
+        $jeaAclEntries = @('(A;;GA;;;BA)')
+        if (-not [string]::IsNullOrWhiteSpace($ManagementComputerSid)) {
+            $jeaAclEntries += "(A;;GXGR;;;$ManagementComputerSid)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($script:CertificateMappingSid)) {
+            $jeaAclEntries += "(A;;GXGR;;;$script:CertificateMappingSid)"
+        }
+        $jeaSecurityDescriptorSddl = 'O:NSG:BAD:P{0}S:P(AU;FA;GA;;;WD)(AU;SA;GXGW;;;WD)' -f ($jeaAclEntries -join '')
+        $registrationScript = @"
+`$ErrorActionPreference = 'Stop'
+Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC.Replace("'", "''"))' -SecurityDescriptorSddl '$jeaSecurityDescriptorSddl' -NoServiceRestart -Confirm:`$false -WarningAction SilentlyContinue -ErrorAction Stop
+"@
+        $registrationEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($registrationScript))
+        $registrationProcess = Start-Process -FilePath $windowsPowerShell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand',$registrationEncoded) -Wait -PassThru -WindowStyle Hidden
+        if ($registrationProcess.ExitCode -ne 0) {
+            throw "Register-PSSessionConfiguration über Windows PowerShell 5.1 fehlgeschlagen (Exit-Code $($registrationProcess.ExitCode))."
+        }
+        Write-SetupLog "Configuration über Windows PowerShell 5.1 registriert" "SUCCESS"
+    }
+    else {
+        $jeaAclEntries = @('(A;;GA;;;BA)')
+        if (-not [string]::IsNullOrWhiteSpace($ManagementComputerSid)) {
+            $jeaAclEntries += "(A;;GXGR;;;$ManagementComputerSid)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($script:CertificateMappingSid)) {
+            $jeaAclEntries += "(A;;GXGR;;;$script:CertificateMappingSid)"
+        }
+        $jeaSecurityDescriptorSddl = 'O:NSG:BAD:P{0}S:P(AU;FA;GA;;;WD)(AU;SA;GXGW;;;WD)' -f ($jeaAclEntries -join '')
+        Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' `
+                                        -Path $PermanentPSSC `
+                                        -SecurityDescriptorSddl $jeaSecurityDescriptorSddl `
+                                        -NoServiceRestart `
+                                        -Confirm:$false `
+                                        -WarningAction SilentlyContinue `
+                                        -ErrorAction Stop
+    }
+    Write-SetupLog "Configuration registriert" "SUCCESS"
+    
+    # WinRM Service neu starten zur Aktivierung
+    if ($IsRemoteSetup) {
+        Write-SetupLog "Plane WinRM-Neustart nach Abschluss der Remote-Verbindung..." "INFO"
+        # Siehe oben: stets die Windows-PowerShell-Binärdatei, nie einen
+        # PowerShell-7-AppX-Alias, für WinRM- und JEA-Systemaufgaben nutzen.
+        $psExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $psExe)) {
+            throw "Windows PowerShell 5.1 wurde nicht gefunden: $psExe"
+        }
+        Start-Process -FilePath $psExe `
+            -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 15; Restart-Service WinRM -Force"' `
+            -WindowStyle Hidden
+        Write-SetupLog "Configuration wird nach dem verzögerten WinRM-Neustart aktiviert." "SUCCESS"
+    } else {
+        Write-SetupLog "Aktiviere Configuration durch WinRM Neustart..." "INFO"
+        Restart-Service WinRM -Force -ErrorAction Stop
+        Start-Sleep -Seconds 3
+        Write-SetupLog "Configuration aktiviert" "SUCCESS"
+    }
+    
+    # =========================================================
+    # === Finaler Verbindungstest
+    # =========================================================
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "=== Finaler Verbindungstest ===" "INFO"
+    
+    # Pruefe ob der Endpunkt korrekt registriert ist (ohne Loopback-Verbindung)
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $probeRoot = Join-Path ([IO.Path]::GetTempPath()) ('WindowsUpdateAdm-Probe-{0}' -f [guid]::NewGuid().ToString('N'))
+        $probeOutputPath = Join-Path $probeRoot 'stdout.txt'
+        $probeErrorPath = Join-Path $probeRoot 'stderr.txt'
+        $probeProcess = $null
+        try {
+            if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+                throw "Windows PowerShell 5.1 wurde nicht gefunden: $windowsPowerShell"
+            }
+            New-Item -ItemType Directory -Path $probeRoot -Force -ErrorAction Stop | Out-Null
+            $probeCommand = "(Get-PSSessionConfiguration -Name 'WindowsUpdateAdm' -ErrorAction SilentlyContinue).Name"
+            $encodedProbeCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeCommand))
+            $probeProcess = Start-Process -FilePath $windowsPowerShell `
+                -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedProbeCommand) `
+                -Wait -PassThru -WindowStyle Hidden `
+                -RedirectStandardOutput $probeOutputPath -RedirectStandardError $probeErrorPath -ErrorAction Stop
+            $registrationProbe = if (Test-Path -LiteralPath $probeOutputPath -PathType Leaf) {
+                @(Get-Content -LiteralPath $probeOutputPath -ErrorAction SilentlyContinue)
+            } else { @() }
+            if ($probeProcess.ExitCode -ne 0) {
+                $probeErrorText = if (Test-Path -LiteralPath $probeErrorPath -PathType Leaf) {
+                    (Get-Content -LiteralPath $probeErrorPath -Raw -ErrorAction SilentlyContinue).Trim()
+                } else { '' }
+                Write-SetupLog "WARN: PowerShell-5.1-Endpunktprüfung endete mit Exitcode $($probeProcess.ExitCode). $probeErrorText" 'WARN'
+            }
+        }
+        finally {
+            if ($probeProcess) { $probeProcess.Dispose() }
+            Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $RegisteredConfig = if (@($registrationProbe) -contains 'WindowsUpdateAdm') { [PSCustomObject]@{ Name = 'WindowsUpdateAdm' } } else { $null }
+    }
+    else {
+        $RegisteredConfig = Get-PSSessionConfiguration -Name 'WindowsUpdateAdm' -ErrorAction SilentlyContinue
+    }
+    $RoleCapExists    = Test-Path (Join-Path $RoleCapDir "WindowsUpdateRole.psrc")
+    $PSSCExists       = Test-Path $PermanentPSSC
+    
+    if ($RegisteredConfig -and $RoleCapExists -and $PSSCExists) {
+        Write-SetupLog "Endpunkt registriert: $($RegisteredConfig.Name)" "SUCCESS"
+        Write-SetupLog "Role Capability vorhanden: $RoleCapabilityFile" "SUCCESS"
+        Write-SetupLog "Session Config vorhanden: $PermanentPSSC" "SUCCESS"
+        
+        if ($FinalizeJEA) {
+            # Die einmalige JEA-Registrierung läuft als SYSTEM. Dieses Konto
+            # ist nicht zwangsläufig durch die auf Administratoren begrenzte
+            # Endpunkt-ACL zugelassen; ein lokaler WinRM-Aufruf würde daher
+            # AccessDenied melden, obwohl der Endpunkt korrekt registriert ist.
+            # Die tatsächliche Erreichbarkeit wird vom Verwaltungsserver aus
+            # über die konfigurierte WinRM-Authentifizierung geprüft.
+            Write-SetupLog 'Lokaler Loopback-Test im SYSTEM-Finalisierungskontext übersprungen; Endpunktprüfung erfolgt vom Verwaltungsserver.' 'INFO'
+        } else {
+            # Bei einem lokalen, interaktiven Setup ist der Loopback-Test
+            # aussagekräftig. Ein Fehler bleibt eine Warnung, kein K.O.-Kriterium.
+            try {
+                $TestResult = Invoke-Command -ComputerName localhost -ConfigurationName WindowsUpdateAdm `
+                                             -ScriptBlock { Get-Command Get-WindowsUpdate } `
+                                             -ErrorAction Stop
+                Write-SetupLog "Loopback-Verbindungstest erfolgreich - Get-WindowsUpdate erreichbar" "SUCCESS"
+            }
+            catch {
+                Write-SetupLog 'Lokaler Loopback-Test nicht möglich; der Endpunkt ist registriert, externer Verbindungstest erforderlich.' 'WARN'
+                Write-SetupDiagnostic -Operation 'WinRM-Loopback-Test' -ErrorRecord $_ -Context @('RemoteSetup=False', 'FinalizeJEA=False')
+            }
+        }
+    } else {
+        $Missing = @()
+        if (-not $RegisteredConfig) { $Missing += "PSSessionConfiguration nicht registriert" }
+        if (-not $RoleCapExists)    { $Missing += "Role Capability fehlt: $RoleCapabilityFile" }
+        if (-not $PSSCExists)       { $Missing += "PSSC-Datei fehlt: $PermanentPSSC" }
+        throw "Konfiguration unvollstaendig: $($Missing -join '; ')"
+    }
+
+    if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting) {
+        Restore-WindowsUpdateLocalAccountTokenFilterPolicy `
+            -WasPresent:$script:OriginalTokenFilterPolicyPresent `
+            -Value $script:OriginalTokenFilterPolicyValue `
+            -Reason 'JEA-Endpunkt erfolgreich finalisiert; ursprünglicher Registryzustand wiederhergestellt'
+    }
+    
+    # =========================================================
+    # === Finale Übersicht
+    # =========================================================
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "============================================================" "SUCCESS"
+    if ($FinalizeJEA) {
+        Write-SetupLog "Lokales Setup abgeschlossen; zentrale Endpunktprüfung folgt (WindowsUpdateAdm-Bereitstellungsversion $deploymentVersion)." "INFO"
+    } else {
+        Write-SetupLog "Setup erfolgreich abgeschlossen! (WindowsUpdateAdm-Bereitstellungsversion $deploymentVersion)." "SUCCESS"
+    }
+    Write-SetupLog "============================================================" "SUCCESS"
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "=== Installierte Versionen ===" "INFO"
+    
+    $NuGetProvider = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+        Sort-Object Version -Descending | Select-Object -First 1
+    if ($NuGetProvider) {
+        Write-SetupLog "NuGet Provider: $($NuGetProvider.Version)" "INFO"
+    } elseif ($offlineModulesPresent) {
+        Write-SetupLog 'NuGet Provider: nicht installiert (Offline-Modulpakete verwendet; auf dem Ziel nicht erforderlich).' 'INFO'
+    } else {
+        Write-SetupLog 'NuGet Provider: nicht verfügbar; Online-Modulpflege auf diesem Ziel ist eingeschränkt.' 'WARN'
+    }
+    
+    foreach ($TargetBase in @($PS5Path, $PS7Path)) {
+    $Label = if ($TargetBase -contains "WindowsPowerShell") { "PS 5.1" } else { "PS 7  " }
+    if (Test-Path $TargetBase) {
+        # Wir schauen direkt nach den Versionsordnern (Zahlen)
+        $Versions = Get-ChildItem -Path $TargetBase -Directory | 
+                    Where-Object { $_.Name -match '^\d+(\.\d+)*' } | 
+                    Sort-Object { [version]$_.Name } -Descending
+        
+        if ($Versions) {
+            Write-SetupLog "PSWindowsUpdate ($Label): $($Versions[0].Name)" "INFO"
+        } else {
+            Write-SetupLog "PSWindowsUpdate ($Label): Ordner leer/keine Version" "WARN"
+        }
+    } else {
+        Write-SetupLog "PSWindowsUpdate ($Label): Nicht installiert" "WARN"
+    }
+}
+
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "=== Configuration Details ===" "INFO"
+    $Config = Get-PSSessionConfiguration -Name 'WindowsUpdateAdm' -ErrorAction SilentlyContinue
+    if ($Config) {
+        Write-SetupLog "Name:      $($Config.Name)" "INFO"
+        Write-SetupLog "PSVersion: $($Config.PSVersion)" "INFO"
+        Write-SetupLog "RunAsUser: Virtual Account - SYSTEM" "INFO"
+        Write-SetupLog "JEA-Modul: $JeaBaseDir" "INFO"
+        Write-SetupLog "Permission: $($Config.Permission)" "INFO"
+    }
+
+    if (-not $IsInDomain) {
+        $winrmCert = Get-ChildItem "Cert:\LocalMachine\My" |
+            Where-Object { $_.Subject -eq "CN=$env:COMPUTERNAME" } |
+            Sort-Object NotAfter -Descending | Select-Object -First 1
+        if ($winrmCert) {
+            Write-SetupLog "" "INFO"
+            Write-SetupLog "=== WinRM HTTPS Zertifikat ===" "INFO"
+            Write-SetupLog "Thumbprint: $($winrmCert.Thumbprint)" "INFO"
+            Write-SetupLog "Gültig bis: $($winrmCert.NotAfter.ToString('yyyy-MM-dd'))" "INFO"
+        }
+    }
+    
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "=== Test-Befehle ===" "INFO"
+    Write-SetupLog "PowerShell 5.1:" "INFO"
+    Write-SetupLog "  powershell.exe -Command `"Invoke-Command -ComputerName $env:COMPUTERNAME -ConfigurationName WindowsUpdateAdm -ScriptBlock { Get-WindowsUpdate }`"" "INFO"
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "PowerShell 7:" "INFO"
+    Write-SetupLog "  pwsh.exe -Command `"Invoke-Command -ComputerName $env:COMPUTERNAME -ConfigurationName WindowsUpdateAdm -ScriptBlock { Get-WindowsUpdate }`"" "INFO"
+    Write-SetupLog "" "INFO"
+
+    # Nicht-AD-Ziele werden ausschließlich von
+    # Verteilung_WindowsUpdateAdmConfig.ps1 per WinRM eingerichtet.
+
+    $script:SetupSucceeded = $true
+    exit 0
+}
+catch {
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "============================================================" "ERROR"
+    Write-SetupLog "             FEHLER beim Setup                              " "ERROR"
+    Write-SetupLog "============================================================" "ERROR"
+    Write-SetupLog "" "INFO"
+    Write-SetupLog "Setup fehlgeschlagen; vollständige Diagnose: $script:SetupLogPath" 'ERROR'
+    Write-SetupDiagnostic -Operation 'WindowsUpdateAdm-Setup' -ErrorRecord $_
+    Write-SetupLog "" "INFO"
+    
+    exit 1
+}
+finally {
+    # Ein abgebrochener Bootstrap darf die globale Remote-UAC-Ausnahme nicht
+    # offen lassen. Der ursprüngliche Zustand (gesetzt oder nicht gesetzt)
+    # wird exakt wiederhergestellt.
+    if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting -and
+        ($FinalizeJEA -or -not $script:CertificateBootstrapHandoff)) {
+        try {
+            Restore-WindowsUpdateLocalAccountTokenFilterPolicy `
+                -WasPresent:$script:OriginalTokenFilterPolicyPresent `
+                -Value $script:OriginalTokenFilterPolicyValue `
+                -Reason 'Sicherheitsrückstellung im Finally-Pfad; ursprünglicher Zustand wiederhergestellt'
+        }
+        catch {
+            Write-SetupLog 'FEHLER: ursprüngliche LocalAccountTokenFilterPolicy konnte im Finally-Pfad nicht wiederhergestellt werden.' 'ERROR'
+            Write-SetupDiagnostic -Operation 'Remote-UAC-Bootstrap zurückstellen' -ErrorRecord $_ -Context @("OriginalPresent=$($script:OriginalTokenFilterPolicyPresent)", "OriginalValue=$($script:OriginalTokenFilterPolicyValue)", "FinalizeJEA=$FinalizeJEA")
+        }
+    }
+
+    # Die SYSTEM-Task wird nur für die finale lokale JEA-Registrierung
+    # angelegt und darf nach jedem Lauf – auch nach einem Fehler – nicht
+    # bestehen bleiben.
+    if ($FinalizeJEA) {
+        try {
+            $unregisterCommand = Get-Command -Name Unregister-ScheduledTask -ErrorAction SilentlyContinue
+            if ($unregisterCommand) {
+                $existingTask = $null
+                try { $existingTask = Get-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -ErrorAction Stop }
+                catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }
+                if ($existingTask) {
+                    Unregister-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -Confirm:$false -ErrorAction Stop
+                    $remainingTask = $null
+                    try { $remainingTask = Get-ScheduledTask -TaskName 'WindowsUpdateAdm-Finalize' -ErrorAction Stop }
+                    catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }
+                    if ($remainingTask) {
+                        throw 'Die temporäre JEA-Finalisierungsaufgabe ist nach dem Entfernen weiterhin registriert.'
+                    }
+                }
+            }
+            else {
+                # Windows 7 bereinigt die einmalige Finalisierungsaufgabe über schtasks.exe.
+                $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
+                if (Test-Path -LiteralPath $schtasks -PathType Leaf) {
+                    $queryOutput = @(& $schtasks /Query /TN 'WindowsUpdateAdm-Finalize' 2>&1)
+                    $queryExitCode = $LASTEXITCODE
+                    if ($queryExitCode -eq 0) {
+                        $deleteOutput = @(& $schtasks /Delete /TN 'WindowsUpdateAdm-Finalize' /F 2>&1)
+                        $deleteExitCode = $LASTEXITCODE
+                        if ($deleteExitCode -ne 0) {
+                            throw "schtasks.exe konnte die temporäre JEA-Finalisierungsaufgabe nicht löschen (Exitcode $deleteExitCode): $($deleteOutput -join ' ')"
+                        }
+                    }
+                    elseif (($queryOutput -join ' ') -notmatch '(?i)(cannot find|does not exist|nicht gefunden|existiert nicht)') {
+                        throw "Vorhandensein der temporären JEA-Finalisierungsaufgabe konnte nicht geprüft werden (Exitcode $queryExitCode): $($queryOutput -join ' ')"
+                    }
+                }
+            }
+        }
+        catch {
+            Write-SetupLog 'WARN: Temporäre JEA-Finalisierungsaufgabe konnte nicht sicher entfernt werden; Details stehen im Setup-Protokoll.' 'WARN'
+            Write-SetupDiagnostic -Operation 'Temporäre JEA-Finalisierungsaufgabe entfernen' -ErrorRecord $_ -Context 'FinalizeJEA=true'
+        }
+    }
+    # Zertifikatsvalidierung in jedem Fall wiederherstellen
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $OriginalCertificateCallback
+
+    # Nach einem erfolgreichen Setup bleibt pro Ziel nur das neueste
+    # Setup-Protokoll erhalten. Bei Fehlern bleiben ältere Logs zur Diagnose.
+    if ($script:SetupSucceeded -and $script:SetupLogPath) {
+        try {
+            $setupLogDirectory = Split-Path -Parent $script:SetupLogPath
+            $retention = Invoke-WindowsUpdateFileRetention `
+                -Directory $setupLogDirectory `
+                -Filter ("Setup_{0}_*.log" -f $env:COMPUTERNAME) `
+                -KeepFiles 1
+            if (@($retention.FailedFiles).Count -gt 0) {
+                Write-Verbose 'Ältere erfolgreiche Setup-Protokolle konnten nicht vollständig bereinigt werden.'
+            }
+        }
+        catch {
+            Write-Verbose "Ältere erfolgreiche Setup-Protokolle konnten nicht bereinigt werden: $($_.Exception.Message)"
+        }
+    }
+}
+) {
+                        Write-SetupLog "Paketgebundene Windows-App-Regel nicht als allgemeine WinRM-HTTPS-Freigabe gewertet: Name=$($candidateRule.Name); Anzeige=$($candidateRule.DisplayName)." 'INFO'
+                        continue
+                    }
+
                     # Port=Any ist bei anwendungs- oder dienstgebundenen
                     # Regeln kein pauschaler WinRM-Zugriff. Nur Regeln, die
                     # System/svchost/WinRM treffen können, werden weiter als
