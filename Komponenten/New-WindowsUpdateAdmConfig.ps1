@@ -795,7 +795,11 @@ try {
         # Zertifikatskanal bleibt sie deaktiviert.
         try {
             $regPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-            $tokenFilterValue = (Get-ItemProperty -LiteralPath $regPath -Name LocalAccountTokenFilterPolicy -ErrorAction SilentlyContinue).LocalAccountTokenFilterPolicy
+            $tokenFilterSettings = Get-ItemProperty -LiteralPath $regPath -ErrorAction SilentlyContinue
+            $tokenFilterProperty = if ($null -ne $tokenFilterSettings) {
+                $tokenFilterSettings.PSObject.Properties['LocalAccountTokenFilterPolicy']
+            } else { $null }
+            $tokenFilterValue = if ($null -ne $tokenFilterProperty) { $tokenFilterProperty.Value } else { $null }
             if ($TemporaryLocalAccountBootstrap -and $EnableClientCertificateRemoting) {
                 # Einen vorhandenen lokalen Override vorübergehend entfernen;
                 # der SYSTEM-Finalizer stellt danach den Windows-Standard her.
@@ -934,14 +938,10 @@ try {
                     try {
                         # Diese Anmeldedaten wurden vom Aufrufer verwendet, wenn
                         # die Client-Zertifikatsverbindung nicht funktioniert hat.
-                        # Daher alle Einträge dieses Zertifikats (Issuer-Thumbprint)
-                        # und alle kollidierenden Subject-Einträge ersetzen, auch
-                        # wenn Subject und Issuer schon passen: das gespeicherte
-                        # WinRM-Passwort kann veraltet oder die Zuordnung mehrdeutig sein.
-                        $staleMappings = @($subjectMappings + $issuerMappings | Sort-Object -Property PSPath -Unique)
-                        foreach ($staleMapping in $staleMappings) {
-                            Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
-                        }
+                        # Zuerst exacte Mappings einrichten und verifizieren,
+                        # solange ein altes Mapping den Bootstrap-Zugang noch
+                        # ermöglicht. Erst danach Wildcards und kollidierende
+                        # Zuordnungen entfernen.
                         $mappingCredential = New-Object System.Management.Automation.PSCredential(
                             $localUser,
                             $CertificateMappingCredential.Password
@@ -969,7 +969,7 @@ try {
                             })
                         $verifiedUris = @($verifiedMappings | ForEach-Object { Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'URI' })
                         $missingVerifiedUris = @($script:ClientCertificateEndpointUris | Where-Object { $_ -notin $verifiedUris })
-                        if ($verifiedMappings.Count -ne $script:ClientCertificateEndpointUris.Count -or $missingVerifiedUris.Count -gt 0 -or $remainingIssuerMappings.Count -ne $script:ClientCertificateEndpointUris.Count) {
+                        if ($verifiedMappings.Count -ne $script:ClientCertificateEndpointUris.Count -or $missingVerifiedUris.Count -gt 0) {
                             $mappingDetails = @($issuerMappings | ForEach-Object {
                                 'Subject={0}; URI={1}; Issuer={2}; UserName={3}' -f `
                                     (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject'), `
@@ -979,18 +979,27 @@ try {
                             }) -join ' | '
                             throw "Zertifikatsmapping ist nach dem Anlegen nicht eindeutig (gültige Zuordnungen: $($verifiedMappings.Count); Einträge für Zertifikat: $($remainingIssuerMappings.Count); erwartet: $($script:ClientCertificateEndpointUris.Count)). Vorhandene Einträge: $mappingDetails"
                         }
+                        $verifiedMappingPaths = @($verifiedMappings | ForEach-Object { $_.PSPath })
+                        $staleMappings = @($subjectMappings + $issuerMappings | Where-Object {
+                            $_.PSPath -notin $verifiedMappingPaths
+                        } | Sort-Object -Property PSPath -Unique)
+                        foreach ($staleMapping in $staleMappings) {
+                            Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
+                        }
+                        $remainingIssuerMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
+                            Where-Object {
+                                (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
+                            })
+                        if ($remainingIssuerMappings.Count -ne $script:ClientCertificateEndpointUris.Count) {
+                            throw "Nach dem Bereinigen bleiben $($remainingIssuerMappings.Count) Mappings für das Zertifikat bestehen; erwartet werden exakt $($script:ClientCertificateEndpointUris.Count)."
+                        }
                         $certificateMappingConfirmed = $true
                         Write-SetupLog "Zertifikat mit Account '$localUser' eindeutig verknüpft und verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)')." "SUCCESS"
                     }
                     catch {
-                        # Ein fehlgeschlagener Mapping-Schritt ist an dieser
-                        # Stelle noch kein endgültiger Verbindungsfehler: Das
-                        # Client-Zertifikat kann auf dem Verwaltungsserver
-                        # gerade erst installiert werden. Die Verteilung prüft
-                        # anschließend die echte Zertifikatsverbindung zum
-                        # WindowsUpdateAdm-Endpunkt und meldet deren Ergebnis.
-                        Write-SetupLog 'Zertifikat-Mapping konnte im Setup noch nicht bestätigt werden; der abschließende Zertifikats-Endpunkttest entscheidet.' 'INFO'
+                        Write-SetupLog 'FEHLER: Zertifikat-Mapping konnte nicht sicher eingerichtet und bestätigt werden.' 'ERROR'
                         Write-SetupDiagnostic -Operation 'WinRM-Zertifikatmapping' -ErrorRecord $_ -Context @("User=$localUser")
+                        throw
                     }
                 }
 
@@ -1021,14 +1030,19 @@ try {
                 }
             }
             catch {
-                Write-SetupLog 'Client-Zertifikat konnte nicht importiert werden; Details im Setup-Protokoll.' 'WARN'
+                $certificateFailureLevel = if ($EnableClientCertificateRemoting) { 'ERROR' } else { 'WARN' }
+                Write-SetupLog 'Client-Zertifikat oder dessen WinRM-Mapping konnte nicht vollständig eingerichtet werden; Details im Setup-Protokoll.' $certificateFailureLevel
                 Write-SetupDiagnostic -Operation 'WinRM-Clientzertifikat-Import' -ErrorRecord $_ -Context @("Path=$clientCertPath")
+                if ($EnableClientCertificateRemoting) { throw }
                 Write-SetupLog "Passwort-Authentifizierung bleibt als Fallback aktiv." "INFO"
             }
         } else {
             Write-SetupLog "Kein Client-Zertifikat gefunden ($clientCertPath)." "INFO"
             Write-SetupLog "Zuerst Komponenten\Setup-ClientCertificate.ps1 auf dem Verwaltungsserver ausführen," "INFO"
             Write-SetupLog "dann Komponenten\WinRM-ClientCert.cer bereitstellen und dieses Skript erneut ausführen." "INFO"
+            if ($EnableClientCertificateRemoting) {
+                throw "Client-Zertifikat fehlt, obwohl Clientzertifikat-Remoting aktiviert ist: $clientCertPath"
+            }
             Write-SetupLog "Passwort-Authentifizierung bleibt aktiv." "INFO"
         }
 

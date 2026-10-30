@@ -494,6 +494,19 @@ function Invoke-WindowsUpdateWinRMDeployment {
             }
             Write-DeployLog "[$Servername] Vorabprüfung nicht erfolgreich; Einrichtung wird ausgeführt. $($preflight.Reason)" -LogOnly
             $certificateMappingRefreshRequired = [bool]$preflight.CertificateMappingRefreshRequired
+            if ($DeployType -ne 'AD' -and -not $certificateMappingRefreshRequired) {
+                # Ein vorhandenes Zertifikat kann noch über ein altes,
+                # insbesondere URI='*', Mapping funktionieren. Bei jedem
+                # Versionswechsel/Migrationslauf erzwingen wir daher die
+                # erneute, eng begrenzte Zuordnung mit Bootstrap-Anmeldedaten.
+                # Ein aktueller v4-Endpunkt kehrt oben bereits ohne Änderung zurück.
+                $migrationCertificate = Get-WindowsUpdateDeploymentClientCertificate `
+                    -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME
+                if ($migrationCertificate) {
+                    $certificateMappingRefreshRequired = $true
+                    Write-DeployLog "[$Servername] Konfigurationswechsel mit vorhandenem Clientzertifikat: Mapping wird sicherheitshalber erneuert." -LogOnly
+                }
+            }
         }
 
         if ($DeployType -ne 'AD') {
