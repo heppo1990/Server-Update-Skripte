@@ -8,8 +8,42 @@ function New-WindowsUpdateDeploymentBootstrapSession {
     param(
         [Parameter(Mandatory)][string]$Servername,
         [Parameter(Mandatory)][System.Management.Automation.PSCredential]$Credential,
-        [Parameter(Mandatory)][scriptblock]$WriteLog
+        [Parameter(Mandatory)][scriptblock]$WriteLog,
+        [switch]$UseVersion3Bootstrap
     )
+
+    if ($UseVersion3Bootstrap) {
+        # Hypervisor-Bootstrap wie in Verteilungsversion 3: zuerst den
+        # Standard-PowerShell-Endpunkt über HTTPS, danach HTTP versuchen.
+        # Der Endpunktname wird bewusst nicht fest vorgegeben, damit Windows
+        # PowerShell und eine lokal registrierte Standardkonfiguration genutzt
+        # werden können. Auf PS7-only-Systemen folgt anschließend die
+        # dynamische Endpunkterkennung als Kompatibilitäts-Fallback.
+        foreach ($useSsl in @($true, $false)) {
+            $transportName = if ($useSsl) { 'HTTPS' } else { 'HTTP' }
+            & $WriteLog -Message "[$Servername] Hypervisor-Bootstrap Version 3 über $transportName (Standard-Endpunkt)." -LogOnly
+            try {
+                $parameters = @{
+                    ComputerName  = $Servername
+                    Credential    = $Credential
+                    Authentication = 'Negotiate'
+                    ErrorAction   = 'Stop'
+                }
+                if ($useSsl) {
+                    $parameters.UseSSL = $true
+                    $parameters.SessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck
+                }
+                $session = New-PSSession @parameters
+                & $WriteLog -Message "[$Servername] Hypervisor-Bootstrap Version 3 über $transportName erfolgreich." -Level Success -LogOnly
+                return $session
+            }
+            catch {
+                $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                & $WriteLog -Message "[$Servername] Hypervisor-Bootstrap Version 3 über $transportName fehlgeschlagen: $detail" -LogOnly
+            }
+        }
+        & $WriteLog -Message "[$Servername] Version-3-Standardweg nicht verfügbar; ermittle als Fallback den installierten PowerShell-Endpunkt." -LogOnly
+    }
 
     # Nicht von der aufrufenden PowerShell-Version oder einer bestimmten
     # Zielversion ausgehen. WinRM kann seine registrierten PowerShell-Plugins
@@ -29,7 +63,7 @@ function New-WindowsUpdateDeploymentBootstrapSession {
             }
             if ($useSsl) {
                 $enumerationParameters.UseSSL = $true
-                $enumerationParameters.SessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck
+                $enumerationParameters.SessionOption = New-WSManSessionOption -SkipCACheck -SkipCNCheck
             }
             $plugins = @(Get-WSManInstance @enumerationParameters)
             $powerShellPlugins = @($plugins | Where-Object {
@@ -532,7 +566,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
                 try {
                     $session = New-WindowsUpdateDeploymentBootstrapSession -Servername $Servername `
-                        -Credential $bootstrapCredential -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
+                        -Credential $bootstrapCredential -UseVersion3Bootstrap:($DeployType -eq 'Hypervisor') `
+                        -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
                 }
                 catch {
                     # Erst alle üblichen Endpunkte/Transporte mit dem
@@ -546,7 +581,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
                     }
                     Write-DeployLog "Erneuter WinRM-Bootstrap für $Servername mit Benutzer '$($bootstrapCredential.UserName)'." -LogOnly
                     $session = New-WindowsUpdateDeploymentBootstrapSession -Servername $Servername `
-                        -Credential $bootstrapCredential -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
+                        -Credential $bootstrapCredential -UseVersion3Bootstrap:($DeployType -eq 'Hypervisor') `
+                        -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
                 }
                 $BootstrapCredentials[$Servername] = $bootstrapCredential
             }
