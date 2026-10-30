@@ -4,6 +4,111 @@ function Get-WindowsUpdateDeploymentBootstrapCredential {
     Get-Credential -Message $message
 }
 
+function New-WindowsUpdateDeploymentBootstrapSession {
+    param(
+        [Parameter(Mandatory)][string]$Servername,
+        [Parameter(Mandatory)][System.Management.Automation.PSCredential]$Credential,
+        [Parameter(Mandatory)][scriptblock]$WriteLog
+    )
+
+    # Nicht von der aufrufenden PowerShell-Version oder einer bestimmten
+    # Zielversion ausgehen. WinRM kann seine registrierten PowerShell-Plugins
+    # separat auflisten, ohne bereits eine PowerShell-Sitzung zu öffnen.
+    $configurationNames = [System.Collections.Generic.List[string]]::new()
+    $pluginEnumerationSucceeded = $false
+    foreach ($useSsl in @($true, $false)) {
+        $transportName = if ($useSsl) { 'HTTPS' } else { 'HTTP' }
+        try {
+            $enumerationParameters = @{
+                ResourceURI    = 'winrm/config/plugin'
+                Enumerate      = $true
+                ComputerName   = $Servername
+                Credential     = $Credential
+                Authentication = 'Negotiate'
+                ErrorAction    = 'Stop'
+            }
+            if ($useSsl) {
+                $enumerationParameters.UseSSL = $true
+                $enumerationParameters.SessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck
+            }
+            $plugins = @(Get-WSManInstance @enumerationParameters)
+            $powerShellPlugins = @($plugins | Where-Object {
+                ([string]$_.FileName -match '(?i)pwrshplugin\.dll') -and
+                ([string]$_.Name -match '^(?i:Microsoft\.PowerShell|PowerShell\.7(?:\.\d+(?:\.\d+)*)?)$') -and
+                ([string]$_.Enabled -notmatch '^(?i:false|0)$')
+            })
+            foreach ($plugin in $powerShellPlugins) {
+                $name = [string]$plugin.Name
+                if (-not [string]::IsNullOrWhiteSpace($name) -and -not $configurationNames.Contains($name)) {
+                    $configurationNames.Add($name)
+                }
+            }
+            $pluginEnumerationSucceeded = $true
+            & $WriteLog -Message "[$Servername] WinRM meldet folgende passende PowerShell-Endpunkte: $($configurationNames -join ', ')." -LogOnly
+            break
+        }
+        catch {
+            $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+            & $WriteLog -Message "[$Servername] WinRM-Endpunkterkennung über $transportName nicht möglich: $detail" -LogOnly
+        }
+    }
+
+    # Fallback für Systeme, auf denen die WinRM-Konfigurationsabfrage nicht
+    # zugelassen ist. Diese kanonischen Namen decken Windows PowerShell 5.1
+    # und PowerShell 7 ab, unabhängig von der lokalen Verwaltungsstation.
+    foreach ($fallbackName in @('Microsoft.PowerShell', 'PowerShell.7')) {
+        if (-not $configurationNames.Contains($fallbackName)) { $configurationNames.Add($fallbackName) }
+    }
+    $discoveredNames = @($configurationNames)
+    $orderedNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($preferredName in @('Microsoft.PowerShell', 'PowerShell.7')) {
+        if ($discoveredNames -contains $preferredName) { $orderedNames.Add($preferredName) }
+    }
+    foreach ($versionedName in @($discoveredNames | Where-Object { $_ -match '^PowerShell\.7\.\d' } |
+        Sort-Object { try { [version]($_ -replace '^PowerShell\.', '') } catch { [version]'0.0' } } -Descending)) {
+        if (-not $orderedNames.Contains($versionedName)) { $orderedNames.Add($versionedName) }
+    }
+    $configurationNames = $orderedNames
+    if ($configurationNames.Count -eq 0) {
+        throw "Auf $Servername wurde kein unterstützter PowerShell-Remoting-Endpunkt gefunden."
+    }
+
+    $attemptErrors = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($configurationName in $configurationNames) {
+        foreach ($useSsl in @($true, $false)) {
+            $transportName = if ($useSsl) { 'HTTPS' } else { 'HTTP' }
+            & $WriteLog -Message "[$Servername] Bootstrap-Verbindung über $transportName mit Endpunkt '$configurationName'." -LogOnly
+
+            $parameters = @{
+                ComputerName      = $Servername
+                ConfigurationName = $configurationName
+                Credential        = $Credential
+                Authentication    = 'Negotiate'
+                ErrorAction       = 'Stop'
+            }
+            if ($useSsl) {
+                $parameters.UseSSL = $true
+                $parameters.SessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck
+            }
+
+            try {
+                $session = New-PSSession @parameters
+                & $WriteLog -Message "[$Servername] Bootstrap-Verbindung über $transportName mit '$configurationName' erfolgreich." -Level Success -LogOnly
+                return $session
+            }
+            catch {
+                $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+                $attemptErrors.Add(('{0}/{1}: {2}' -f $transportName, $configurationName, $detail))
+                & $WriteLog -Message "[$Servername] $transportName/$configurationName fehlgeschlagen: $detail" -LogOnly
+            }
+        }
+    }
+
+    $discoveryState = if ($pluginEnumerationSucceeded) { 'Endpunkte wurden dynamisch ermittelt' } else { 'Endpunkterkennung fehlgeschlagen; Standardnamen als Fallback versucht' }
+    throw ("Kein verwendbarer Windows-PowerShell- oder PowerShell-7-Remoting-Endpunkt auf $Servername erreichbar ($discoveryState). " + ($attemptErrors -join ' | '))
+}
+
 function Get-WindowsUpdateDeploymentClientCertificate {
     param(
         [Parameter(Mandatory)][object]$UpdateSettings,
@@ -426,38 +531,22 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 Write-DeployLog "WinRM-Anmeldung für $Servername mit Benutzer '$($bootstrapCredential.UserName)'." -LogOnly
                 Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
                 try {
-                    $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
-                        -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
+                    $session = New-WindowsUpdateDeploymentBootstrapSession -Servername $Servername `
+                        -Credential $bootstrapCredential -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
                 }
                 catch {
-                    # Vor der Einrichtung existiert bei manchen Geräten noch kein
-                    # HTTPS-Listener. HTTP ist ausschließlich der einmalige Fallback.
-                    Write-DeployLog "[$Servername] WinRM/HTTPS nicht verfügbar; HTTP-Fallback."
-                    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTPS-Verbindung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=HTTP für einmalige Ersteinrichtung')
-                    try {
-                        $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
+                    # Erst alle üblichen Endpunkte/Transporte mit dem
+                    # eingegebenen Konto prüfen. Nur wenn das insgesamt
+                    # scheitert, einmal nach abweichenden Zugangsdaten fragen.
+                    Write-DeployLog "Einrichtungszugangsdaten oder Remoting-Endpunkt auf $Servername wurden abgelehnt." -Level Warning
+                    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-Bootstrap-Verbindung' -Target $Servername -ErrorRecord $_ -Context @('Versuchte Endpunkte: Microsoft.PowerShell, PowerShell.7; Transport: HTTPS und HTTP', 'Fallback=Einrichtungsdaten erneut abfragen')
+                    $bootstrapCredential = Get-WindowsUpdateDeploymentBootstrapCredential -Servername $Servername
+                    if (-not $bootstrapCredential) {
+                        throw "Die erneuten Zugangsdaten für $Servername wurden nicht eingegeben."
                     }
-                    catch {
-                        # Zugangsdaten können je Nicht-AD-Gerät abweichen. Bei
-                        # Ablehnung genau dieses Ziel neu abfragen und den
-                        # Benutzernamen im Log (ohne Kennwort) nachvollziehbar machen.
-                        Write-DeployLog "Einrichtungsdaten für $Servername wurden abgelehnt." -Level Warning
-                        Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTP-Anmeldung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Anmeldedaten erneut abfragen')
-                        $bootstrapCredential = Get-WindowsUpdateDeploymentBootstrapCredential -Servername $Servername
-                        if (-not $bootstrapCredential) {
-                            throw "Die erneuten Zugangsdaten für $Servername wurden nicht eingegeben."
-                        }
-                        Write-DeployLog "Erneuter WinRM-Anmeldeversuch für $Servername mit Benutzer '$($bootstrapCredential.UserName)'." -LogOnly
-                        try {
-                            $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
-                                -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
-                        }
-                        catch {
-                            Write-DeployLog "WinRM/HTTPS auf $Servername nicht verfügbar; einmaliger HTTP-Fallback." -LogOnly
-                            Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-DeployLog $message } -Operation 'WinRM-HTTPS-Wiederholungsverbindung' -Target $Servername -ErrorRecord $_ -Context @('Fallback=HTTP für einmalige Ersteinrichtung')
-                            $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -ErrorAction Stop
-                        }
-                    }
+                    Write-DeployLog "Erneuter WinRM-Bootstrap für $Servername mit Benutzer '$($bootstrapCredential.UserName)'." -LogOnly
+                    $session = New-WindowsUpdateDeploymentBootstrapSession -Servername $Servername `
+                        -Credential $bootstrapCredential -WriteLog { param($Message, [string]$Level = 'Info', [switch]$LogOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly }
                 }
                 $BootstrapCredentials[$Servername] = $bootstrapCredential
             }
