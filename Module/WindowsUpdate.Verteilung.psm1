@@ -1,4 +1,4 @@
-function Get-WindowsUpdateDeploymentBootstrapCredential {
+﻿function Get-WindowsUpdateDeploymentBootstrapCredential {
     param([Parameter(Mandatory)][string]$Servername)
     $message = "Einmalige WinRM-Einrichtung für $Servername. Bitte den tatsächlichen lokalen Administratorkontonamen eingeben, z. B. $Servername\Konto oder .\Konto."
     Get-Credential -Message $message
@@ -748,6 +748,12 @@ function Invoke-WindowsUpdateWinRMDeployment {
         # Version liegt auf Skriptebene; zuerst in eine Funktionsvariable
         # kopieren, damit die Endpunktprüfung nicht mit leerem Sollwert läuft.
         $expectedVersionForValidation = [string]$ExpectedDeploymentVersion
+        $validationRequirements = @{
+            ChocolateyUpdateOnly = [bool]$ExpectedChocolateyUpdateOnly
+            WinGetMaintenanceOnly = [bool]$ExpectedWinGetMaintenanceOnly
+            ChocolateyMaintenanceOnly = [bool]$ExpectedChocolateyMaintenanceOnly
+            WinGetUpdateOnly = [bool]$ExpectedWinGetUpdateOnly
+        }
         $validateEndpoint = {
             $deploymentStatus = Invoke-Command @testParams
             $winGetProperty = $deploymentStatus.PSObject.Properties['WinGetUpdateOnly']
@@ -762,11 +768,11 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
             }
             if ($status.DeploymentVersion -ne $expectedVersionForValidation -or
-                $status.ChocolateyUpdateOnly -ne $ExpectedChocolateyUpdateOnly -or
-                $status.WinGetMaintenanceOnly -ne $ExpectedWinGetMaintenanceOnly -or
-                $status.ChocolateyMaintenanceOnly -ne $ExpectedChocolateyMaintenanceOnly -or
-                ($ExpectedWinGetUpdateOnly -and -not $status.WinGetUpdateOnly)) {
-                throw "WindowsUpdateAdm-Statusfunktion auf $Servername fehlt oder ist veraltet (gefunden: '$($status.DeploymentVersion)', erwartet: '$expectedVersionForValidation')."
+                $status.ChocolateyUpdateOnly -ne $validationRequirements.ChocolateyUpdateOnly -or
+                $status.WinGetMaintenanceOnly -ne $validationRequirements.WinGetMaintenanceOnly -or
+                $status.ChocolateyMaintenanceOnly -ne $validationRequirements.ChocolateyMaintenanceOnly -or
+                ($validationRequirements.WinGetUpdateOnly -and -not $status.WinGetUpdateOnly)) {
+                throw "WindowsUpdateAdm-Statusfunktion auf $Servername entspricht nicht dem Sollstand (Ist: WinGet=$($status.WinGetUpdateOnly), Choco=$($status.ChocolateyUpdateOnly), WinGet-Wartung=$($status.WinGetMaintenanceOnly), Choco-Wartung=$($status.ChocolateyMaintenanceOnly); Soll: $($validationRequirements | Out-String); Version gefunden: '$($status.DeploymentVersion)', erwartet: '$expectedVersionForValidation')."
             }
             return $status
         }.GetNewClosure()
