@@ -229,6 +229,82 @@ function Resolve-WindowsUpdateJeaWinGetResults {
     return @($resolved)
 }
 
+function Resolve-WindowsUpdateJeaChocolateyResults {
+    param(
+        [Parameter(Mandatory)][object[]]$Results,
+        [Parameter(Mandatory)][string]$ComputerName,
+        $AuthInfo
+    )
+
+    $resolved = @()
+    foreach ($item in $Results) {
+        $requestProperty = if ($item) { $item.PSObject.Properties['JeaChocolateyUpdateRequest'] } else { $null }
+        if (-not $requestProperty -or -not $requestProperty.Value) {
+            $resolved += $item
+            continue
+        }
+
+        $request = $requestProperty.Value
+        $packages = @($request.Packages)
+        $output = ''
+        $exitCode = 1
+        try {
+            $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName `
+                -AuthInfo $AuthInfo -ConfigurationName 'WindowsUpdateAdm' -OpenTimeoutSeconds 30 -OperationTimeoutSeconds 5400
+            $invokeParameters.ScriptBlock = { Update-WindowsUpdateAdmChocolateyPackages -ErrorAction Stop }
+            $remoteResult = @(Invoke-Command @invokeParameters | Select-Object -Last 1)
+            if ($remoteResult.Count -eq 0) { throw 'JEA lieferte kein Chocolatey-Ergebnis.' }
+            $output = [string]$remoteResult[0].Output
+            $exitCode = [int]$remoteResult[0].ExitCode
+        }
+        catch { $output = $_.Exception.ToString(); $exitCode = 1 }
+
+        $succeededNames = @(
+            foreach ($line in ($output -split "`r?`n")) {
+                $match = [regex]::Match([string]$line, '(?i)^\s*The upgrade of (?<Name>.+?) was successful\.?\s*$')
+                if ($match.Success) { $match.Groups['Name'].Value.Trim() }
+            }
+        )
+        $failedIds = @(
+            foreach ($line in ($output -split "`r?`n")) {
+                $match = [regex]::Match([string]$line, '(?i)^\s*-\s*(?<Id>[^\s(]+)\s+\(exited\s+(?<Code>[^)]+)\)')
+                if ($match.Success) { $match.Groups['Id'].Value.Trim() }
+            }
+        ) | Select-Object -Unique
+        $succeededPackages = @($packages | Where-Object { $succeededNames -contains [string]$_.Id -or $succeededNames -contains [string]$_.Name })
+        $failedPackages = @(
+            foreach ($failedId in $failedIds) {
+                $match = @($packages | Where-Object { [string]$_.Id -ieq $failedId -or [string]$_.Name -ieq $failedId } | Select-Object -First 1)
+                if ($match.Count -gt 0) { $match[0] }
+                else { [pscustomobject]@{ Name=$failedId; Id=$failedId; InstalledVersion=''; AvailableVersion=''; Source='chocolatey' } }
+            }
+        )
+
+        if ($exitCode -eq 0 -and $failedPackages.Count -eq 0 -and ($succeededPackages.Count -gt 0 -or $succeededNames.Count -eq 0)) {
+            $resolved += [pscustomobject]@{
+                Manager='Chocolatey'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                Packages=$(if ($succeededPackages.Count -gt 0) { $succeededPackages } else { $packages })
+                AvailableOutput=[string]$request.AvailableOutput; ActionOutput=$output
+            }
+            continue
+        }
+        if ($failedPackages.Count -eq 0) { $failedPackages = @($packages | Where-Object { $_ -notin $succeededPackages }) }
+        if ($succeededPackages.Count -gt 0) {
+            $resolved += [pscustomobject]@{
+                Manager='Chocolatey'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                Packages=$succeededPackages; AvailableOutput=[string]$request.AvailableOutput; ActionOutput=$output
+            }
+        }
+        $resolved += [pscustomobject]@{
+            Manager='Chocolatey'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$exitCode
+            Packages=$failedPackages; AvailableOutput=[string]$request.AvailableOutput; ActionOutput=$output
+            DiagnosticOutput=$output; RequiresManualAction=$true
+            ManualActionText='Chocolatey-Updates über den eingeschränkten JEA-Endpunkt sind fehlgeschlagen. Fehlgeschlagene Pakete manuell prüfen.'
+        }
+    }
+    return @($resolved)
+}
+
 
 
 
@@ -328,7 +404,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true, [bool]$PreferPortableWinGet = $false, [bool]$UseJeaForMachineWingetUpdates = $false)
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true, [bool]$PreferPortableWinGet = $false, [bool]$UseJeaForMachineWingetUpdates = $false, [bool]$UseJeaForChocolateyUpdates = $false)
 
         function Invoke-WinGetCurrentUserAppxTask {
             param(
@@ -1926,6 +2002,15 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $exitCode = $chocoQueryExitCode
                 $chocoSplitResultHandled = $false
                 if ($ExecutionMode -eq 'Install' -and $packages.Count -gt 0) {
+                    if ($UseJeaForChocolateyUpdates) {
+                        $result += [pscustomobject]@{
+                            Manager='Chocolatey'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                            Packages=@($packages); AvailableOutput=$availableOutput; ActionOutput=''
+                            JeaChocolateyUpdateRequest=[pscustomobject]@{ Packages=@($packages); AvailableOutput=$availableOutput }
+                        }
+                        $chocoSplitResultHandled = $true
+                    }
+                    else {
                     $upgradeOutput = & $chocoPath upgrade all -y 2>&1 | Out-String
                     $upgradeExitCode = $LASTEXITCODE
                     if (-not [string]::IsNullOrWhiteSpace($upgradeOutput)) {
@@ -2000,6 +2085,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     }
 
                     if (-not $chocoSplitResultHandled -and $chocoSucceededPackages.Count -gt 0) { $packages = $chocoSucceededPackages }
+                    }
                 }
                 if (-not $chocoSplitResultHandled) {
                     $chocoSuccess = $chocoQuerySucceeded -and ($ExecutionMode -ne 'Install' -or $exitCode -eq 0)
@@ -2999,16 +3085,23 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
 
     if (-not $EnableWinget) {
         $packageResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false, $false, ($Mode -eq 'Install' -and -not $isLocalTarget)) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Paketmanager-Prüfung auf $ComputerName")
+        if ($Mode -eq 'Install' -and -not $isLocalTarget) {
+            $packageResults = @(Resolve-WindowsUpdateJeaChocolateyResults -Results $packageResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+        }
     }
     else {
         # Chocolatey und WinGet getrennt ausführen. So bleiben Chocolatey-
         # Ergebnisse erhalten, auch wenn WinGet hängen bleibt oder wiederholt wird.
         $baseResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false, $false, ($Mode -eq 'Install' -and -not $isLocalTarget)) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Chocolatey-Prüfung auf $ComputerName")
-        $packageResults += @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
+        $chocolateyResults = @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
+        if ($Mode -eq 'Install' -and -not $isLocalTarget) {
+            $chocolateyResults = @(Resolve-WindowsUpdateJeaChocolateyResults -Results $chocolateyResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+        }
+        $packageResults += $chocolateyResults
 
         $wingetTimeoutSeconds = 300
         $hasCheckTimeout = $Mode -eq 'Check'

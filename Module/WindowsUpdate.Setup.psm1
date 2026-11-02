@@ -3,12 +3,14 @@ function New-WindowsUpdateAdmDeploymentStatusModuleSource {
     param(
         [Parameter(Mandatory)]
         [ValidatePattern('^[0-9]+(?:\.[0-9]+)*$')]
-        [string]$Version
+        [string]$Version,
+        [bool]$WinGetUpdateOnly = $false,
+        [bool]$ChocolateyUpdateOnly = $true
     )
 
     @"
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '$Version' }
+    [PSCustomObject]@{ Version = '$Version'; WinGetUpdateOnly = `$$WinGetUpdateOnly; ChocolateyUpdateOnly = `$$ChocolateyUpdateOnly }
 }
 function Update-WindowsUpdateAdmWinGetPackage {
     [CmdletBinding()]
@@ -31,7 +33,16 @@ function Update-WindowsUpdateAdmWinGetPackage {
         RebootRequired = [bool]$last.RebootRequired
     }
 }
-Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage
+function Update-WindowsUpdateAdmChocolateyPackages {
+    [CmdletBinding()]
+    param()
+    `$wrapper = Join-Path `$env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\Update-ChocolateyPackages.cmd'
+    if (-not (Test-Path -LiteralPath `$wrapper -PathType Leaf)) { throw 'Der feste Chocolatey-Updatewrapper fehlt.' }
+    `$output = & `$wrapper 2>&1 | Out-String
+    `$exitCode = `$LASTEXITCODE
+    [PSCustomObject]@{ ExitCode = [int]`$exitCode; Output = [string]`$output }
+}
+Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage, Update-WindowsUpdateAdmChocolateyPackages
 "@
 }
 

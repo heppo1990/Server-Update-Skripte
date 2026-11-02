@@ -876,10 +876,17 @@ try {
     if ([string]::IsNullOrWhiteSpace($deploymentVersion)) {
         throw 'Die WindowsUpdateAdm-Bereitstellungsversion ist leer.'
     }
-    $JeaModuleSource = New-WindowsUpdateAdmDeploymentStatusModuleSource -Version $deploymentVersion
+    $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
+    $JeaModuleSource = New-WindowsUpdateAdmDeploymentStatusModuleSource -Version $deploymentVersion `
+        -WinGetUpdateOnly ([bool]($InstallWinGetClientModule -and $winGetClientAvailable)) -ChocolateyUpdateOnly $true
     if (-not (Test-Path -LiteralPath $JeaBaseDir)) { New-Item -Path $JeaBaseDir -ItemType Directory -Force | Out-Null }
     [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
     Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"
+
+    $chocolateyWrapper = Join-Path $JeaBaseDir 'Update-ChocolateyPackages.cmd'
+    $chocolateyWrapperContent = "@echo off`r`nif not exist ""C:\ProgramData\chocolatey\bin\choco.exe"" exit /b 2`r`n""C:\ProgramData\chocolatey\bin\choco.exe"" upgrade all -y`r`nexit /b %ERRORLEVEL%`r`n"
+    [System.IO.File]::WriteAllText($chocolateyWrapper, $chocolateyWrapperContent, [System.Text.Encoding]::ASCII)
+    Write-SetupLog 'JEA-Chocolatey-Rolle verwendet nur den festen Befehl "choco upgrade all -y"; Installieren und Deinstallieren werden nicht freigegeben.' 'INFO'
     
     if (!(Test-Path $RoleCapDir)) { New-Item -Path $RoleCapDir -ItemType Directory -Force | Out-Null }
     
@@ -919,7 +926,7 @@ try {
                            -Guid ([Guid]::NewGuid()) `
                            -Author "IT-Administration" `
                            -ModuleVersion "1.0" `
-                           -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage') `
+            -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Update-WindowsUpdateAdmChocolateyPackages') `
                            -Description "Stabiler JEA Endpunkt fuer Windows Update Verwaltung"
         Write-SetupLog "JEA-Trägermodul-Manifest neu erstellt: $JeaManifest" 'SUCCESS'
     } else {
@@ -930,7 +937,7 @@ try {
             # nicht mit der Statusfunktion in die JEA-Sitzung geladen.
             Update-ModuleManifest -Path $JeaManifest `
                                   -RootModule "$JeaModuleName.psm1" `
-                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage') `
+                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Update-WindowsUpdateAdmChocolateyPackages') `
                                   -ErrorAction Stop
             Write-SetupLog "JEA-Trägermodul-Manifest aktualisiert (RootModule und Statusfunktion): $JeaManifest" "SUCCESS"
         }
@@ -985,7 +992,8 @@ try {
         }
     )
 
-    $jeaVisibleFunctions = @('Get-WindowsUpdateAdmDeploymentStatus')
+    $jeaVisibleFunctions = @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmChocolateyPackages')
+    $jeaVisibleExternalCommands = @($chocolateyWrapper)
     $jeaModulesToImport = @('PSWindowsUpdate', $JeaModuleName)
     $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
     if ($InstallWinGetClientModule -and $winGetClientAvailable) {
@@ -1021,7 +1029,7 @@ try {
                              -ModulesToImport $jeaModulesToImport `
                              -VisibleCmdlets $VisibleCmdlets `
                              -VisibleFunctions $jeaVisibleFunctions `
-                             -VisibleExternalCommands @() `
+                             -VisibleExternalCommands $jeaVisibleExternalCommands `
                              -VisibleAliases @()
     Write-SetupLog "Role Capability erstellt: $RoleCapabilityFile" "SUCCESS"
 

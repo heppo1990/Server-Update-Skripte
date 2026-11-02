@@ -338,6 +338,8 @@ ForEach ($Server in $Serverlist) {
             -DeployType                $deployTypeLabel `
             -CleanupLegacyTempOnly:$CleanupLegacyTempOnly `
             -ExpectedDeploymentVersion $expectedDeploymentVersion `
+            -ExpectedWinGetUpdateOnly $enableWingetUpdates `
+            -ExpectedChocolateyUpdateOnly $true `
             -UpdateSettings $UpdateSettings `
             -EnableWingetUpdates $enableWingetUpdates `
             -ExpectedModuleVersions $script:ExpectedModuleVersions `
