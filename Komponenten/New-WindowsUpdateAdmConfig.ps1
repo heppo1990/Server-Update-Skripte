@@ -886,11 +886,29 @@ try {
     [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
     Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"
 
+    $chocolateyCandidates = @(
+        [Environment]::GetEnvironmentVariable('ChocolateyInstall', 'Machine')
+        $env:ChocolateyInstall
+        (Join-Path $env:ProgramData 'chocolatey')
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $chocolateyExecutable = $null
+    foreach ($candidate in $chocolateyCandidates) {
+        $candidateExe = Join-Path $candidate 'bin\choco.exe'
+        if (Test-Path -LiteralPath $candidateExe -PathType Leaf) { $chocolateyExecutable = $candidateExe; break }
+    }
+    if (-not $chocolateyExecutable) {
+        $chocolateyCommand = Get-Command choco.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($chocolateyCommand) { $chocolateyExecutable = $chocolateyCommand.Source }
+    }
+    if (-not $chocolateyExecutable) {
+        $chocolateyExecutable = Join-Path $env:ProgramData 'chocolatey\bin\choco.exe'
+        Write-SetupLog 'Chocolatey wurde in Maschinenkonfiguration und PATH nicht gefunden; eine Abfrage meldet dies als Fehler.' 'WARN'
+    }
     $chocolateyWrapper = Join-Path $JeaBaseDir 'Update-ChocolateyPackages.cmd'
-    $chocolateyWrapperContent = "@echo off`r`nif not exist ""C:\ProgramData\chocolatey\bin\choco.exe"" exit /b 9009`r`n""C:\ProgramData\chocolatey\bin\choco.exe"" upgrade all -y`r`nexit /b %ERRORLEVEL%`r`n"
+    $chocolateyWrapperContent = "@echo off`r`nif not exist ""$chocolateyExecutable"" exit /b 9009`r`n""$chocolateyExecutable"" upgrade all -y`r`nexit /b %ERRORLEVEL%`r`n"
     [System.IO.File]::WriteAllText($chocolateyWrapper, $chocolateyWrapperContent, [System.Text.Encoding]::ASCII)
     $chocolateyQueryWrapper = Join-Path $JeaBaseDir 'List-ChocolateyOutdated.cmd'
-    $chocolateyQueryContent = "@echo off`r`nif not exist ""C:\ProgramData\chocolatey\bin\choco.exe"" exit /b 9009`r`n""C:\ProgramData\chocolatey\bin\choco.exe"" outdated --limit-output`r`nexit /b %ERRORLEVEL%`r`n"
+    $chocolateyQueryContent = "@echo off`r`nif not exist ""$chocolateyExecutable"" exit /b 9009`r`n""$chocolateyExecutable"" outdated --limit-output`r`nexit /b %ERRORLEVEL%`r`n"
     [System.IO.File]::WriteAllText($chocolateyQueryWrapper, $chocolateyQueryContent, [System.Text.Encoding]::ASCII)
     Write-SetupLog 'JEA-Chocolatey-Rolle verwendet nur den festen Befehl "choco upgrade all -y"; Installieren und Deinstallieren werden nicht freigegeben.' 'INFO'
 
@@ -934,12 +952,20 @@ if ($Action -eq 'ClientRepair') {
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('winget-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/download/5.4.0/winget-install.ps1' -OutFile $temp -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/asheroto/winget-install/releases/latest' -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        $assets = @($release.assets | Where-Object { $_.name -eq 'winget-install.ps1' })
+        if ($assets.Count -ne 1) { throw 'GitHub-Release enthält kein eindeutiges winget-install.ps1.' }
+        $asset = $assets[0]
+        if ([string]$asset.digest -notmatch '^sha256:([a-fA-F0-9]{64})$') { throw 'GitHub-Release enthält keinen SHA256-Digest.' }
+        $releaseHash = $Matches[1]
+        $downloadUri = [uri]$asset.browser_download_url
+        if ($downloadUri.Scheme -ne 'https' -or $downloadUri.Host -ne 'github.com' -or $downloadUri.AbsolutePath -notlike '/asheroto/winget-install/releases/download/*/winget-install.ps1') { throw 'Unerwartete Release-Downloadadresse.' }
+        Invoke-WebRequest -Uri $downloadUri.AbsoluteUri -OutFile $temp -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
         $sig = Get-AuthenticodeSignature -FilePath $temp -ErrorAction Stop
-        $releaseHash = 'CDE082EF0C395ACCD1C174F0936D67B7C3CEDE2121D190F656AC65F4D68D6B40'
+
         $hashMatches = (Get-FileHash -LiteralPath $temp -Algorithm SHA256 -ErrorAction Stop).Hash -eq $releaseHash
-        if ($sig.Status -ne [Management.Automation.SignatureStatus]::Valid -and -not ($sig.Status -eq [Management.Automation.SignatureStatus]::NotSigned -and $hashMatches)) {
-            throw "WinGet-Reparaturskript ist weder gültig signiert noch die freigegebene Release-Datei 5.4.0."
+        if (-not $hashMatches -or $sig.Status -notin @([Management.Automation.SignatureStatus]::Valid, [Management.Automation.SignatureStatus]::NotSigned)) {
+            throw "WinGet-Reparaturskript ist weder gültig signiert noch die per Online-Digest bestätigte Release-Datei."
         }
         $ps51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $out = & $ps51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $temp -Force 2>&1 | Out-String
