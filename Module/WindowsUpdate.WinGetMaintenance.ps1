@@ -129,9 +129,85 @@ function Invoke-WinGet {
             }
         }
 
+# Fester Wartungsbaustein; keine vom JEA-Aufrufer gelieferten Pfade oder Befehle.
+function Repair-WindowsUpdateWinGetAppx {
+    $root = Join-Path $PSScriptRoot 'AppxRepair'
+    New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop | Out-Null
+    $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -Headers @{'User-Agent'='Server-Update-Skripte'} -TimeoutSec 30 -ErrorAction Stop
+    function Get-RepairAsset {
+        param([string]$Name)
+        $asset = @($release.assets | Where-Object name -eq $Name)
+        if ($asset.Count -ne 1) { throw "Microsoft-Release enthält nicht genau ein Asset '$Name'." }
+        $uri = [uri]$asset[0].browser_download_url
+        if ($uri.Scheme -ne 'https' -or $uri.Host -ne 'github.com' -or $uri.AbsolutePath -notlike '/microsoft/winget-cli/releases/download/*') { throw 'Unerwartete Microsoft-Downloadadresse.' }
+        $path = Join-Path $root $Name
+        Invoke-WebRequest -Uri $uri.AbsoluteUri -OutFile $path -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        if ([string]$asset[0].digest -notmatch '^sha256:([a-fA-F0-9]{64})$') { throw "Release-Digest fehlt für '$Name'." }
+        if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $Matches[1]) { throw "Release-Digest stimmt nicht für '$Name'." }
+        return $path
+    }
+    $bundle = Get-RepairAsset 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+    $dependencies = Get-RepairAsset 'DesktopAppInstaller_Dependencies.zip'
+    $licenseAssets = @($release.assets | Where-Object { $_.name -like '*License*.xml' })
+    if ($licenseAssets.Count -ne 1) { throw 'Microsoft-Release enthält keine eindeutige App-Installer-Lizenz.' }
+    $license = Get-RepairAsset ([string]$licenseAssets[0].name)
+    $extract = Join-Path $root ([guid]::NewGuid().ToString('N'))
+    Expand-Archive -LiteralPath $dependencies -DestinationPath $extract -ErrorAction Stop
+    $dependencyPaths = @(Get-ChildItem -LiteralPath $extract -Recurse -File | Where-Object { $_.Extension -in '.appx','.msix' -and $_.FullName -match '[\\/]x64[\\/]' } | ForEach-Object FullName)
+    if ($dependencyPaths.Count -eq 0) { throw 'Keine x64-Abhängigkeiten im Microsoft-Release gefunden.' }
+    try {
+        Add-AppxProvisionedPackage -Online -PackagePath $bundle -DependencyPackagePath $dependencyPaths -LicensePath $license -ErrorAction Stop | Out-Null
+    } finally {
+        $resolvedExtract = [IO.Path]::GetFullPath($extract)
+        $allowedRoot = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+        if ($resolvedExtract.StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $resolvedExtract -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Output 'App-Installer-Maschinenbestand samt Abhängigkeiten aus aktuellem Microsoft-Release provisioniert.'
+    # Nur bereits angemeldete echte Benutzer; keine Kennwörter und kein neues Administratorkonto.
+    $user = [string](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName
+    if ([string]::IsNullOrWhiteSpace($user)) {
+        Write-Output 'Benutzerregistrierung ausstehend: kein interaktiv angemeldeter Benutzer verfügbar.'
+        return
+    }
+    $sid = ([Security.Principal.NTAccount]::new($user)).Translate([Security.Principal.SecurityIdentifier]).Value
+    $profile = @(Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid -and $_.Loaded -and -not $_.Special })
+    if ($profile.Count -ne 1) { throw "Kein geladenes echtes Benutzerprofil für '$user'." }
+    $registration = Join-Path $root 'Register-AppInstaller.ps1'
+    [IO.File]::WriteAllText($registration, "`$ErrorActionPreference='Stop'; Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop", [Text.UTF8Encoding]::new($true))
+    $name = 'WindowsUpdateAdm-AppxRegistration-' + [guid]::NewGuid().ToString('N')
+    try {
+        $exe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $action = New-ScheduledTaskAction -Execute $exe -Argument ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $registration + '"')
+        $principal = New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
+        Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $name -ErrorAction Stop
+        $deadline = (Get-Date).AddMinutes(2)
+        do {
+            Start-Sleep -Seconds 2
+            $info = Get-ScheduledTaskInfo -TaskName $name -ErrorAction Stop
+            $task = Get-ScheduledTask -TaskName $name -ErrorAction Stop
+        } while (($info.LastRunTime -lt (Get-Date).AddMinutes(-3) -or $task.State -in 'Running','Queued') -and (Get-Date) -lt $deadline)
+        if ($task.State -in 'Running','Queued' -or $info.LastTaskResult -ne 0) { throw "Benutzerregistrierung fehlgeschlagen/abgelaufen: $($info.LastTaskResult)." }
+        $registered = @(Get-AppxPackage -User $sid -Name Microsoft.DesktopAppInstaller -ErrorAction Stop | Where-Object Status -eq 'Ok')
+        if ($registered.Count -eq 0) { throw 'App Installer nach Registrierungsaufgabe nicht im Benutzerprofil bestätigt.' }
+        Write-Output "App Installer im echten Benutzerprofil '$user' registriert und bestätigt."
+    } finally {
+        Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
+    }
+}
+
 if ($Action -eq 'ClientRepair') {
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('winget-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
     try {
+        try {
+            $appxRepairOutput = Repair-WindowsUpdateWinGetAppx | Out-String
+            [Console]::Out.WriteLine($appxRepairOutput)
+        } catch {
+            [Console]::Out.WriteLine('AppX-Bestandsreparatur nicht vollständig: ' + $_.Exception.ToString())
+        }
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/asheroto/winget-install/releases/latest' -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
         $assets = @($release.assets | Where-Object { $_.name -eq 'winget-install.ps1' })
