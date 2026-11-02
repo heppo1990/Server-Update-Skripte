@@ -3589,7 +3589,17 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
     foreach ($packageResult in $packageResults) {
         $diagnosticProperty = $packageResult.PSObject.Properties['DiagnosticOutput']
         if ($diagnosticProperty -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticProperty.Value) -and $WriteLog) {
-            Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "$($packageResult.Manager)-$Mode" -Target $ComputerName -DiagnosticText ([string]$diagnosticProperty.Value)
+            if ([bool]$packageResult.Success) {
+                # Historische Reparaturfehler gehören nach erfolgreicher Wiederholung nur ins Log.
+                $successfulDiagnosticSink = $WriteLog
+                $successfulDiagnosticLogger = {
+                    param($message)
+                    & $successfulDiagnosticSink $message $true
+                }.GetNewClosure()
+                Write-WindowsUpdateDiagnostic -WriteLog $successfulDiagnosticLogger -Operation "$($packageResult.Manager)-$Mode" -Target $ComputerName -DiagnosticText ([string]$diagnosticProperty.Value)
+            } else {
+                Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation "$($packageResult.Manager)-$Mode" -Target $ComputerName -DiagnosticText ([string]$diagnosticProperty.Value)
+            }
         }
         if ($packageResult.Manager -eq 'Winget') {
             $availableOutputProperty = $packageResult.PSObject.Properties['AvailableOutput']
