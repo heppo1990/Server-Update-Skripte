@@ -749,8 +749,18 @@ function Invoke-WindowsUpdateWinRMDeployment {
         # kopieren, damit die Endpunktprüfung nicht mit leerem Sollwert läuft.
         $expectedVersionForValidation = [string]$ExpectedDeploymentVersion
         $validateEndpoint = {
-            $rawStatus = Invoke-Command @testParams
-            $status = ConvertFrom-WindowsUpdateAdmDeploymentStatus -Status $rawStatus
+            $deploymentStatus = Invoke-Command @testParams
+            $winGetProperty = $deploymentStatus.PSObject.Properties['WinGetUpdateOnly']
+            $chocolateyProperty = $deploymentStatus.PSObject.Properties['ChocolateyUpdateOnly']
+            $maintenanceProperty = $deploymentStatus.PSObject.Properties['WinGetMaintenanceOnly']
+            $chocolateyMaintenanceProperty = $deploymentStatus.PSObject.Properties['ChocolateyMaintenanceOnly']
+            $status = [PSCustomObject]@{
+                DeploymentVersion = [string]$deploymentStatus.Version
+                WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
+                ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
+                WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value } else { $false })
+                ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
+            }
             if ($status.DeploymentVersion -ne $expectedVersionForValidation -or
                 $status.ChocolateyUpdateOnly -ne $ExpectedChocolateyUpdateOnly -or
                 $status.WinGetMaintenanceOnly -ne $ExpectedWinGetMaintenanceOnly -or
