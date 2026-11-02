@@ -934,16 +934,20 @@ if ($Action -eq 'ClientRepair') {
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('winget-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -OutFile $temp -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/download/5.4.0/winget-install.ps1' -OutFile $temp -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
         $sig = Get-AuthenticodeSignature -FilePath $temp -ErrorAction Stop
-        if ($sig.Status -ne [Management.Automation.SignatureStatus]::Valid) { throw "Authenticode-Signatur ist ungültig (Status: $($sig.Status))." }
+        $releaseHash = 'CDE082EF0C395ACCD1C174F0936D67B7C3CEDE2121D190F656AC65F4D68D6B40'
+        $hashMatches = (Get-FileHash -LiteralPath $temp -Algorithm SHA256 -ErrorAction Stop).Hash -eq $releaseHash
+        if ($sig.Status -ne [Management.Automation.SignatureStatus]::Valid -and -not ($sig.Status -eq [Management.Automation.SignatureStatus]::NotSigned -and $hashMatches)) {
+            throw "WinGet-Reparaturskript ist weder gültig signiert noch die freigegebene Release-Datei 5.4.0."
+        }
         $ps51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $out = & $ps51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $temp -Force 2>&1 | Out-String
         $code = $LASTEXITCODE
         if ($code -ne 0) { throw "winget-install.ps1 -Force endete mit Exitcode $code. $out" }
         $version = (& (Get-WinGetPath) --version 2>&1 | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?m)^\s*v?\d+\.\d+') { throw "WinGet besteht den Starttest nach der Client-Reparatur nicht: $version" }
-        [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output="winget-install.ps1 mit gültiger Signatur ausgeführt; WinGet $version. $out" }
+        [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output="Geprüfte winget-install.ps1 ausgeführt; WinGet $version. $out" }
         exit 0
     } finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
 }

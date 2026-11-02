@@ -37,7 +37,7 @@ function ConvertFrom-WindowsUpdateAdmDeploymentStatus {
         DeploymentVersion = [string]$Status.Version
         WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
         ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
-        WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value } else { $false })
+        WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value -and $Status.PSObject.Properties['MaintenanceRevision'] -and $Status.MaintenanceRevision -eq '2' } else { $false })
         ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
     }
 }
@@ -764,7 +764,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 DeploymentVersion = [string]$deploymentStatus.Version
                 WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
                 ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
-                WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value } else { $false })
+                WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value -and $deploymentStatus.PSObject.Properties['MaintenanceRevision'] -and $deploymentStatus.MaintenanceRevision -eq '2' } else { $false })
                 ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
             }
             if ($status.DeploymentVersion -ne $expectedVersionForValidation -or
