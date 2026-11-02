@@ -12,7 +12,7 @@
 
     $moduleSource = @'
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '__VERSION__'; MaintenanceRevision = '3'; WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
+    [PSCustomObject]@{ Version = '__VERSION__'; MaintenanceRevision = '4'; WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
 }
 function Update-WindowsUpdateAdmWinGetPackage {
     [CmdletBinding()]
