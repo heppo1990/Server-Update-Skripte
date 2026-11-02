@@ -171,6 +171,64 @@ function Invoke-WindowsUpdatePackageWorker {
         -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds -OperationName $OperationName -WriteLog $WriteLog)
 }
 
+function Resolve-WindowsUpdateJeaWinGetResults {
+    param(
+        [Parameter(Mandatory)][object[]]$Results,
+        [Parameter(Mandatory)][string]$ComputerName,
+        $AuthInfo
+    )
+
+    $resolved = @()
+    foreach ($item in $Results) {
+        $requestProperty = if ($item) { $item.PSObject.Properties['JeaUpgradeRequest'] } else { $null }
+        if (-not $requestProperty -or -not $requestProperty.Value) {
+            $resolved += $item
+            continue
+        }
+
+        $request = $requestProperty.Value
+        $package = $request.Package
+        $packageName = [string]$package.Name
+        $packageId = [string]$package.Id
+        $source = [string]$package.Source
+        $displayName = $packageName
+        $updateOutput = ''
+        $exitCode = 1
+        $success = $false
+        try {
+            $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName `
+                -AuthInfo $AuthInfo -ConfigurationName 'WindowsUpdateAdm' -OpenTimeoutSeconds 30 -OperationTimeoutSeconds 5400
+            $invokeParameters.ScriptBlock = {
+                param([string]$Id, [string]$Source)
+                Update-WindowsUpdateAdmWinGetPackage -Id $Id -Source $Source -ErrorAction Stop
+            }
+            $invokeParameters.ArgumentList = @($packageId, $source)
+            $update = @(Invoke-Command @invokeParameters | Select-Object -Last 1)
+            if ($update.Count -eq 0) { throw "JEA lieferte kein WinGet-Ergebnis für '$packageId'." }
+            $status = [string]$update[0].Status
+            $installerCode = [string]$update[0].InstallerErrorCode
+            $extendedCode = [string]$update[0].ExtendedErrorCode
+            $success = $status -eq 'Ok' -and $installerCode -in @('', '0') -and $extendedCode -in @('', '0')
+            $exitCode = if ($success) { 0 } else { 1 }
+            $updateOutput = "JEA-Update-WinGetPackage: Status=$status; InstallerErrorCode=$installerCode; ExtendedErrorCode=$extendedCode; RebootRequired=$([bool]$update[0].RebootRequired)"
+        }
+        catch {
+            $updateOutput = [string]$_.Exception.Message
+            if ($updateOutput.Length -gt 1200) { $updateOutput = $updateOutput.Substring(0, 1197) + '...' }
+        }
+
+        $resolved += [pscustomobject]@{
+            Manager = 'Winget'; Available = $true; Success = $success; Skipped = $false
+            SkipReason = ''; ExitCode = $exitCode; Packages = @($package)
+            AvailableOutput = [string]$request.AvailableOutput; ActionOutput = $updateOutput
+            DiagnosticOutput = if ($success) { '' } else { $updateOutput }
+            RequiresManualAction = -not $success
+            ErrorSummary = if ($success) { '' } else { "WinGet-Update für '$displayName' [$packageId] über den eingeschränkten JEA-Endpunkt fehlgeschlagen; manuelle Prüfung erforderlich." }
+        }
+    }
+    return @($resolved)
+}
+
 
 
 
@@ -270,7 +328,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true, [bool]$PreferPortableWinGet = $false)
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true, [bool]$PreferPortableWinGet = $false, [bool]$UseJeaForMachineWingetUpdates = $false)
 
         function Invoke-WinGetCurrentUserAppxTask {
             param(
@@ -2657,6 +2715,27 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $packageId = $packageMatch.Groups['Id'].Value
                         $packageName = $packageMatch.Groups['Name'].Value.Trim()
                         $packageSource = if ($packageMatch.Groups['Source'].Success) { $packageMatch.Groups['Source'].Value } else { 'winget' }
+                        if ($UseJeaForMachineWingetUpdates) {
+                            $result += [PSCustomObject]@{
+                                Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''
+                                ExitCode=0; Packages=@([pscustomobject]@{
+                                    Name=$packageName; Id=$packageId
+                                    InstalledVersion=$packageMatch.Groups['InstalledVersion'].Value
+                                    AvailableVersion=$packageMatch.Groups['AvailableVersion'].Value
+                                    Source=$packageSource
+                                }); AvailableOutput=$availableOutput; ActionOutput=''
+                                JeaUpgradeRequest=[pscustomobject]@{
+                                    Package=[pscustomobject]@{
+                                        Name=$packageName; Id=$packageId
+                                        InstalledVersion=$packageMatch.Groups['InstalledVersion'].Value
+                                        AvailableVersion=$packageMatch.Groups['AvailableVersion'].Value
+                                        Source=$packageSource
+                                    }
+                                    AvailableOutput=$availableOutput
+                                }
+                            }
+                            continue
+                        }
                         $packageActionOutput = ''
                         try {
                             if ($wingetCliFallback) {
@@ -2953,7 +3032,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 ComputerName = $ComputerName
                 AuthInfo = $AuthInfo
                 ScriptBlock = $packageScript
-                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false)
+                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false, ($Mode -eq 'Install' -and -not $isLocalTarget))
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
                 WriteLog = $WriteLog
@@ -2961,6 +3040,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             if ($hasCheckTimeout) { $initialParameters.TimeoutSeconds = $wingetTimeoutSeconds }
             else { $initialParameters.NoTimeout = $true }
             $wingetResults = @(Invoke-WindowsUpdatePackageWorker @initialParameters | Where-Object { $_.Manager -eq 'Winget' })
+            if ($Mode -eq 'Install' -and -not $isLocalTarget) {
+                $wingetResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $wingetResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+            }
             if ($wingetResults.Count -eq 0) { throw 'Die WinGet-Prüfung lieferte kein Ergebnis.' }
             $firstWingetResult = $wingetResults[-1]
             $firstDiagnosticProperty = $firstWingetResult.PSObject.Properties['DiagnosticOutput']
@@ -3134,7 +3216,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     ComputerName = $ComputerName
                     AuthInfo = $AuthInfo
                     ScriptBlock = $packageScript
-                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet)
+                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet, ($Mode -eq 'Install' -and -not $isLocalTarget))
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
                     WriteLog = $WriteLog
@@ -3142,6 +3224,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 if ($hasCheckTimeout) { $retryParameters.TimeoutSeconds = $wingetTimeoutSeconds }
                 else { $retryParameters.NoTimeout = $true }
                 $retryResults = @(Invoke-WindowsUpdatePackageWorker @retryParameters | Where-Object { $_.Manager -eq 'Winget' })
+                if ($Mode -eq 'Install' -and -not $isLocalTarget) {
+                    $retryResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $retryResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+                }
                 if ($retryResults.Count -eq 0) { throw 'Die Wiederholungsprüfung lieferte kein WinGet-Ergebnis.' }
                 $retryResult = $retryResults[-1]
                 $retryDiagnosticProperty = $retryResult.PSObject.Properties['DiagnosticOutput']
@@ -3182,7 +3267,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         ComputerName = $ComputerName
                         AuthInfo = $AuthInfo
                         ScriptBlock = $packageScript
-                        ArgumentList = @($Mode, $true, $false, $followupResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet)
+                        ArgumentList = @($Mode, $true, $false, $followupResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet, ($Mode -eq 'Install' -and -not $isLocalTarget))
                         IsLocalTarget = $isLocalTarget
                         OperationName = "WinGet-Folgeprüfung auf $ComputerName"
                         WriteLog = $WriteLog
@@ -3190,6 +3275,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     if ($hasCheckTimeout) { $followupParameters.TimeoutSeconds = $wingetTimeoutSeconds }
                     else { $followupParameters.NoTimeout = $true }
                     $followupResults = @(Invoke-WindowsUpdatePackageWorker @followupParameters | Where-Object { $_.Manager -eq 'Winget' })
+                    if ($Mode -eq 'Install' -and -not $isLocalTarget) {
+                        $followupResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $followupResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+                    }
                     if ($followupResults.Count -eq 0) { throw 'Die WinGet-Folgeprüfung nach Quellenkorrektur lieferte kein Ergebnis.' }
 
                     $followupResult = $followupResults[-1]

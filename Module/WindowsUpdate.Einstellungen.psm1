@@ -113,6 +113,40 @@ function Protect-WindowsUpdateSettingsFilePassword {
     }
 }
 
+function Protect-WindowsUpdateSettingsFileAcl {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    $acl = Get-Acl -LiteralPath $resolvedPath -ErrorAction Stop
+    $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier])
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $allowedSids = @(
+        $ownerSid.Value
+        $currentSid.Value
+        'S-1-5-18'       # LocalSystem für geplante Läufe
+        'S-1-5-32-544'   # lokale Administratoren für Wartung
+    ) | Select-Object -Unique
+
+    # Settings können ein mit LocalMachine-DPAPI geschütztes Kennwort enthalten.
+    # Vererbung wird deshalb an der Datei beendet; Owner, aktueller Prozess,
+    # SYSTEM und Administratoren behalten Zugriff. Der Skriptordner selbst
+    # und seine sonstigen Dateien werden nicht verändert.
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($existingRule in @($acl.Access)) {
+        [void]$acl.RemoveAccessRuleSpecific($existingRule)
+    }
+    foreach ($sidValue in $allowedSids) {
+        $sid = [Security.Principal.SecurityIdentifier]::new([string]$sidValue)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        $acl.AddAccessRule($rule)
+    }
+    Set-Acl -LiteralPath $resolvedPath -AclObject $acl -ErrorAction Stop
+}
+
 function Get-WindowsUpdateSettings {
     param(
         [Parameter(Mandatory)][string]$ScriptRoot,
@@ -161,6 +195,16 @@ function Get-WindowsUpdateSettings {
     foreach ($localSettingsPath in $localSettingsPaths) {
         if (Test-Path -LiteralPath $localSettingsPath -PathType Leaf) {
             Protect-WindowsUpdateSettingsFilePassword -Path $localSettingsPath -WriteLog $WriteLog
+            Protect-WindowsUpdateSettingsFileAcl -Path $localSettingsPath
+            Write-CommonLog $WriteLog "Zugriffsrechte für '$([IO.Path]::GetFileName($localSettingsPath))' auf Owner, aktuelle Identität, SYSTEM und Administratoren begrenzt."
+
+            $settingsLeaf = Split-Path -Leaf $localSettingsPath
+            foreach ($backupDirectory in @((Split-Path -Parent $localSettingsPath), (Join-Path (Split-Path -Parent $localSettingsPath) 'Sicherungen'))) {
+                if (-not (Test-Path -LiteralPath $backupDirectory -PathType Container)) { continue }
+                foreach ($backupFile in @(Get-ChildItem -LiteralPath $backupDirectory -Filter ($settingsLeaf + '.bak.*') -File -ErrorAction SilentlyContinue)) {
+                    Protect-WindowsUpdateSettingsFileAcl -Path $backupFile.FullName
+                }
+            }
         }
     }
 

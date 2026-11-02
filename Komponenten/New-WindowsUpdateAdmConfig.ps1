@@ -919,7 +919,7 @@ try {
                            -Guid ([Guid]::NewGuid()) `
                            -Author "IT-Administration" `
                            -ModuleVersion "1.0" `
-                           -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus') `
+                           -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage') `
                            -Description "Stabiler JEA Endpunkt fuer Windows Update Verwaltung"
         Write-SetupLog "JEA-Trägermodul-Manifest neu erstellt: $JeaManifest" 'SUCCESS'
     } else {
@@ -930,7 +930,7 @@ try {
             # nicht mit der Statusfunktion in die JEA-Sitzung geladen.
             Update-ModuleManifest -Path $JeaManifest `
                                   -RootModule "$JeaModuleName.psm1" `
-                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus') `
+                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage') `
                                   -ErrorAction Stop
             Write-SetupLog "JEA-Trägermodul-Manifest aktualisiert (RootModule und Statusfunktion): $JeaManifest" "SUCCESS"
         }
@@ -984,6 +984,29 @@ try {
             Parameters = @(@{ Name = 'First' })
         }
     )
+
+    $jeaVisibleFunctions = @('Get-WindowsUpdateAdmDeploymentStatus')
+    $jeaModulesToImport = @('PSWindowsUpdate', $JeaModuleName)
+    $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
+    if ($InstallWinGetClientModule -and $winGetClientAvailable) {
+        $jeaModulesToImport += 'Microsoft.WinGet.Client'
+        $jeaVisibleFunctions += 'Update-WindowsUpdateAdmWinGetPackage'
+        $VisibleCmdlets += @{
+            Name = 'Update-WinGetPackage'
+            Parameters = @(
+                @{ Name = 'Id' }
+                @{ Name = 'Source' }
+                @{ Name = 'MatchOption' }
+                @{ Name = 'Mode' }
+                @{ Name = 'Confirm' }
+            )
+        }
+        Write-SetupLog 'JEA-WinGet-Rolle erlaubt ausschließlich Updates installierter Pakete über Update-WinGetPackage.' 'INFO'
+    } elseif ($InstallWinGetClientModule) {
+        throw 'Microsoft.WinGet.Client fehlt nach der Modulbereitstellung; der eingeschränkte WinGet-Update-Endpunkt kann nicht sicher erstellt werden.'
+    } else {
+        Write-SetupLog 'WinGet-Updates sind für diese Bereitstellung deaktiviert; die JEA-Rolle veröffentlicht keine WinGet-Funktion.' 'INFO'
+    }
     
     Write-SetupLog "Erlaubte Cmdlets: $($VisibleCmdlets.Count)" "INFO"
     
@@ -995,9 +1018,9 @@ try {
     # ModuleVersion NICHT angeben - PowerShell findet das Modul sonst nicht wenn
     # es unter einem anderen Pfad installiert ist (z.B. SYSTEM-Profil vs. ProgramFiles)
     New-PSRoleCapabilityFile -Path $RoleCapabilityFile `
-                             -ModulesToImport @('PSWindowsUpdate', $JeaModuleName) `
+                             -ModulesToImport $jeaModulesToImport `
                              -VisibleCmdlets $VisibleCmdlets `
-                             -VisibleFunctions @('Get-WindowsUpdateAdmDeploymentStatus') `
+                             -VisibleFunctions $jeaVisibleFunctions `
                              -VisibleExternalCommands @() `
                              -VisibleAliases @()
     Write-SetupLog "Role Capability erstellt: $RoleCapabilityFile" "SUCCESS"
@@ -1045,7 +1068,7 @@ try {
         Path              = $PermanentPSSC
         SessionType       = 'Default'
         LanguageMode      = 'ConstrainedLanguage'
-        ModulesToImport   = @('PSWindowsUpdate', $JeaModuleName)
+        ModulesToImport   = $jeaModulesToImport
         ExecutionPolicy   = 'RemoteSigned'
     }
     if (-not $IsInDomain -and $osBuild -le 14393) {

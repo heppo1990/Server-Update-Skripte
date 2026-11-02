@@ -10,7 +10,28 @@ function New-WindowsUpdateAdmDeploymentStatusModuleSource {
 function Get-WindowsUpdateAdmDeploymentStatus {
     [PSCustomObject]@{ Version = '$Version' }
 }
-Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus
+function Update-WindowsUpdateAdmWinGetPackage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$')][string]$Id,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')][string]$Source
+    )
+
+    # JEA veröffentlicht ausschließlich diesen Update-Aufruf. Install-,
+    # Uninstall-, Source- und Prozessbefehle sind nicht Teil der Rolle.
+    $updates = @(Update-WinGetPackage -Id $Id -Source $Source `
+        -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:`$false -ErrorAction Stop)
+    if ($updates.Count -eq 0) { throw "WinGet lieferte für '$Id' kein Update-Ergebnis." }
+    $last = $updates[-1]
+    [PSCustomObject]@{
+        Id = $Id
+        Status = [string]$last.Status
+        InstallerErrorCode = [string]$last.InstallerErrorCode
+        ExtendedErrorCode = [string]$last.ExtendedErrorCode
+        RebootRequired = [bool]$last.RebootRequired
+    }
+}
+Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage
 "@
 }
 

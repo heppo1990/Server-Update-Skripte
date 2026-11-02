@@ -264,7 +264,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
                     try {
                         $session = New-PSSession -ComputerName $Servername -UseSSL `
                             -CertificateThumbprint $clientCert.Thumbprint `
-                            -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) `
+                            -SessionOption (New-PSSessionOption -SkipCACheck) `
                             -ErrorAction Stop
                         $usedCertificate = $true
                         Write-DeployLog "Vorhandenes Client-Zertifikat für die Vertrauensmigration auf $Servername verwendet." -LogOnly
@@ -291,7 +291,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 Write-DeployLog "[$Servername] Verbinde per WinRM ($DeployType)."
                 try {
                     $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
-                        -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
+                        -SessionOption (New-PSSessionOption -SkipCACheck) -ErrorAction Stop
                 }
                 catch {
                     # Vor der Einrichtung existiert bei manchen Geräten noch kein
@@ -314,7 +314,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
                         Write-DeployLog "Erneuter WinRM-Anmeldeversuch für $Servername mit Benutzer '$($bootstrapCredential.UserName)'." -LogOnly
                         try {
                             $session = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential -Authentication Negotiate -UseSSL `
-                                -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
+                                -SessionOption (New-PSSessionOption -SkipCACheck) -ErrorAction Stop
                         }
                         catch {
                             Write-DeployLog "WinRM/HTTPS auf $Servername nicht verfügbar; einmaliger HTTP-Fallback." -LogOnly
@@ -780,13 +780,13 @@ function Invoke-WindowsUpdateWinRMDeployment {
                                     } catch {
                                         $cleanupSession = New-PSSession -ComputerName $Servername -UseSSL `
                                             -CertificateThumbprint $clientCert.Thumbprint `
-                                            -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
+                                            -SessionOption (New-PSSessionOption -SkipCACheck) -ErrorAction Stop
                                     }
                                 } elseif ($bootstrapCredential) {
                                     try {
                                         $cleanupSession = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential `
                                             -Authentication Negotiate -UseSSL `
-                                            -SessionOption (New-PSSessionOption -SkipCACheck -SkipCNCheck) -ErrorAction Stop
+                                            -SessionOption (New-PSSessionOption -SkipCACheck) -ErrorAction Stop
                                     } catch {
                                         $cleanupSession = New-PSSession -ComputerName $Servername -Credential $bootstrapCredential `
                                             -Authentication Negotiate -ErrorAction Stop
