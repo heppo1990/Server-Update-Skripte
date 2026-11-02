@@ -229,6 +229,20 @@ function Resolve-WindowsUpdateJeaWinGetResults {
     return @($resolved)
 }
 
+function Invoke-WindowsUpdateJeaWinGetClientRepair {
+    param([Parameter(Mandatory)][string]$ComputerName, $AuthInfo)
+
+    $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName `
+        -AuthInfo $AuthInfo -ConfigurationName 'WindowsUpdateAdm' -OpenTimeoutSeconds 30 -OperationTimeoutSeconds 1800
+    $invokeParameters.ScriptBlock = { Invoke-WindowsUpdateAdmWinGetMaintenance -Action ClientRepair -ErrorAction Stop }
+    $results = @(Invoke-Command @invokeParameters | Select-Object -Last 1)
+    if ($results.Count -eq 0 -or -not [bool]$results[0].Success) {
+        $details = if ($results.Count -gt 0) { [string]$results[0].Output } else { 'JEA lieferte keine strukturierte Reparaturrückgabe.' }
+        throw "WinGet-Client-Reparatur über JEA fehlgeschlagen. $details"
+    }
+    return $results[0]
+}
+
 function Resolve-WindowsUpdateJeaChocolateyResults {
     param(
         [Parameter(Mandatory)][object[]]$Results,
@@ -238,6 +252,54 @@ function Resolve-WindowsUpdateJeaChocolateyResults {
 
     $resolved = @()
     foreach ($item in $Results) {
+        $queryRequestProperty = if ($item) { $item.PSObject.Properties['JeaChocolateyQueryRequest'] } else { $null }
+        if ($queryRequestProperty -and $queryRequestProperty.Value) {
+            $mode = [string]$queryRequestProperty.Value.Mode
+            $availableOutput = ''
+            $queryExitCode = 1
+            try {
+                $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName `
+                    -AuthInfo $AuthInfo -ConfigurationName 'WindowsUpdateAdm' -OpenTimeoutSeconds 30 -OperationTimeoutSeconds 1800
+                $invokeParameters.ScriptBlock = { Get-WindowsUpdateAdmChocolateyOutdated -ErrorAction Stop }
+                $queryResult = @(Invoke-Command @invokeParameters | Select-Object -Last 1)
+                if ($queryResult.Count -eq 0) { throw 'JEA lieferte kein Chocolatey-Abfrageergebnis.' }
+                $availableOutput = [string]$queryResult[0].Output
+                $queryExitCode = [int]$queryResult[0].ExitCode
+                if (-not [bool]$queryResult[0].Success) { throw "Chocolatey-Abfrage über JEA endete mit Exitcode $queryExitCode. $availableOutput" }
+            } catch {
+                $resolved += [pscustomobject]@{
+                    Manager='Chocolatey'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$queryExitCode
+                    Packages=@(); AvailableOutput=$availableOutput; ActionOutput='Chocolatey-Abfrage über JEA fehlgeschlagen.'
+                    DiagnosticOutput=$_.Exception.ToString()
+                }
+                continue
+            }
+            $queriedPackages = @($availableOutput -split "`r?`n" | Where-Object { $_ -match '^[^|]+\|[^|]+\|[^|]+' } | ForEach-Object {
+                $fields = @($_ -split '\|', 4)
+                if ($fields.Count -ge 3) {
+                    $installedVersion = ([string]$fields[1]).Trim()
+                    $availableVersion = ([string]$fields[2]).Trim()
+                    if (-not [string]::Equals($installedVersion, $availableVersion, [StringComparison]::OrdinalIgnoreCase)) {
+                        [pscustomobject]@{
+                            Name=([string]$fields[0]).Trim(); Id=([string]$fields[0]).Trim()
+                            InstalledVersion=$installedVersion; AvailableVersion=$availableVersion; Source='chocolatey'
+                        }
+                    }
+                }
+            } | Sort-Object Id -Unique)
+            if ($mode -eq 'Check' -or $queriedPackages.Count -eq 0) {
+                $resolved += [pscustomobject]@{
+                    Manager='Chocolatey'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=$queryExitCode
+                    Packages=$queriedPackages; AvailableOutput=$availableOutput; ActionOutput=''
+                }
+                continue
+            }
+            $item = [pscustomobject]@{
+                Manager='Chocolatey'; Available=$true; Success=$true; ExitCode=0; Packages=$queriedPackages
+                AvailableOutput=$availableOutput
+                JeaChocolateyUpdateRequest=[pscustomobject]@{ Packages=$queriedPackages; AvailableOutput=$availableOutput }
+            }
+        }
         $requestProperty = if ($item) { $item.PSObject.Properties['JeaChocolateyUpdateRequest'] } else { $null }
         if (-not $requestProperty -or -not $requestProperty.Value) {
             $resolved += $item
@@ -1962,6 +2024,13 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         if (-not $UseChocolatey) {
             $result += [PSCustomObject]@{ Manager='Chocolatey'; Available=$false; Success=$true; Skipped=$true; SkipReason='per Konfiguration deaktiviert'; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }
         }
+        elseif ($UseJeaForChocolateyUpdates) {
+            $result += [PSCustomObject]@{
+                Manager='Chocolatey'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                Packages=@(); AvailableOutput=''; ActionOutput=''
+                JeaChocolateyQueryRequest=[pscustomobject]@{ Mode=$ExecutionMode }
+            }
+        }
         elseif (Test-Path -LiteralPath $chocoPath) {
             try {
                 $availableOutput = & $chocoPath outdated --limit-output 2>&1 | Out-String
@@ -3085,9 +3154,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
 
     if (-not $EnableWinget) {
         $packageResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false, $false, ($Mode -eq 'Install' -and -not $isLocalTarget)) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false, $false, (-not $isLocalTarget)) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Paketmanager-Prüfung auf $ComputerName")
-        if ($Mode -eq 'Install' -and -not $isLocalTarget) {
+        if (-not $isLocalTarget) {
             $packageResults = @(Resolve-WindowsUpdateJeaChocolateyResults -Results $packageResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
         }
     }
@@ -3095,10 +3164,10 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         # Chocolatey und WinGet getrennt ausführen. So bleiben Chocolatey-
         # Ergebnisse erhalten, auch wenn WinGet hängen bleibt oder wiederholt wird.
         $baseResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo `
-            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false, $false, ($Mode -eq 'Install' -and -not $isLocalTarget)) -IsLocalTarget $isLocalTarget `
+            -ScriptBlock $packageScript -ArgumentList @($Mode, $false, $EnableChocolatey, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false, $false, (-not $isLocalTarget)) -IsLocalTarget $isLocalTarget `
             -NoTimeout -OperationName "Chocolatey-Prüfung auf $ComputerName")
         $chocolateyResults = @($baseResults | Where-Object { $_.Manager -eq 'Chocolatey' })
-        if ($Mode -eq 'Install' -and -not $isLocalTarget) {
+        if (-not $isLocalTarget) {
             $chocolateyResults = @(Resolve-WindowsUpdateJeaChocolateyResults -Results $chocolateyResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
         }
         $packageResults += $chocolateyResults
@@ -3159,17 +3228,12 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $retryRequiresSourceReset = $true
                 $retryReason = 'WinGet-Installation/Reparatur über winget-install.ps1'
                 try {
-                    $installPayload = Get-WindowsUpdateWinGetInstallScriptPayload
-                    $downloadState = if ($installPayload.Source -eq 'GitHub-Release') { 'aktuelle signierte Onlineversion' } else { $installPayload.Source }
-                    Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; winget-install.ps1 $($installPayload.Version): $downloadState. $($installPayload.CacheStatus) Signatur gültig: $($installPayload.Signer). Starte die Installation explizit mit Windows PowerShell 5.1."
-                    $installResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo -ScriptBlock $wingetInstallScriptWorker -ArgumentList @($installPayload.ContentBase64, $installPayload.Sha256, $installPayload.Version) -IsLocalTarget $isLocalTarget -TimeoutSeconds 1800 -OperationName "WinGet-Installation/Reparatur auf $ComputerName (Windows PowerShell 5.1)" -WriteLog $WriteLog)
-                    if ($installResults.Count -eq 0) { throw 'Windows PowerShell 5.1 lieferte kein Ergebnis der WinGet-Installation.' }
-                    $installResult = $installResults[-1]
-                    if (-not $installResult.Success) { throw "WinGet-Installation lieferte keinen bestätigten Erfolg. Ausgabe: $($installResult | Out-String)" }
-                    $firstDiagnostic += [Environment]::NewLine + "winget-install.ps1-Ausgabe:" + [Environment]::NewLine + [string]$installResult.Output
-                    $firstWingetResult | Add-Member -NotePropertyName BootstrapMessage -NotePropertyValue "WinGet wurde mit winget-install.ps1 $($installPayload.Version) unter Windows PowerShell 5.1 installiert/repariert (App Installer $($installResult.AppInstallerVersion), $($installResult.WinGetVersion)); die Prüfung wird in einer neuen Verbindung wiederholt." -Force
+                    Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; starte die signaturgeprüfte winget-install.ps1-Clientreparatur ausschließlich über JEA und Windows PowerShell 5.1."
+                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo
+                    $firstDiagnostic += [Environment]::NewLine + "JEA-Clientreparatur-Ausgabe:" + [Environment]::NewLine + [string]$installResult.Output
+                    $firstWingetResult | Add-Member -NotePropertyName BootstrapMessage -NotePropertyValue "WinGet-Clientreparatur über die signaturgeprüfte winget-install.ps1 in JEA erfolgreich; die Prüfung wird in einer neuen Verbindung wiederholt." -Force
                     $wingetInstallScriptRan = $true
-                    Write-CommonLog $WriteLog "WinGet-Installation/Reparatur auf $ComputerName erfolgreich: App Installer $($installResult.AppInstallerVersion); $($installResult.WinGetVersion); Pfad=$($installResult.WinGetPath); Windows PowerShell $($installResult.PowerShellVersion)."
+                    Write-CommonLog $WriteLog "WinGet-Clientreparatur auf $ComputerName über JEA erfolgreich."
                     if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
                         Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
                     }
@@ -3263,15 +3327,10 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
                 if ($retryRuntimeRepairRequired -and -not $wingetInstallScriptRan -and -not $retryPreferPortableWinGet) {
-                    $installPayload = Get-WindowsUpdateWinGetInstallScriptPayload
-                    $downloadState = if ($installPayload.Source -eq 'GitHub-Release') { 'aktuelle signierte Onlineversion' } else { $installPayload.Source }
-                    Write-CommonLog $WriteLog "Zentraler WinGet-Reparaturablauf auf ${ComputerName}: winget-install.ps1 $($installPayload.Version), $downloadState. $($installPayload.CacheStatus) Signatur gültig: $($installPayload.Signer). Ausführung mit -Force unter Windows PowerShell 5.1; dies installiert WinGet auch, falls es bisher fehlt."
-                    $installResults = @(Invoke-WindowsUpdatePackageWorker -ComputerName $ComputerName -AuthInfo $AuthInfo -ScriptBlock $wingetInstallScriptWorker -ArgumentList @($installPayload.ContentBase64, $installPayload.Sha256, $installPayload.Version) -IsLocalTarget $isLocalTarget -TimeoutSeconds 1800 -OperationName "Zentrale WinGet-Installation/Reparatur auf $ComputerName (Windows PowerShell 5.1)" -WriteLog $WriteLog)
-                    if ($installResults.Count -eq 0) { throw 'Windows PowerShell 5.1 lieferte kein Ergebnis der zentralen WinGet-Installation/Reparatur.' }
-                    $installResult = $installResults[-1]
-                    if (-not $installResult.Success) { throw "winget-install.ps1 -Force bestätigte keine funktionsfähige WinGet-Installation. Ausgabe: $($installResult | Out-String)" }
+                    Write-CommonLog $WriteLog "Zentraler WinGet-Reparaturablauf auf ${ComputerName}: signaturgeprüfte winget-install.ps1-Clientreparatur über JEA und Windows PowerShell 5.1; Paket-Installationen und -Deinstallationen sind nicht freigegeben."
+                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo
                     $wingetInstallScriptRan = $true
-                    Write-CommonLog $WriteLog "Zentrale WinGet-Installation/Reparatur auf $ComputerName erfolgreich: App Installer $($installResult.AppInstallerVersion); $($installResult.WinGetVersion); Pfad=$($installResult.WinGetPath); Windows PowerShell $($installResult.PowerShellVersion)."
+                    Write-CommonLog $WriteLog "Zentrale WinGet-Clientreparatur auf $ComputerName über JEA erfolgreich."
                     if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
                         Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
                     }

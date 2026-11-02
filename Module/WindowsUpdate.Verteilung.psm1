@@ -33,6 +33,8 @@ function Test-WindowsUpdateDeploymentConfiguration {
         [Parameter(Mandatory)][string]$ExpectedDeploymentVersion,
         [bool]$ExpectedWinGetUpdateOnly = $false,
         [bool]$ExpectedChocolateyUpdateOnly = $true,
+        [bool]$ExpectedWinGetMaintenanceOnly = $true,
+        [bool]$ExpectedChocolateyMaintenanceOnly = $true,
         [Parameter(Mandatory)][object]$UpdateSettings,
         [string]$ManagementComputerName = $env:COMPUTERNAME
     )
@@ -54,10 +56,14 @@ function Test-WindowsUpdateDeploymentConfiguration {
             $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
             $winGetProperty = $deploymentStatus.PSObject.Properties['WinGetUpdateOnly']
             $chocolateyProperty = $deploymentStatus.PSObject.Properties['ChocolateyUpdateOnly']
+            $maintenanceProperty = $deploymentStatus.PSObject.Properties['WinGetMaintenanceOnly']
+            $chocolateyMaintenanceProperty = $deploymentStatus.PSObject.Properties['ChocolateyMaintenanceOnly']
             [PSCustomObject]@{
                 DeploymentVersion = [string]$deploymentStatus.Version
                 WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
                 ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
+                WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value } else { $false })
+                ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
             }
         }
     }
@@ -70,10 +76,12 @@ function Test-WindowsUpdateDeploymentConfiguration {
         $status = Invoke-Command @endpointParameters
         if ($status.DeploymentVersion -eq $ExpectedDeploymentVersion -and
             $status.ChocolateyUpdateOnly -eq $ExpectedChocolateyUpdateOnly -and
+            $status.WinGetMaintenanceOnly -eq $ExpectedWinGetMaintenanceOnly -and
+            $status.ChocolateyMaintenanceOnly -eq $ExpectedChocolateyMaintenanceOnly -and
             (-not $ExpectedWinGetUpdateOnly -or $status.WinGetUpdateOnly)) {
             return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$status.DeploymentVersion }
         }
-        $reason = "Konfigurationsversion $($status.DeploymentVersion) oder eingeschränkte Paketmanager-Funktionen weichen vom Sollstand ab (WinGet-Update-only=$($status.WinGetUpdateOnly), Chocolatey-Update-only=$($status.ChocolateyUpdateOnly))."
+        $reason = "Konfigurationsversion $($status.DeploymentVersion) oder eingeschränkte Paketmanager-Funktionen weichen vom Sollstand ab (WinGet-Update-only=$($status.WinGetUpdateOnly), WinGet-Wartung=$($status.WinGetMaintenanceOnly), Chocolatey-Update-only=$($status.ChocolateyUpdateOnly), Chocolatey-Wartung=$($status.ChocolateyMaintenanceOnly))."
     }
     catch { $reason = $_.Exception.Message }
 
@@ -93,11 +101,15 @@ function Test-WindowsUpdateDeploymentConfiguration {
                         DeploymentVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['Version'].Value } else { '' }
                         WinGetUpdateOnly = $moduleText -match '(?i)WinGetUpdateOnly\s*=\s*\$true'
                         ChocolateyUpdateOnly = $moduleText -match '(?i)ChocolateyUpdateOnly\s*=\s*\$true'
+                        WinGetMaintenanceOnly = $moduleText -match '(?i)WinGetMaintenanceOnly\s*=\s*\$true'
+                        ChocolateyMaintenanceOnly = $moduleText -match '(?i)ChocolateyMaintenanceOnly\s*=\s*\$true'
                     }
                 }
             if ([int]$legacyStatus.Build -le 17763) {
                 if ($legacyStatus.HasStatusFunction -and $legacyStatus.DeploymentVersion -eq $ExpectedDeploymentVersion -and
                     $legacyStatus.ChocolateyUpdateOnly -eq $ExpectedChocolateyUpdateOnly -and
+                    $legacyStatus.WinGetMaintenanceOnly -eq $ExpectedWinGetMaintenanceOnly -and
+                    $legacyStatus.ChocolateyMaintenanceOnly -eq $ExpectedChocolateyMaintenanceOnly -and
                     (-not $ExpectedWinGetUpdateOnly -or $legacyStatus.WinGetUpdateOnly)) {
                     return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$legacyStatus.DeploymentVersion }
                 }
@@ -221,6 +233,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
         [Parameter(Mandatory)][string]$ExpectedDeploymentVersion,
         [bool]$ExpectedWinGetUpdateOnly = $false,
         [bool]$ExpectedChocolateyUpdateOnly = $true,
+        [bool]$ExpectedWinGetMaintenanceOnly = $true,
+        [bool]$ExpectedChocolateyMaintenanceOnly = $true,
         [Parameter(Mandatory)][object]$UpdateSettings,
         [Parameter(Mandatory)][bool]$EnableWingetUpdates,
         [Parameter(Mandatory)][System.Collections.IDictionary]$ExpectedModuleVersions,
@@ -242,7 +256,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
     try {
         if (-not $CleanupLegacyTempOnly) {
             Write-DeployLog "[$Servername] Prüfe vorhandene WindowsUpdateAdm-Version und Verbindung."
-            $preflight = Test-WindowsUpdateDeploymentConfiguration -Servername $Servername -DeployType $DeployType -ExpectedDeploymentVersion $ExpectedDeploymentVersion -ExpectedWinGetUpdateOnly $ExpectedWinGetUpdateOnly -ExpectedChocolateyUpdateOnly $ExpectedChocolateyUpdateOnly -UpdateSettings $UpdateSettings -ManagementComputerName $env:COMPUTERNAME
+            $preflight = Test-WindowsUpdateDeploymentConfiguration -Servername $Servername -DeployType $DeployType -ExpectedDeploymentVersion $ExpectedDeploymentVersion -ExpectedWinGetUpdateOnly $ExpectedWinGetUpdateOnly -ExpectedChocolateyUpdateOnly $ExpectedChocolateyUpdateOnly -ExpectedWinGetMaintenanceOnly $ExpectedWinGetMaintenanceOnly -ExpectedChocolateyMaintenanceOnly $ExpectedChocolateyMaintenanceOnly -UpdateSettings $UpdateSettings -ManagementComputerName $env:COMPUTERNAME
             if ($preflight.IsCurrent) {
                 $preflightCertificate = if ($DeployType -ne 'AD') { Get-WindowsUpdateDeploymentClientCertificate -UpdateSettings $UpdateSettings -ComputerName $env:COMPUTERNAME } else { $null }
                 $authLabel = if ($DeployType -eq 'AD') { 'Kerberos' } else { "Clientzertifikat $($preflightCertificate.Thumbprint)" }
@@ -693,6 +707,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 -ExpectedDeploymentVersion $ExpectedDeploymentVersion `
                 -ExpectedWinGetUpdateOnly $ExpectedWinGetUpdateOnly `
                 -ExpectedChocolateyUpdateOnly $ExpectedChocolateyUpdateOnly `
+                -ExpectedWinGetMaintenanceOnly $ExpectedWinGetMaintenanceOnly `
+                -ExpectedChocolateyMaintenanceOnly $ExpectedChocolateyMaintenanceOnly `
                 -UpdateSettings $UpdateSettings `
                 -ManagementComputerName $env:COMPUTERNAME
             if (-not $certificateStatus.IsCurrent) {
@@ -715,10 +731,14 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
                 $winGetProperty = $deploymentStatus.PSObject.Properties['WinGetUpdateOnly']
                 $chocolateyProperty = $deploymentStatus.PSObject.Properties['ChocolateyUpdateOnly']
+                $maintenanceProperty = $deploymentStatus.PSObject.Properties['WinGetMaintenanceOnly']
+                $chocolateyMaintenanceProperty = $deploymentStatus.PSObject.Properties['ChocolateyMaintenanceOnly']
                 [PSCustomObject]@{
                     DeploymentVersion = [string]$deploymentStatus.Version
                     WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
                     ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
+                    WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value } else { $false })
+                    ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
                 }
             }
             ErrorAction       = 'Stop'
@@ -741,6 +761,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
             $status = Invoke-Command @testParams
             if ($status.DeploymentVersion -ne $expectedVersionForValidation -or
                 $status.ChocolateyUpdateOnly -ne $ExpectedChocolateyUpdateOnly -or
+                $status.WinGetMaintenanceOnly -ne $ExpectedWinGetMaintenanceOnly -or
+                $status.ChocolateyMaintenanceOnly -ne $ExpectedChocolateyMaintenanceOnly -or
                 ($ExpectedWinGetUpdateOnly -and -not $status.WinGetUpdateOnly)) {
                 throw "WindowsUpdateAdm-Statusfunktion auf $Servername fehlt oder ist veraltet (gefunden: '$($status.DeploymentVersion)', erwartet: '$expectedVersionForValidation')."
             }
@@ -862,6 +884,8 @@ function Invoke-WindowsUpdateServerDeployment {
         [Parameter(Mandatory)][string]$ExpectedDeploymentVersion,
         [bool]$ExpectedWinGetUpdateOnly = $false,
         [bool]$ExpectedChocolateyUpdateOnly = $true,
+        [bool]$ExpectedWinGetMaintenanceOnly = $true,
+        [bool]$ExpectedChocolateyMaintenanceOnly = $true,
         [Parameter(Mandatory)][object]$UpdateSettings,
         [Parameter(Mandatory)][bool]$EnableWingetUpdates,
         [Parameter(Mandatory)][System.Collections.IDictionary]$ExpectedModuleVersions,
@@ -909,6 +933,8 @@ function Invoke-WindowsUpdateServerDeployment {
                 -ExpectedDeploymentVersion $ExpectedDeploymentVersion `
                 -ExpectedWinGetUpdateOnly $ExpectedWinGetUpdateOnly `
                 -ExpectedChocolateyUpdateOnly $ExpectedChocolateyUpdateOnly `
+                -ExpectedWinGetMaintenanceOnly $ExpectedWinGetMaintenanceOnly `
+                -ExpectedChocolateyMaintenanceOnly $ExpectedChocolateyMaintenanceOnly `
                 -UpdateSettings $UpdateSettings `
                 -EnableWingetUpdates $EnableWingetUpdates `
                 -ExpectedModuleVersions $ExpectedModuleVersions `

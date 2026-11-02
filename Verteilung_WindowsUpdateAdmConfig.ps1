@@ -340,6 +340,8 @@ ForEach ($Server in $Serverlist) {
             -ExpectedDeploymentVersion $expectedDeploymentVersion `
             -ExpectedWinGetUpdateOnly $enableWingetUpdates `
             -ExpectedChocolateyUpdateOnly $true `
+            -ExpectedWinGetMaintenanceOnly $true `
+            -ExpectedChocolateyMaintenanceOnly $true `
             -UpdateSettings $UpdateSettings `
             -EnableWingetUpdates $enableWingetUpdates `
             -ExpectedModuleVersions $script:ExpectedModuleVersions `

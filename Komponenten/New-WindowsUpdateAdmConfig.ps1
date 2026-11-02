@@ -878,15 +878,112 @@ try {
     }
     $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
     $JeaModuleSource = New-WindowsUpdateAdmDeploymentStatusModuleSource -Version $deploymentVersion `
-        -WinGetUpdateOnly ([bool]($InstallWinGetClientModule -and $winGetClientAvailable)) -ChocolateyUpdateOnly $true
+        -WinGetUpdateOnly ([bool]($InstallWinGetClientModule -and $winGetClientAvailable)) -ChocolateyUpdateOnly $true `
+        -WinGetMaintenanceOnly $true -ChocolateyMaintenanceOnly $true
     if (-not (Test-Path -LiteralPath $JeaBaseDir)) { New-Item -Path $JeaBaseDir -ItemType Directory -Force | Out-Null }
     [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
     Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"
 
     $chocolateyWrapper = Join-Path $JeaBaseDir 'Update-ChocolateyPackages.cmd'
-    $chocolateyWrapperContent = "@echo off`r`nif not exist ""C:\ProgramData\chocolatey\bin\choco.exe"" exit /b 2`r`n""C:\ProgramData\chocolatey\bin\choco.exe"" upgrade all -y`r`nexit /b %ERRORLEVEL%`r`n"
+    $chocolateyWrapperContent = "@echo off`r`nif not exist ""C:\ProgramData\chocolatey\bin\choco.exe"" exit /b 9009`r`n""C:\ProgramData\chocolatey\bin\choco.exe"" upgrade all -y`r`nexit /b %ERRORLEVEL%`r`n"
     [System.IO.File]::WriteAllText($chocolateyWrapper, $chocolateyWrapperContent, [System.Text.Encoding]::ASCII)
+    $chocolateyQueryWrapper = Join-Path $JeaBaseDir 'List-ChocolateyOutdated.cmd'
+    $chocolateyQueryContent = "@echo off`r`nif not exist ""C:\ProgramData\chocolatey\bin\choco.exe"" exit /b 9009`r`n""C:\ProgramData\chocolatey\bin\choco.exe"" outdated --limit-output`r`nexit /b %ERRORLEVEL%`r`n"
+    [System.IO.File]::WriteAllText($chocolateyQueryWrapper, $chocolateyQueryContent, [System.Text.Encoding]::ASCII)
     Write-SetupLog 'JEA-Chocolatey-Rolle verwendet nur den festen Befehl "choco upgrade all -y"; Installieren und Deinstallieren werden nicht freigegeben.' 'INFO'
+
+    $wingetMaintenanceScript = Join-Path $JeaBaseDir 'WinGetMaintenance.ps1'
+    $wingetMaintenanceSource = @'
+param([Parameter(Mandatory)][ValidateSet('SourceList','SourceUpdate','SourceReset','ClientRepair')][string]$Action)
+$ErrorActionPreference = 'Stop'
+function Get-WinGetPath {
+    $packages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+        Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
+        Sort-Object { [version]$_.Version } -Descending)
+    if ($packages.Count -eq 0) {
+        $packages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+            Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
+            Sort-Object { [version]$_.Version } -Descending)
+    }
+    if ($packages.Count -eq 0) { throw 'App Installer/WinGet ist für den JEA-Kontext nicht registriert.' }
+    $path = Join-Path ([string]$packages[0].InstallLocation) 'winget.exe'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'winget.exe fehlt im App-Installer-Paket.' }
+    return $path
+}
+function Invoke-WinGet {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string[]]$Arguments)
+    $quoted = foreach ($item in $Arguments) { if ($item -match '[\s"]') { '"' + $item.Replace('"','\"') + '"' } else { $item } }
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $Path; $start.Arguments = $quoted -join ' '; $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true; $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    try {
+        $process.StartInfo = $start
+        if (-not $process.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
+        $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(300000)) { try { $process.Kill() } catch {}; throw 'WinGet-Aktion überschritt fünf Minuten.' }
+        $process.WaitForExit()
+        $text = @($stdout.GetAwaiter().GetResult(), $stderr.GetAwaiter().GetResult()) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+        [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = ($text -join [Environment]::NewLine).Trim() }
+    } finally { $process.Dispose() }
+}
+if ($Action -eq 'ClientRepair') {
+    $temp = Join-Path ([IO.Path]::GetTempPath()) ('winget-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri 'https://github.com/asheroto/winget-install/releases/latest/download/winget-install.ps1' -OutFile $temp -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        $sig = Get-AuthenticodeSignature -FilePath $temp -ErrorAction Stop
+        if ($sig.Status -ne [Management.Automation.SignatureStatus]::Valid) { throw "Authenticode-Signatur ist ungültig (Status: $($sig.Status))." }
+        $ps51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $out = & $ps51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $temp -Force 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        if ($code -ne 0) { throw "winget-install.ps1 -Force endete mit Exitcode $code. $out" }
+        $version = (& (Get-WinGetPath) --version 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?m)^\s*v?\d+\.\d+') { throw "WinGet besteht den Starttest nach der Client-Reparatur nicht: $version" }
+        [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output="winget-install.ps1 mit gültiger Signatur ausgeführt; WinGet $version. $out" }
+        exit 0
+    } finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+}
+$winget = Get-WinGetPath
+$args = switch ($Action) {
+    'SourceList' { @('source','list','--disable-interactivity') }
+    'SourceUpdate' { @('source','update','--disable-interactivity') }
+    'SourceReset' {
+        $list = Invoke-WinGet -Path $winget -Arguments @('source','list','--disable-interactivity')
+        if ($list.ExitCode -ne 0) { throw "WinGet-Quellenliste fehlgeschlagen: $($list.Output)" }
+        $names = @($list.Output -split "`r?`n" | ForEach-Object { if ($_ -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name } })
+        $custom = @($names | Where-Object { $_ -notin @('winget','msstore','winget-font') } | Select-Object -Unique)
+        if ($custom.Count -gt 0) { throw "Quellenreset zum Schutz kundeneigener Quelle(n) ausgelassen: $($custom -join ', ')" }
+        $reset = Invoke-WinGet -Path $winget -Arguments @('source','reset','--force')
+        if ($reset.ExitCode -ne 0) { throw "WinGet-Quellenreset fehlgeschlagen: $($reset.Output)" }
+        $refresh = Invoke-WinGet -Path $winget -Arguments @('source','update','--name','winget','--disable-interactivity')
+        if ($refresh.ExitCode -ne 0) { throw "WinGet-Quellenaktualisierung nach Reset fehlgeschlagen: $($refresh.Output)" }
+        [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output=($reset.Output + [Environment]::NewLine + $refresh.Output).Trim() }
+        exit 0
+    }
+}
+$result = Invoke-WinGet -Path $winget -Arguments $args
+[pscustomobject]@{ Action=$Action; Success=($result.ExitCode -eq 0); ExitCode=$result.ExitCode; Output=$result.Output }
+exit $result.ExitCode
+'@
+    [System.IO.File]::WriteAllText($wingetMaintenanceScript, $wingetMaintenanceSource, [System.Text.UTF8Encoding]::new($true))
+    $powershell51Path = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $wingetActions = @{
+        'SourceList'='SourceList'; 'SourceUpdate'='SourceUpdate'; 'SourceReset'='SourceReset'; 'ClientRepair'='ClientRepair'
+    }
+    foreach ($entry in $wingetActions.GetEnumerator()) {
+        $wrapperName = switch ($entry.Key) {
+            'SourceList' { 'WindowsUpdateAdm-WinGet-SourceList.cmd' }
+            'SourceUpdate' { 'WindowsUpdateAdm-WinGet-SourceUpdate.cmd' }
+            'SourceReset' { 'WindowsUpdateAdm-WinGet-SourceReset.cmd' }
+            'ClientRepair' { 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
+        }
+        $wrapperPath = Join-Path $JeaBaseDir $wrapperName
+        $wrapperText = "@echo off`r`n`"$powershell51Path`" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$wingetMaintenanceScript`" -Action $($entry.Value)`r`nexit /b %ERRORLEVEL%`r`n"
+        [System.IO.File]::WriteAllText($wrapperPath, $wrapperText, [System.Text.Encoding]::ASCII)
+    }
+    Write-SetupLog 'JEA-WinGet stellt Quellenliste, Quellenupdate, geschützten Quellenreset und signaturgeprüfte Client-Reparatur bereit; Paket-Install/Uninstall sind nicht enthalten.' 'INFO'
     
     if (!(Test-Path $RoleCapDir)) { New-Item -Path $RoleCapDir -ItemType Directory -Force | Out-Null }
     
@@ -926,7 +1023,7 @@ try {
                            -Guid ([Guid]::NewGuid()) `
                            -Author "IT-Administration" `
                            -ModuleVersion "1.0" `
-            -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Update-WindowsUpdateAdmChocolateyPackages') `
+            -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Get-WindowsUpdateAdmChocolateyOutdated', 'Update-WindowsUpdateAdmChocolateyPackages', 'Invoke-WindowsUpdateAdmWinGetMaintenance') `
                            -Description "Stabiler JEA Endpunkt fuer Windows Update Verwaltung"
         Write-SetupLog "JEA-Trägermodul-Manifest neu erstellt: $JeaManifest" 'SUCCESS'
     } else {
@@ -937,7 +1034,7 @@ try {
             # nicht mit der Statusfunktion in die JEA-Sitzung geladen.
             Update-ModuleManifest -Path $JeaManifest `
                                   -RootModule "$JeaModuleName.psm1" `
-                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Update-WindowsUpdateAdmChocolateyPackages') `
+                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Get-WindowsUpdateAdmChocolateyOutdated', 'Update-WindowsUpdateAdmChocolateyPackages', 'Invoke-WindowsUpdateAdmWinGetMaintenance') `
                                   -ErrorAction Stop
             Write-SetupLog "JEA-Trägermodul-Manifest aktualisiert (RootModule und Statusfunktion): $JeaManifest" "SUCCESS"
         }
@@ -992,8 +1089,15 @@ try {
         }
     )
 
-    $jeaVisibleFunctions = @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmChocolateyPackages')
-    $jeaVisibleExternalCommands = @($chocolateyWrapper)
+    $jeaVisibleFunctions = @('Get-WindowsUpdateAdmDeploymentStatus', 'Get-WindowsUpdateAdmChocolateyOutdated', 'Update-WindowsUpdateAdmChocolateyPackages', 'Invoke-WindowsUpdateAdmWinGetMaintenance')
+    $jeaVisibleExternalCommands = @($chocolateyWrapper, $chocolateyQueryWrapper) + @($wingetActions.Keys | ForEach-Object {
+        switch ($_) {
+            'SourceList' { Join-Path $JeaBaseDir 'WindowsUpdateAdm-WinGet-SourceList.cmd' }
+            'SourceUpdate' { Join-Path $JeaBaseDir 'WindowsUpdateAdm-WinGet-SourceUpdate.cmd' }
+            'SourceReset' { Join-Path $JeaBaseDir 'WindowsUpdateAdm-WinGet-SourceReset.cmd' }
+            'ClientRepair' { Join-Path $JeaBaseDir 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
+        }
+    })
     $jeaModulesToImport = @('PSWindowsUpdate', $JeaModuleName)
     $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
     if ($InstallWinGetClientModule -and $winGetClientAvailable) {

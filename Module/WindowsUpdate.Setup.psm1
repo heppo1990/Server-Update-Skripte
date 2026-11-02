@@ -5,12 +5,14 @@ function New-WindowsUpdateAdmDeploymentStatusModuleSource {
         [ValidatePattern('^[0-9]+(?:\.[0-9]+)*$')]
         [string]$Version,
         [bool]$WinGetUpdateOnly = $false,
-        [bool]$ChocolateyUpdateOnly = $true
+        [bool]$ChocolateyUpdateOnly = $true,
+        [bool]$WinGetMaintenanceOnly = $false,
+        [bool]$ChocolateyMaintenanceOnly = $true
     )
 
     @"
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '$Version'; WinGetUpdateOnly = `$$WinGetUpdateOnly; ChocolateyUpdateOnly = `$$ChocolateyUpdateOnly }
+    [PSCustomObject]@{ Version = '$Version'; WinGetUpdateOnly = `$$WinGetUpdateOnly; ChocolateyUpdateOnly = `$$ChocolateyUpdateOnly; WinGetMaintenanceOnly = `$$WinGetMaintenanceOnly; ChocolateyMaintenanceOnly = `$$ChocolateyMaintenanceOnly }
 }
 function Update-WindowsUpdateAdmWinGetPackage {
     [CmdletBinding()]
@@ -19,8 +21,8 @@ function Update-WindowsUpdateAdmWinGetPackage {
         [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')][string]$Source
     )
 
-    # JEA veröffentlicht ausschließlich diesen Update-Aufruf. Install-,
-    # Uninstall-, Source- und Prozessbefehle sind nicht Teil der Rolle.
+    # JEA veröffentlicht ausschließlich diesen validierten Paket-Update-Aufruf.
+    # Install-, Uninstall- und generische Prozessbefehle sind nicht Teil der Rolle.
     $updates = @(Update-WinGetPackage -Id $Id -Source $Source `
         -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:`$false -ErrorAction Stop)
     if ($updates.Count -eq 0) { throw "WinGet lieferte für '$Id' kein Update-Ergebnis." }
@@ -42,7 +44,31 @@ function Update-WindowsUpdateAdmChocolateyPackages {
     `$exitCode = `$LASTEXITCODE
     [PSCustomObject]@{ ExitCode = [int]`$exitCode; Output = [string]`$output }
 }
-Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage, Update-WindowsUpdateAdmChocolateyPackages
+function Get-WindowsUpdateAdmChocolateyOutdated {
+    [CmdletBinding()]
+    param()
+    `$wrapper = Join-Path `$env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\List-ChocolateyOutdated.cmd'
+    `$output = & `$wrapper 2>&1 | Out-String
+    `$exitCode = `$LASTEXITCODE
+    [PSCustomObject]@{ Success = ([int]`$exitCode -in @(0,2)); ExitCode = [int]`$exitCode; Output = [string]`$output }
+}
+function Invoke-WindowsUpdateAdmWinGetMaintenance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('SourceList','SourceUpdate','SourceReset','ClientRepair')][string]$Action
+    )
+    `$wrapperName = switch (`$Action) {
+        'SourceList' { 'WindowsUpdateAdm-WinGet-SourceList.cmd' }
+        'SourceUpdate' { 'WindowsUpdateAdm-WinGet-SourceUpdate.cmd' }
+        'SourceReset' { 'WindowsUpdateAdm-WinGet-SourceReset.cmd' }
+        'ClientRepair' { 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
+    }
+    `$wrapper = Join-Path `$env:ProgramFiles ('WindowsPowerShell\Modules\JEA_Updates\' + `$wrapperName)
+    `$output = & `$wrapper 2>&1 | Out-String
+    `$exitCode = `$LASTEXITCODE
+    [PSCustomObject]@{ Action = `$Action; Success = ([int]`$exitCode -eq 0); ExitCode = [int]`$exitCode; Output = [string]`$output }
+}
+Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage, Get-WindowsUpdateAdmChocolateyOutdated, Update-WindowsUpdateAdmChocolateyPackages, Invoke-WindowsUpdateAdmWinGetMaintenance
 "@
 }
 
