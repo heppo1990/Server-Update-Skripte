@@ -265,6 +265,14 @@ function Resolve-WindowsUpdateJeaChocolateyResults {
                 if ($queryResult.Count -eq 0) { throw 'JEA lieferte kein Chocolatey-Abfrageergebnis.' }
                 $availableOutput = [string]$queryResult[0].Output
                 $queryExitCode = [int]$queryResult[0].ExitCode
+                if ($queryExitCode -eq 9009) {
+                    $resolved += [pscustomobject]@{
+                        Manager='Chocolatey'; Available=$false; Success=$true; Skipped=$true
+                        SkipReason='Chocolatey ist nicht installiert.'; ExitCode=9009
+                        Packages=@(); AvailableOutput=''; ActionOutput=''
+                    }
+                    continue
+                }
                 if (-not [bool]$queryResult[0].Success) { throw "Chocolatey-Abfrage über JEA endete mit Exitcode $queryExitCode. $availableOutput" }
             } catch {
                 $resolved += [pscustomobject]@{

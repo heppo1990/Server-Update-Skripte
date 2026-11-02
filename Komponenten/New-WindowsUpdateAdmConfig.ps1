@@ -902,7 +902,7 @@ try {
     }
     if (-not $chocolateyExecutable) {
         $chocolateyExecutable = Join-Path $env:ProgramData 'chocolatey\bin\choco.exe'
-        Write-SetupLog 'Chocolatey wurde in Maschinenkonfiguration und PATH nicht gefunden; eine Abfrage meldet dies als Fehler.' 'WARN'
+
     }
     $chocolateyWrapper = Join-Path $JeaBaseDir 'Update-ChocolateyPackages.cmd'
     $chocolateyWrapperContent = "@echo off`r`nif not exist ""$chocolateyExecutable"" exit /b 9009`r`n""$chocolateyExecutable"" upgrade all -y`r`nexit /b %ERRORLEVEL%`r`n"
