@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][ValidateSet('SourceList','SourceUpdate','SourceReset','ClientRepair')][string]$Action)
+﻿param([Parameter(Mandatory)][ValidateSet('SourceList','SourceUpdate','SourceReset','ClientRepair')][string]$Action)
 $ErrorActionPreference = 'Stop'
 $worker = Join-Path $PSScriptRoot 'WinGetMaintenance.ps1'
 $staging = Join-Path $PSScriptRoot ('WinGetMaintenance-' + [guid]::NewGuid().ToString('N') + '.tmp')
@@ -24,7 +24,7 @@ try {
     [IO.File]::WriteAllBytes($staging, $bytes)
     if (Test-Path -LiteralPath $worker) {
         if ((Get-FileHash -LiteralPath $worker -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $staging -Algorithm SHA256).Hash) {
-            [IO.File]::Replace($staging, $worker, $null)
+            [IO.File]::Replace($staging, $worker, [System.Management.Automation.Language.NullString]::Value)
         }
     } else { [IO.File]::Move($staging, $worker) }
 } catch {

@@ -37,7 +37,7 @@ function ConvertFrom-WindowsUpdateAdmDeploymentStatus {
         DeploymentVersion = [string]$Status.Version
         WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
         ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
-        WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value -and $Status.PSObject.Properties['MaintenanceRevision'] -and $Status.MaintenanceRevision -eq '4' } else { $false })
+        WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value -and $Status.PSObject.Properties['MaintenanceRevision'] -and $Status.MaintenanceRevision -eq '5' } else { $false })
         ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
     }
 }
@@ -100,7 +100,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
                     $moduleText = if (Test-Path -LiteralPath $modulePath -PathType Leaf) { Get-Content -LiteralPath $modulePath -Raw -ErrorAction Stop } else { '' }
                     $versionMatch = [regex]::Match($moduleText, "function\s+Get-WindowsUpdateAdmDeploymentStatus[\s\S]*?Version\s*=\s*'(?<Version>[^']+)'", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
                     [PSCustomObject]@{
-                        MaintenanceCurrent = $moduleText -match "MaintenanceRevision\s*=\s*'4'"
+                        MaintenanceCurrent = $moduleText -match "MaintenanceRevision\s*=\s*'5'"
                         Build = $build
                         HasStatusFunction = $versionMatch.Success
                         DeploymentVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['Version'].Value } else { '' }
@@ -768,7 +768,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 DeploymentVersion = [string]$deploymentStatus.Version
                 WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
                 ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
-                WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value -and $deploymentStatus.PSObject.Properties['MaintenanceRevision'] -and $deploymentStatus.MaintenanceRevision -eq '4' } else { $false })
+                WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value -and $deploymentStatus.PSObject.Properties['MaintenanceRevision'] -and $deploymentStatus.MaintenanceRevision -eq '5' } else { $false })
                 ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
             }
             if ($status.DeploymentVersion -ne $expectedVersionForValidation -or
