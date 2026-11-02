@@ -22,6 +22,8 @@ function Invoke-WinGet {
     $quoted = foreach ($item in $Arguments) { if ($item -match '[\s"]') { '"' + $item.Replace('"','\"') + '"' } else { $item } }
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Path; $start.Arguments = $quoted -join ' '; $start.UseShellExecute = $false
+    $start.WorkingDirectory = Split-Path -Parent $Path
+    $start.EnvironmentVariables['PATH'] = $start.WorkingDirectory + ';' + $env:PATH
     $start.CreateNoWindow = $true; $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
     $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
     $process = [Diagnostics.Process]::new()
@@ -229,8 +231,10 @@ if ($Action -eq 'ClientRepair') {
         $out = $installerResult.Output
         $code = $installerResult.ExitCode
         if ($code -ne 0) { throw "winget-install.ps1 -Force endete mit Exitcode $code. $out" }
-        $version = (& (Get-WinGetPath) --version 2>&1 | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?m)^\s*v?\d+\.\d+') { throw "WinGet besteht den Starttest nach der Client-Reparatur nicht: $version" }
+        $clientPath = Get-WinGetPath
+        $clientProbe = Invoke-WinGet -Path $clientPath -Arguments @('--version')
+        $version = $clientProbe.Output
+        if ($clientProbe.ExitCode -ne 0 -or $version -notmatch '(?m)^\s*v?\d+\.\d+') { throw "WinGet-Starttest fehlgeschlagen: Pfad=$clientPath; Exitcode=$($clientProbe.ExitCode); Ausgabe=$version; Installerausgabe=$out" }
         [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output="Geprüfte winget-install.ps1 ausgeführt; WinGet $version. $out" }
         exit 0
     } catch {
@@ -245,7 +249,7 @@ if ($Action -eq 'ClientRepair') {
             $repairOutput = Repair-WinGetPackageManager @repairParameters | Out-String
             $probe = Invoke-WinGet -Path (Get-WinGetPath) -Arguments @('--version')
             if ($probe.ExitCode -ne 0 -or $probe.Output -notmatch '(?m)^\s*v?\d+\.\d+') {
-                throw "WinGet-Starttest nach Microsoft-Reparatur fehlgeschlagen: $($probe.Output)"
+                throw "WinGet-Starttest nach Microsoft-Reparatur fehlgeschlagen: Exitcode=$($probe.ExitCode); Ausgabe=$($probe.Output)"
             }
             [pscustomobject]@{
                 Action=$Action; Success=$true; ExitCode=0
@@ -257,12 +261,12 @@ if ($Action -eq 'ClientRepair') {
             try {
                 $portableClient = Get-WinGetPortableClientFromGitHub
                 $portableProbe = Invoke-WinGet -Path $portableClient.Path -Arguments @('--version')
-                if ($portableProbe.ExitCode -ne 0 -or $portableProbe.Output -notmatch '(?m)^\s*v?\d+\.\d+') { throw "Portabler WinGet-Starttest fehlgeschlagen: $($portableProbe.Output)" }
+                if ($portableProbe.ExitCode -ne 0 -or $portableProbe.Output -notmatch '(?m)^\s*v?\d+\.\d+') { throw "Portabler WinGet-Starttest fehlgeschlagen: Pfad=$($portableClient.Path); Exitcode=$($portableProbe.ExitCode); Ausgabe=$($portableProbe.Output)" }
                 [Console]::Out.WriteLine("__WINGET_PORTABLE__ AppX-Reparatur nicht möglich; portable Microsoft-CLI erfolgreich: $($portableProbe.Output). winget-install: $primaryError; Microsoft-AppX: $microsoftError")
                 exit 0
             } catch { $portableError = $_.Exception.ToString() }
             $fallbackError = $microsoftError + [Environment]::NewLine + 'Portabler Microsoft-Fallback: ' + $portableError
-            $fallbackError += $_.Exception.ToString() + [Environment]::NewLine + $_.InvocationInfo.PositionMessage + [Environment]::NewLine + $_.ScriptStackTrace
+ + [Environment]::NewLine + $_.InvocationInfo.PositionMessage + [Environment]::NewLine + $_.ScriptStackTrace
             $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
             $diagnostic = @(
                 'Beide WinGet-Reparaturwege fehlgeschlagen.'
