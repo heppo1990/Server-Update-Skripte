@@ -10,9 +10,9 @@ function New-WindowsUpdateAdmDeploymentStatusModuleSource {
         [bool]$ChocolateyMaintenanceOnly = $true
     )
 
-    @"
+    $moduleSource = @'
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '$Version'; WinGetUpdateOnly = `$$WinGetUpdateOnly; ChocolateyUpdateOnly = `$$ChocolateyUpdateOnly; WinGetMaintenanceOnly = `$$WinGetMaintenanceOnly; ChocolateyMaintenanceOnly = `$$ChocolateyMaintenanceOnly }
+    [PSCustomObject]@{ Version = '__VERSION__'; WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
 }
 function Update-WindowsUpdateAdmWinGetPackage {
     [CmdletBinding()]
@@ -24,7 +24,7 @@ function Update-WindowsUpdateAdmWinGetPackage {
     # JEA veröffentlicht ausschließlich diesen validierten Paket-Update-Aufruf.
     # Install-, Uninstall- und generische Prozessbefehle sind nicht Teil der Rolle.
     $updates = @(Update-WinGetPackage -Id $Id -Source $Source `
-        -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:`$false -ErrorAction Stop)
+        -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:$false -ErrorAction Stop)
     if ($updates.Count -eq 0) { throw "WinGet lieferte für '$Id' kein Update-Ergebnis." }
     $last = $updates[-1]
     [PSCustomObject]@{
@@ -38,38 +38,44 @@ function Update-WindowsUpdateAdmWinGetPackage {
 function Update-WindowsUpdateAdmChocolateyPackages {
     [CmdletBinding()]
     param()
-    `$wrapper = Join-Path `$env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\Update-ChocolateyPackages.cmd'
-    if (-not (Test-Path -LiteralPath `$wrapper -PathType Leaf)) { throw 'Der feste Chocolatey-Updatewrapper fehlt.' }
-    `$output = & `$wrapper 2>&1 | Out-String
-    `$exitCode = `$LASTEXITCODE
-    [PSCustomObject]@{ ExitCode = [int]`$exitCode; Output = [string]`$output }
+    $wrapper = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\Update-ChocolateyPackages.cmd'
+    if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) { throw 'Der feste Chocolatey-Updatewrapper fehlt.' }
+    $output = & $wrapper 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    [PSCustomObject]@{ ExitCode = [int]$exitCode; Output = [string]$output }
 }
 function Get-WindowsUpdateAdmChocolateyOutdated {
     [CmdletBinding()]
     param()
-    `$wrapper = Join-Path `$env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\List-ChocolateyOutdated.cmd'
-    `$output = & `$wrapper 2>&1 | Out-String
-    `$exitCode = `$LASTEXITCODE
-    [PSCustomObject]@{ Success = ([int]`$exitCode -in @(0,2)); ExitCode = [int]`$exitCode; Output = [string]`$output }
+    $wrapper = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\List-ChocolateyOutdated.cmd'
+    $output = & $wrapper 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    [PSCustomObject]@{ Success = ([int]$exitCode -in @(0,2)); ExitCode = [int]$exitCode; Output = [string]$output }
 }
 function Invoke-WindowsUpdateAdmWinGetMaintenance {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('SourceList','SourceUpdate','SourceReset','ClientRepair')][string]$Action
     )
-    `$wrapperName = switch (`$Action) {
+    $wrapperName = switch ($Action) {
         'SourceList' { 'WindowsUpdateAdm-WinGet-SourceList.cmd' }
         'SourceUpdate' { 'WindowsUpdateAdm-WinGet-SourceUpdate.cmd' }
         'SourceReset' { 'WindowsUpdateAdm-WinGet-SourceReset.cmd' }
         'ClientRepair' { 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
     }
-    `$wrapper = Join-Path `$env:ProgramFiles ('WindowsPowerShell\Modules\JEA_Updates\' + `$wrapperName)
-    `$output = & `$wrapper 2>&1 | Out-String
-    `$exitCode = `$LASTEXITCODE
-    [PSCustomObject]@{ Action = `$Action; Success = ([int]`$exitCode -eq 0); ExitCode = [int]`$exitCode; Output = [string]`$output }
+    $wrapper = Join-Path $env:ProgramFiles ('WindowsPowerShell\Modules\JEA_Updates\' + $wrapperName)
+    $output = & $wrapper 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+    [PSCustomObject]@{ Action = $Action; Success = ([int]$exitCode -eq 0); ExitCode = [int]$exitCode; Output = [string]$output }
 }
 Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage, Get-WindowsUpdateAdmChocolateyOutdated, Update-WindowsUpdateAdmChocolateyPackages, Invoke-WindowsUpdateAdmWinGetMaintenance
-"@
+'@
+    $moduleSource = $moduleSource.Replace('__VERSION__', $Version).
+        Replace('__WINGET_UPDATE_ONLY__', ('$' + $WinGetUpdateOnly.ToString().ToLowerInvariant())).
+        Replace('__CHOCO_UPDATE_ONLY__', ('$' + $ChocolateyUpdateOnly.ToString().ToLowerInvariant())).
+        Replace('__WINGET_MAINTENANCE_ONLY__', ('$' + $WinGetMaintenanceOnly.ToString().ToLowerInvariant())).
+        Replace('__CHOCO_MAINTENANCE_ONLY__', ('$' + $ChocolateyMaintenanceOnly.ToString().ToLowerInvariant()))
+    return $moduleSource
 }
 
 function Write-WindowsUpdateSetupLog {
