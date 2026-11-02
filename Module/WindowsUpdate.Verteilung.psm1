@@ -26,6 +26,22 @@ function Get-WindowsUpdateDeploymentClientCertificate {
     return $null
 }
 
+function ConvertFrom-WindowsUpdateAdmDeploymentStatus {
+    param([Parameter(Mandatory)][object]$Status)
+
+    $winGetProperty = $Status.PSObject.Properties['WinGetUpdateOnly']
+    $chocolateyProperty = $Status.PSObject.Properties['ChocolateyUpdateOnly']
+    $maintenanceProperty = $Status.PSObject.Properties['WinGetMaintenanceOnly']
+    $chocolateyMaintenanceProperty = $Status.PSObject.Properties['ChocolateyMaintenanceOnly']
+    [PSCustomObject]@{
+        DeploymentVersion = [string]$Status.Version
+        WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
+        ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
+        WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value } else { $false })
+        ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
+    }
+}
+
 function Test-WindowsUpdateDeploymentConfiguration {
     param(
         [Parameter(Mandatory)][string]$Servername,
@@ -52,20 +68,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
         ConfigurationName = 'WindowsUpdateAdm'
         SessionOption = (New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000)
         ErrorAction = 'Stop'
-        ScriptBlock = {
-            $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
-            $winGetProperty = $deploymentStatus.PSObject.Properties['WinGetUpdateOnly']
-            $chocolateyProperty = $deploymentStatus.PSObject.Properties['ChocolateyUpdateOnly']
-            $maintenanceProperty = $deploymentStatus.PSObject.Properties['WinGetMaintenanceOnly']
-            $chocolateyMaintenanceProperty = $deploymentStatus.PSObject.Properties['ChocolateyMaintenanceOnly']
-            [PSCustomObject]@{
-                DeploymentVersion = [string]$deploymentStatus.Version
-                WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
-                ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
-                WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value } else { $false })
-                ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
-            }
-        }
+        ScriptBlock = { Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop }
     }
     if ($certificate) {
         $endpointParameters.UseSSL = $true
@@ -73,7 +76,8 @@ function Test-WindowsUpdateDeploymentConfiguration {
     }
 
     try {
-        $status = Invoke-Command @endpointParameters
+        $rawStatus = Invoke-Command @endpointParameters
+        $status = ConvertFrom-WindowsUpdateAdmDeploymentStatus -Status $rawStatus
         if ($status.DeploymentVersion -eq $ExpectedDeploymentVersion -and
             $status.ChocolateyUpdateOnly -eq $ExpectedChocolateyUpdateOnly -and
             $status.WinGetMaintenanceOnly -eq $ExpectedWinGetMaintenanceOnly -and
@@ -727,20 +731,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
         $testParams = @{
             ComputerName      = $Servername
             ConfigurationName = 'WindowsUpdateAdm'
-            ScriptBlock       = {
-                $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
-                $winGetProperty = $deploymentStatus.PSObject.Properties['WinGetUpdateOnly']
-                $chocolateyProperty = $deploymentStatus.PSObject.Properties['ChocolateyUpdateOnly']
-                $maintenanceProperty = $deploymentStatus.PSObject.Properties['WinGetMaintenanceOnly']
-                $chocolateyMaintenanceProperty = $deploymentStatus.PSObject.Properties['ChocolateyMaintenanceOnly']
-                [PSCustomObject]@{
-                    DeploymentVersion = [string]$deploymentStatus.Version
-                    WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
-                    ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
-                    WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value } else { $false })
-                    ChocolateyMaintenanceOnly = [bool]$(if ($chocolateyMaintenanceProperty) { $chocolateyMaintenanceProperty.Value } else { $false })
-                }
-            }
+            ScriptBlock       = { Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop }
             ErrorAction       = 'Stop'
         }
         if ($DeployType -ne 'AD') {
@@ -758,7 +749,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
         # kopieren, damit die Endpunktprüfung nicht mit leerem Sollwert läuft.
         $expectedVersionForValidation = [string]$ExpectedDeploymentVersion
         $validateEndpoint = {
-            $status = Invoke-Command @testParams
+            $rawStatus = Invoke-Command @testParams
+            $status = ConvertFrom-WindowsUpdateAdmDeploymentStatus -Status $rawStatus
             if ($status.DeploymentVersion -ne $expectedVersionForValidation -or
                 $status.ChocolateyUpdateOnly -ne $ExpectedChocolateyUpdateOnly -or
                 $status.WinGetMaintenanceOnly -ne $ExpectedWinGetMaintenanceOnly -or
