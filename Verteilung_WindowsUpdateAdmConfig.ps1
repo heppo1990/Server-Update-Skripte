@@ -328,7 +328,6 @@ ForEach ($Server in $Serverlist) {
                 Status = 'Skipped'
                 Message = "WinRM-Ports 5985/5986 nach $($winRmProbe.AttemptsPerformed) Prüfversuch(en) nicht erreichbar; Ziel übersprungen."
             }
-            Write-DeployLog "[$Servername] WinRM nicht erreichbar; Ziel wird wie bei Check, Download und Install übersprungen." -Level Warning
         } else {
         $deployResult = Invoke-WindowsUpdateServerDeployment `
             -Servername                $Servername `
