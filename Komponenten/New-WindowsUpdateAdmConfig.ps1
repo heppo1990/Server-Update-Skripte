@@ -806,6 +806,8 @@ try {
         # und darf weder erneut NuGet aufrufen noch temporäre Offlinepakete
         # benötigen.
         $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -FinalizeJEA -ModulesVerifiedCurrent -DeploymentVersion "{1}" -ResumeLogPath "{2}"' -f $PSCommandPath, $taskDeploymentVersion, $script:SetupLogPath
+        # Die Finalisierung muss dieselbe WinGet-Rolle wie der Remote-Lauf erzeugen.
+        if ($InstallWinGetClientModule) { $arguments += ' -InstallWinGetClientModule' }
         if (-not [string]::IsNullOrWhiteSpace($ManagementComputerAccount)) {
             # Die SYSTEM-Finalisierung muss dieselbe eingeschränkte JEA-Rolle
             # für den Verwaltungsserver registrieren wie der ursprüngliche Lauf.
