@@ -10,7 +10,7 @@
     - Prüft und installiert/aktualisiert PSWindowsUpdate auf neueste Version
     - Erstellt stabiles JEA-Trägermodul (JEA_Updates) für Role Capabilities
     - Erstellt Role Capability Datei mit nur benötigten Cmdlets
-    - SessionType Default, RunAsVirtualAccount für erhöhte Rechte
+    - SessionType Default mit ConstrainedLanguage und RunAsVirtualAccount
     - Maximale Sicherheit durch Whitelist-Ansatz
     - Sprachunabhängige SID-Auflösung für Administratoren (S-1-5-32-544)
     - Permanente Speicherung der Konfigurationsdateien
@@ -78,6 +78,12 @@ param(
     # erfolgreich und alle benötigten Module/Provider sind bereits aktuell.
     [Parameter(Mandatory=$false)]
     [switch]$ModulesVerifiedCurrent,
+
+    # Alle nutzbaren IP-Adressen des Verwaltungsservers. Sie werden nur für
+    # eine neu anzulegende WinRM-HTTPS-Firewallregel verwendet; vorhandene
+    # Firewallregeln bleiben unverändert.
+    [Parameter(Mandatory=$false)]
+    [string[]]$ManagementServerAddresses = @(),
 
     # Computerkonto des Verwaltungsservers. Dieses erhält ausschließlich die
     # eingeschränkte JEA-Rolle für Update-Abfragen aus einem SYSTEM-Aufgabenlauf.
@@ -216,7 +222,7 @@ try {
         }
     }
 
-    # === PowerShell Gallery konfigurieren
+    # === PowerShell Gallery lesen, aber Vertrauensstellung nicht ändern
     # =========================================================
     Write-SetupLog "" "INFO"
     Write-SetupLog "=== PowerShell Gallery Konfiguration ===" "INFO"
@@ -226,13 +232,7 @@ try {
     } else {
     try {
         $PSGallery = Get-PSRepository -Name PSGallery -ErrorAction Stop
-        if ($PSGallery.InstallationPolicy -ne 'Trusted') {
-            Write-SetupLog "Setze PSGallery auf 'Trusted'..." "INFO"
-            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
-            Write-SetupLog "PSGallery als vertrauenswuerdig markiert" "SUCCESS"
-        } else {
-            Write-SetupLog "PSGallery bereits als vertrauenswuerdig konfiguriert" "SUCCESS"
-        }
+        Write-SetupLog "PSGallery gefunden (InstallationPolicy=$($PSGallery.InstallationPolicy)); die persistente Vertrauensstellung bleibt unverändert." 'SUCCESS'
     }
     catch {
         Write-SetupLog 'PSGallery-Konfiguration übersprungen; Details im Setup-Protokoll.' 'WARN'
@@ -369,24 +369,15 @@ try {
         # Ersteinrichtungs-Sitzung unnötig abbrechen.
         Write-SetupLog "Remote-Setup erkannt – PS-Remoting wird nicht erneut aktiviert." "INFO"
     } else {
-        try {
-            if ($PSVersionTable.PSEdition -eq 'Core') {
-                # Die PowerShell-7-Warnung, dass Windows-PowerShell-Endpunkte
-                # nicht mit aktiviert werden, ist hier erwartet: Das Setup
-                # registriert den benötigten WindowsUpdateAdm-Endpunkt separat.
-                # Kein zweiter Enable-PSRemoting-Lauf, der weitere Standard-
-                # Endpunkte für eingehenden Remotezugriff freischalten würde.
-                Enable-PSRemoting -Force -WarningAction SilentlyContinue -ErrorAction Stop
-                Write-SetupLog "PowerShell-7-Remoting aktiviert; WindowsUpdateAdm wird separat als JEA-Endpunkt registriert." "SUCCESS"
-            } else {
-                Enable-PSRemoting -Force -ErrorAction Stop
-                Write-SetupLog "PS-Remoting aktiviert" "SUCCESS"
-            }
+        $winRmService = Get-Service -Name WinRM -ErrorAction SilentlyContinue
+        $standardListener = @(Get-ChildItem WSMan:\localhost\Listener -ErrorAction SilentlyContinue | Where-Object {
+            (Get-Item "$($_.PSPath)\Transport" -ErrorAction SilentlyContinue).Value -in @('HTTP', 'HTTPS')
+        })
+        $standardPowerShellEndpoint = Get-PSSessionConfiguration -Name 'Microsoft.PowerShell' -ErrorAction SilentlyContinue
+        if (-not $winRmService -or $winRmService.Status -ne 'Running' -or $standardListener.Count -eq 0 -or -not $standardPowerShellEndpoint) {
+            throw 'Die vorhandene WinRM-Baseline (laufender Dienst, Listener und Microsoft.PowerShell-Endpunkt) fehlt. Das Setup verändert sie nicht automatisch. Baseline separat wiederherstellen und Verteilung erneut starten.'
         }
-        catch {
-            Write-SetupLog 'PS-Remoting ist bereits aktiv oder konnte nicht erneut aktiviert werden; Details im Setup-Protokoll.' 'INFO'
-            Write-SetupDiagnostic -Operation 'PS-Remoting-Konfiguration' -ErrorRecord $_
-        }
+        Write-SetupLog 'Vorhandene WinRM-Baseline erkannt; Standardlistener, Endpunkte und Firewallregeln bleiben unverändert.' 'SUCCESS'
     }
 
     # =========================================================
@@ -427,66 +418,71 @@ try {
         $certStore = "Cert:\LocalMachine\My"
         $ServerAuthOID = "1.3.6.1.5.5.7.3.1"
 
-        # 1. Bestehende Zertifikate prüfen
-        $existingCert = Get-ChildItem $certStore |
-            Where-Object { $_.Subject -eq "CN=$hostname" -and $_.NotAfter -gt (Get-Date).AddDays(30) } |
-            Sort-Object NotAfter -Descending |
-            Select-Object -First 1
-
-        # 2. Validierung: Hat das gefundene Zertifikat die nötige EKU?
-        if ($existingCert) {
-            $hasServerAuth = $existingCert.Extensions | 
-                             Where-Object { $_.Oid.FriendlyName -eq "Enhanced Key Usage" -or $_.Oid.Value -eq "2.5.29.37" } |
-                             Where-Object { $_.Format($false) -match $ServerAuthOID -or $_.Format($false) -match "Serverauthentifizierung" }
-
-            if (-not $hasServerAuth) {
-                Write-SetupLog "Vorhandenes Zertifikat hat keine Server-EKU. Lösche ungültiges Zertifikat..." "WARN"
-                Remove-Item -Path $existingCert.PSPath -Force
-                $existingCert = $null
-            }
-        }
-
-        # 3. Zertifikat nutzen oder neu erstellen
-        if ($existingCert -and -not $ForceUpdate) {
-            Write-SetupLog "Gültiges Zertifikat bereits vorhanden (läuft ab: $($existingCert.NotAfter.ToString('yyyy-MM-dd')))" "SUCCESS"
-            $cert = $existingCert
-        } else {
-            if ($existingCert) {
-                Write-SetupLog "Erneuere Zertifikat (ForceUpdate)..." "UPDATE"
-                Remove-Item -Path $existingCert.PSPath -Force -ErrorAction Stop
-            } else {
-                Write-SetupLog "Erstelle neues selbstsigniertes Zertifikat für $hostname..." "INFO"
-            }
-            try {
-                $cert = New-SelfSignedCertificate `
-                    -DnsName $hostname `
-                    -CertStoreLocation $certStore `
-                    -NotAfter (Get-Date).AddYears(10) `
-                    -KeyUsage DigitalSignature, KeyEncipherment `
-                    -TextExtension @("2.5.29.37={text}$ServerAuthOID") `
-                    -HashAlgorithm "SHA256" `
-                    -ErrorAction Stop
-                Write-SetupLog "Zertifikat erstellt: $($cert.Thumbprint) (inkl. Server-EKU)" "SUCCESS"
-            }
-            catch {
-                Write-SetupDiagnostic -Operation 'WinRM-HTTPS-Zertifikat' -ErrorRecord $_ -Context @("Computer=$hostname")
-                throw 'WinRM-HTTPS-Zertifikat konnte nicht erstellt werden; Details stehen im Setup-Protokoll.'
-            }
-        }
-        
-
-        # Prüfen ob HTTPS-Listener bereits existiert
+        # HTTPS-Baseline zuerst lesen. Einen bestehenden Listener oder sein
+        # Zertifikat ersetzt/entfernt das Setup auch mit -ForceUpdate niemals.
         $httpsListener = Get-ChildItem WSMan:\localhost\Listener |
             Where-Object { (Get-Item "$($_.PSPath)\Transport" -ErrorAction SilentlyContinue).Value -eq 'HTTPS' } |
             Select-Object -First 1
-
-        if ($httpsListener -and -not $ForceUpdate) {
-            Write-SetupLog "WinRM HTTPS-Listener bereits vorhanden." "SUCCESS"
-        } else {
-            if ($httpsListener) {
-                Write-SetupLog "Entferne alten HTTPS-Listener..." "INFO"
-                Remove-Item -Path $httpsListener.PSPath -Recurse -Force -ErrorAction Stop
+        $initialSslBindingOutput = @(& "$env:SystemRoot\System32\netsh.exe" http show sslcert ipport=0.0.0.0:5986 2>&1)
+        $initialSslBindingText = ($initialSslBindingOutput | ForEach-Object { [string]$_ }) -join "`n"
+        $sslBindingExistedBeforeSetup = [regex]::IsMatch($initialSslBindingText, '(?im)^\s*(?:Certificate\s+Hash|Zertifikathash|Zertifikat-Hash)\s*:\s*[0-9a-f]{40,64}\s*$')
+        $listenerCert = $null
+        if ($httpsListener) {
+            $listenerThumbprint = [string](Get-Item "$($httpsListener.PSPath)\CertificateThumbprint" -ErrorAction Stop).Value
+            if ([string]::IsNullOrWhiteSpace($listenerThumbprint)) {
+                throw 'Der vorhandene HTTPS-Listener hat keinen lesbaren Zertifikat-Thumbprint; die Baseline bleibt unverändert.'
             }
+            $listenerCert = Get-Item (Join-Path $certStore $listenerThumbprint) -ErrorAction SilentlyContinue
+            if (-not $listenerCert -or $listenerCert.NotAfter -le (Get-Date)) {
+                throw "Der vorhandene HTTPS-Listener verwendet ein fehlendes oder abgelaufenes Zertifikat ($listenerThumbprint). Das Setup verändert den vorhandenen Listener nicht; Zertifikat muss separat erneuert werden."
+            }
+            $listenerHasServerAuth = @($listenerCert.Extensions | Where-Object {
+                ($_.Oid.FriendlyName -eq 'Enhanced Key Usage' -or $_.Oid.Value -eq '2.5.29.37') -and
+                ($_.Format($false) -match [regex]::Escape($ServerAuthOID) -or $_.Format($false) -match 'Serverauthentifizierung')
+            }).Count -gt 0
+            if (-not $listenerHasServerAuth) {
+                throw "Das Zertifikat des vorhandenen HTTPS-Listeners ($listenerThumbprint) hat keine Serverauthentifizierungs-EKU. Der Listener bleibt unverändert."
+            }
+            $cert = $listenerCert
+            Write-SetupLog "Vorhandener HTTPS-Listener und sein gültiges Zertifikat $listenerThumbprint bleiben unverändert." 'SUCCESS'
+        } else {
+            $existingCert = Get-ChildItem $certStore |
+                Where-Object { $_.Subject -eq "CN=$hostname" -and $_.NotAfter -gt (Get-Date) } |
+                Sort-Object NotAfter -Descending |
+                Select-Object -First 1
+            $existingCertHasServerAuth = $false
+            if ($existingCert) {
+                $existingCertHasServerAuth = @($existingCert.Extensions | Where-Object {
+                    ($_.Oid.FriendlyName -eq 'Enhanced Key Usage' -or $_.Oid.Value -eq '2.5.29.37') -and
+                    ($_.Format($false) -match [regex]::Escape($ServerAuthOID) -or $_.Format($false) -match 'Serverauthentifizierung')
+                }).Count -gt 0
+            }
+            if ($existingCert -and $existingCertHasServerAuth) {
+                $cert = $existingCert
+                Write-SetupLog "Gültiges vorhandenes Serverzertifikat wird verwendet (läuft ab: $($cert.NotAfter.ToString('yyyy-MM-dd'))); vorhandene Zertifikate bleiben erhalten." 'SUCCESS'
+            } else {
+                if ($existingCert) {
+                    Write-SetupLog 'Vorhandenes Zertifikat ohne passende Server-EKU bleibt unverändert; ein zusätzliches Zertifikat wird erstellt.' 'WARN'
+                } else {
+                    Write-SetupLog "Erstelle zusätzliches selbstsigniertes Zertifikat für $hostname..." 'INFO'
+                }
+                try {
+                    $cert = New-SelfSignedCertificate `
+                        -DnsName $hostname `
+                        -CertStoreLocation $certStore `
+                        -NotAfter (Get-Date).AddYears(10) `
+                        -KeyUsage DigitalSignature, KeyEncipherment `
+                        -TextExtension @("2.5.29.37={text}$ServerAuthOID") `
+                        -HashAlgorithm 'SHA256' `
+                        -ErrorAction Stop
+                    Write-SetupLog "Zusätzliches Zertifikat erstellt: $($cert.Thumbprint) (inkl. Server-EKU). Vorhandene Zertifikate wurden nicht verändert." 'SUCCESS'
+                }
+                catch {
+                    Write-SetupDiagnostic -Operation 'WinRM-HTTPS-Zertifikat' -ErrorRecord $_ -Context @("Computer=$hostname")
+                    throw 'WinRM-HTTPS-Zertifikat konnte nicht erstellt werden; Details stehen im Setup-Protokoll.'
+                }
+            }
+
             Write-SetupLog "Erstelle WinRM HTTPS-Listener..." "INFO"
             try {
                 New-Item -Path WSMan:\localhost\Listener `
@@ -527,6 +523,9 @@ try {
 
             $clientCertificateNegotiationEnabled = $negotiationMatch.Groups[1].Value -match '^(?i:Enabled|Aktiviert)$'
             if (-not $clientCertificateNegotiationEnabled) {
+                if ($sslBindingExistedBeforeSetup) {
+                    throw 'Die vorhandene HTTP.sys-SSL-Bindung hat Clientzertifikataushandlung deaktiviert. Die bestehende Baseline wird nicht geändert; WinRM-Clientzertifikatauthentifizierung kann ohne separate Freigabe nicht eingerichtet werden.'
+                }
                 $certificateHash = $certificateHashMatch.Groups[1].Value
                 $applicationId = $applicationIdMatch.Groups[1].Value
                 $certificateStoreName = $certificateStoreMatch.Groups[1].Value
@@ -560,25 +559,30 @@ try {
             throw 'HTTP.sys-Clientzertifikataushandlung für WinRM HTTPS konnte nicht sicher eingerichtet werden; Details stehen im Setup-Protokoll.'
         }
 
-        # Firewall-Regel für Port 5986
+        # Nur eine neu anzulegende WinRM-HTTPS-Regel wird auf die Adressen des
+        # Verwaltungsservers begrenzt. Vorhandene Regeln sind Baseline und
+        # werden weder geändert noch ersetzt.
         $fwRule = Get-NetFirewallRule -DisplayName "WinRM HTTPS" -ErrorAction SilentlyContinue
         if ($fwRule) {
-            Write-SetupLog "Firewall-Regel für WinRM HTTPS bereits vorhanden." "SUCCESS"
-        } else {
+            Write-SetupLog "Vorhandene WinRM-HTTPS-Firewallregel bleibt unverändert (Baseline)." "SUCCESS"
+        } elseif (@($ManagementServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
             try {
                 New-NetFirewallRule `
                     -DisplayName "WinRM HTTPS" `
                     -Direction Inbound `
                     -Protocol TCP `
                     -LocalPort 5986 `
+                    -RemoteAddress $ManagementServerAddresses `
                     -Action Allow `
                     -ErrorAction Stop | Out-Null
-                Write-SetupLog "Firewall-Regel für Port 5986 (WinRM HTTPS) erstellt." "SUCCESS"
+                Write-SetupLog "Neue WinRM-HTTPS-Regel auf Verwaltungsserver-Adressen begrenzt: $($ManagementServerAddresses -join ', ')" "SUCCESS"
             }
             catch {
-                Write-SetupLog 'Firewall-Regel konnte nicht erstellt werden; Details im Setup-Protokoll.' 'WARN'
-                Write-SetupDiagnostic -Operation 'WinRM-Firewallregel' -ErrorRecord $_
+                Write-SetupLog 'Eingeschränkte WinRM-HTTPS-Firewallregel konnte nicht erstellt werden; Details im Setup-Protokoll.' 'WARN'
+                Write-SetupDiagnostic -Operation 'WinRM-Firewallregel' -ErrorRecord $_ -Context @("RemoteAddress=$($ManagementServerAddresses -join ',')")
             }
+        } else {
+            Write-SetupLog 'Keine Verwaltungsserver-IP ermittelt; es wird bewusst keine unbeschränkte WinRM-HTTPS-Firewallregel erstellt.' 'WARN'
         }
 
         Write-SetupLog "WinRM HTTPS Setup abgeschlossen." "SUCCESS"
@@ -601,16 +605,9 @@ try {
             Write-SetupDiagnostic -Operation 'WinRM-Zertifikatsauthentifizierung' -ErrorRecord $_
         }
 
-        # LocalAccountTokenFilterPolicy setzen (nötig für lokale Accounts via Zertifikat)
-        try {
-            $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
-            Set-ItemProperty -Path $regPath -Name "LocalAccountTokenFilterPolicy" -Value 1 -Type DWord -ErrorAction Stop
-            Write-SetupLog "LocalAccountTokenFilterPolicy gesetzt." "SUCCESS"
-        }
-        catch {
-            Write-SetupLog 'LocalAccountTokenFilterPolicy konnte nicht gesetzt werden; Details im Setup-Protokoll.' 'WARN'
-            Write-SetupDiagnostic -Operation 'LocalAccountTokenFilterPolicy' -ErrorRecord $_
-        }
+        # LocalAccountTokenFilterPolicy ist globale Baseline. Das Setup liest
+        # oder verändert diesen Wert nicht und setzt ihn nicht dauerhaft auf 1.
+        Write-SetupLog 'LocalAccountTokenFilterPolicy bleibt unverändert; die Windows-Baseline wird nicht angepasst.' 'INFO'
 
         # Client-Zertifikat (Public Key) aus Skriptordner importieren
         $clientCertPath = Join-Path $PSScriptRoot 'WinRM-ClientCert.cer'
@@ -622,12 +619,18 @@ try {
 
                 $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "LocalMachine")
                 $rootStore.Open("ReadWrite")
-                $rootStore.Add($clientCert)
+                $rootHasClientCertificate = @($rootStore.Certificates | Where-Object { $_.Thumbprint -eq $clientCert.Thumbprint }).Count -gt 0
+                if (-not $rootHasClientCertificate) {
+                    $rootStore.Add($clientCert)
+                }
                 $rootStore.Close()
 
                 $trustedStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "LocalMachine")
                 $trustedStore.Open("ReadWrite")
-                $trustedStore.Add($clientCert)
+                $trustedStoreHasClientCertificate = @($trustedStore.Certificates | Where-Object { $_.Thumbprint -eq $clientCert.Thumbprint }).Count -gt 0
+                if (-not $trustedStoreHasClientCertificate) {
+                    $trustedStore.Add($clientCert)
+                }
                 $trustedStore.Close()
 
                 Write-SetupLog "Client-Zertifikat importiert: $($clientCert.Thumbprint)" "SUCCESS"
@@ -672,26 +675,20 @@ try {
                 $certificateMappingConfirmed = $false
 
                 if ($PreserveExistingCertificateMapping -and -not $ForceUpdate) {
-                    if ($currentMapping.Count -ne 1) {
-                        throw "Zertifikatsmapping konnte nicht eindeutig erhalten werden (passende Einträge: $($currentMapping.Count))."
+                    if ($currentMapping.Count -ne 1 -or $subjectMappings.Count -ne 1 -or $issuerMappings.Count -ne 1) {
+                        throw "Zertifikatsmapping konnte ohne Änderungen nicht eindeutig bestätigt werden (Subject=$($subjectMappings.Count), Issuer=$($issuerMappings.Count), passend=$($currentMapping.Count)). Bestehende Mappings bleiben erhalten."
                     }
                     Write-SetupLog "Zertifikatverbindung wurde vor dem Setup bestätigt; Mapping für den aktuellen Thumbprint bleibt erhalten." "SUCCESS"
-                    $staleMappings = @($subjectMappings + $issuerMappings | Where-Object {
-                        $_.PSPath -ne $currentMapping[0].PSPath
-                    } | Sort-Object -Property PSPath -Unique)
-                    foreach ($staleMapping in $staleMappings) {
-                        Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
-                    }
                     $certificateMappingConfirmed = $true
                 } elseif ($currentMapping.Count -gt 0 -and -not $CertificateMappingCredential -and -not $ForceUpdate) {
                     # Ohne Einrichtungsdaten kann ein vorhandener Eintrag nicht
                     # erneuert werden. Die Verteilung bestätigt die Verbindung
                     # normalerweise vorher und setzt dann PreserveExisting... .
-                    if ($currentMapping.Count -eq 1 -and $issuerMappings.Count -eq 1) {
+                    if ($currentMapping.Count -eq 1 -and $subjectMappings.Count -eq 1 -and $issuerMappings.Count -eq 1) {
                         $certificateMappingConfirmed = $false
                         Write-SetupLog "Ein Zertifikat-Mapping für den aktuellen Thumbprint ist vorhanden; seine Funktion wird anschließend durch den zentralen Verbindungstest bestätigt." "INFO"
                     } else {
-                        throw "Zertifikatsmapping ist mehrdeutig (passende Subject/Issuer-Einträge: $($currentMapping.Count); alle Einträge mit Zertifikat-Issuer: $($issuerMappings.Count)); Einrichtungsdaten zum Bereinigen und Erneuern fehlen."
+                        throw "Zertifikatsmapping ist mehrdeutig (Subject=$($subjectMappings.Count), Issuer=$($issuerMappings.Count), passend=$($currentMapping.Count)); bestehende Einträge bleiben unverändert."
                     }
                 } elseif (-not $CertificateMappingCredential) {
                     throw "Für ein neues oder zu erneuerndes Zertifikat-Mapping wurden keine Einrichtungs-Administrator-Anmeldedaten übergeben."
@@ -706,25 +703,27 @@ try {
                         throw 'Der lokale Kontoname für das WinRM-Zertifikatsmapping ist leer.'
                     }
                     try {
-                        # Diese Anmeldedaten wurden vom Aufrufer verwendet, wenn
-                        # die Client-Zertifikatsverbindung nicht funktioniert hat.
-                        # Daher alle Einträge dieses Zertifikats (Issuer-Thumbprint)
-                        # und alle kollidierenden Subject-Einträge ersetzen, auch
-                        # wenn Subject und Issuer schon passen: das gespeicherte
-                        # WinRM-Passwort kann veraltet oder die Zuordnung mehrdeutig sein.
-                        $staleMappings = @($subjectMappings + $issuerMappings | Sort-Object -Property PSPath -Unique)
-                        foreach ($staleMapping in $staleMappings) {
-                            Remove-Item $staleMapping.PSPath -Recurse -Force -ErrorAction Stop
+                        if ($currentMapping.Count -eq 1 -and $subjectMappings.Count -eq 1 -and $issuerMappings.Count -eq 1) {
+                            $mappedUser = [string](Get-WUAdmClientCertificateMappingValue -Mapping $currentMapping[0] -Name 'UserName')
+                            if ($mappedUser -ine $localUser) {
+                                throw "Vorhandenes Mapping verweist auf '$mappedUser', Einrichtungsdaten nennen '$localUser'; vorhandene Zuordnung wird nicht ersetzt."
+                            }
+                            $certificateMappingConfirmed = $true
+                            Write-SetupLog "Passendes Zertifikatsmapping für '$localUser' ist bereits vorhanden und bleibt unverändert." 'SUCCESS'
+                        } elseif ($subjectMappings.Count -gt 0 -or $issuerMappings.Count -gt 0) {
+                            throw "Ein vorhandenes Zertifikatsmapping kollidiert mit dem gewünschten Subject oder Issuer (Subject=$($subjectMappings.Count), Issuer=$($issuerMappings.Count)); bestehende Mappings bleiben unverändert."
+                        } else {
+                            New-Item -Path WSMan:\localhost\ClientCertificate `
+                                -Subject    $mappingSubject `
+                                -URI        "*" `
+                                -Issuer     $clientCert.Thumbprint `
+                                -Credential (New-Object System.Management.Automation.PSCredential(
+                                    $localUser,
+                                    $CertificateMappingCredential.Password
+                                )) `
+                                -Confirm:$false `
+                                -ErrorAction Stop | Out-Null
                         }
-                        New-Item -Path WSMan:\localhost\ClientCertificate `
-                            -Subject    $mappingSubject `
-                            -URI        "*" `
-                            -Issuer     $clientCert.Thumbprint `
-                            -Credential (New-Object System.Management.Automation.PSCredential(
-                                $localUser,
-                                $CertificateMappingCredential.Password
-                            )) `
-                            -Force -ErrorAction Stop | Out-Null
                         $verifiedMappings = @(Get-ChildItem WSMan:\localhost\ClientCertificate -Recurse -ErrorAction SilentlyContinue |
                             Where-Object {
                                 (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Subject') -eq $mappingSubject -and
@@ -735,11 +734,13 @@ try {
                             Where-Object {
                                 (Get-WUAdmClientCertificateMappingValue -Mapping $_ -Name 'Issuer') -eq $clientCert.Thumbprint
                             })
-                        if ($verifiedMappings.Count -ne 1 -or $remainingIssuerMappings.Count -ne 1) {
+                        if (-not $certificateMappingConfirmed -and ($verifiedMappings.Count -ne 1 -or $remainingIssuerMappings.Count -ne 1)) {
                             throw "Zertifikatsmapping ist nach dem Anlegen nicht eindeutig (gültige Zuordnungen: $($verifiedMappings.Count); Einträge für Zertifikat: $($remainingIssuerMappings.Count))."
                         }
-                        $certificateMappingConfirmed = $true
-                        Write-SetupLog "Zertifikat mit Account '$localUser' eindeutig verknüpft und verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)')." "SUCCESS"
+                        if (-not $certificateMappingConfirmed) {
+                            $certificateMappingConfirmed = $true
+                            Write-SetupLog "Zertifikat mit Account '$localUser' eindeutig verknüpft und verifiziert (Subject='$mappingSubject', Issuer='$($clientCert.Thumbprint)')." 'SUCCESS'
+                        }
                     }
                     catch {
                         # Ein fehlgeschlagener Mapping-Schritt ist an dieser
@@ -753,28 +754,8 @@ try {
                     }
                 }
 
-                # Alte öffentliche Kopien erst entfernen, nachdem das Mapping
-                # für den aktuellen Thumbprint auf dem Ziel bestätigt wurde.
                 if ($certificateMappingConfirmed) {
-                    Write-SetupLog "WinRM-Zertifikatsmapping für Thumbprint $($clientCert.Thumbprint) bestätigt." 'SUCCESS'
-                    foreach ($storeName in @('Root', 'TrustedPeople')) {
-                        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
-                        try {
-                            $store.Open('ReadWrite')
-                            $oldCertificates = @($store.Certificates | Where-Object {
-                                $_.Subject -eq $clientCert.Subject -and $_.Thumbprint -ne $clientCert.Thumbprint
-                            })
-                            foreach ($oldCertificate in $oldCertificates) {
-                                $store.Remove($oldCertificate)
-                            }
-                            if ($oldCertificates.Count -gt 0) {
-                                Write-SetupLog "$($oldCertificates.Count) altes öffentliches Client-Zertifikat(e) aus LocalMachine\$storeName entfernt." 'SUCCESS'
-                            }
-                        }
-                        finally {
-                            $store.Close()
-                        }
-                    }
+                    Write-SetupLog "WinRM-Zertifikatsmapping für Thumbprint $($clientCert.Thumbprint) bestätigt. Vorhandene Zertifikatszuordnungen und öffentliche Zertifikate bleiben erhalten." 'SUCCESS'
                 } else {
                     Write-SetupLog 'Alte öffentliche Zertifikate bleiben erhalten: Mapping für den aktuellen Thumbprint konnte nicht bestätigt werden.' 'WARN'
                 }
@@ -972,36 +953,36 @@ try {
     $RoleCapabilityFile = Join-Path $RoleCapDir "WindowsUpdateRole.psrc"
     $CheckRoleCapabilityFile = Join-Path $RoleCapDir "WindowsUpdateCheckRole.psrc"
     
+    # Der Administrationsendpunkt veröffentlicht nur den vom Skript
+    # verwendeten Windows-Update-Aufruf. Allgemeine Import-, Prozess-, Dienst-,
+    # Registry-, WMI- und externe Befehle sind nicht Teil der JEA-Rolle.
     $VisibleCmdlets = @(
-        # PSWindowsUpdate Cmdlets
-        'Get-WindowsUpdate',
-        'Install-WindowsUpdate',
-        'Get-WUList',
-        'Get-WUInstall',
-        'Get-WUHistory',
-        'Get-WURebootStatus',
-        # Basis-Cmdlets die PSWindowsUpdate benötigt
-        'Get-Module',
-        'Import-Module',
-        'Get-Command',
-        'Get-Service',
-        'Start-Service',
-        'Stop-Service',
-        'Restart-Service',
-        'Get-Process',
-        'Get-ItemProperty',
-        'Set-ItemProperty',
-        'Get-WmiObject',
-        'Get-CimInstance',
-        'Select-Object',
-        'Where-Object',
-        'ForEach-Object',
-        'Write-Output',
-        'Write-Verbose',
-        'Write-Warning',
-        'Write-Host',
-        'Out-Null',
-        'Out-Default'
+        @{
+            Name = 'Get-WindowsUpdate'
+            Parameters = @(
+                @{ Name = 'AcceptAll' }
+                @{ Name = 'MicrosoftUpdate' }
+                @{ Name = 'Download' }
+                @{ Name = 'Install' }
+                @{ Name = 'IgnoreReboot' }
+                @{ Name = 'KBArticleID' }
+                @{ Name = 'Category' }
+                @{ Name = 'NotCategory' }
+                @{ Name = 'NotKBArticleID' }
+            )
+        }
+        @{
+            Name = 'Get-WURebootStatus'
+            Parameters = @(@{ Name = 'Silent' })
+        }
+        @{
+            Name = 'Get-WUHistory'
+            Parameters = @()
+        }
+        @{
+            Name = 'Select-Object'
+            Parameters = @(@{ Name = 'First' })
+        }
     )
     
     Write-SetupLog "Erlaubte Cmdlets: $($VisibleCmdlets.Count)" "INFO"
@@ -1063,6 +1044,7 @@ try {
     $sessionConfigurationParameters = @{
         Path              = $PermanentPSSC
         SessionType       = 'Default'
+        LanguageMode      = 'ConstrainedLanguage'
         ModulesToImport   = @('PSWindowsUpdate', $JeaModuleName)
         ExecutionPolicy   = 'RemoteSigned'
     }
@@ -1415,9 +1397,9 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
             # aussagekräftig. Ein Fehler bleibt eine Warnung, kein K.O.-Kriterium.
             try {
                 $TestResult = Invoke-Command -ComputerName localhost -ConfigurationName WindowsUpdateAdm `
-                                             -ScriptBlock { Get-Command Get-WindowsUpdate } `
+                                             -ScriptBlock { Get-WindowsUpdateAdmDeploymentStatus } `
                                              -ErrorAction Stop
-                Write-SetupLog "Loopback-Verbindungstest erfolgreich - Get-WindowsUpdate erreichbar" "SUCCESS"
+                Write-SetupLog "Loopback-Verbindungstest erfolgreich - JEA-Statusfunktion Version $($TestResult.Version) erreichbar" "SUCCESS"
             }
             catch {
                 Write-SetupLog 'Lokaler Loopback-Test nicht möglich; der Endpunkt ist registriert, externer Verbindungstest erforderlich.' 'WARN'

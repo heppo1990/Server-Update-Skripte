@@ -49,9 +49,8 @@ function Test-WindowsUpdateDeploymentConfiguration {
         SessionOption = (New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000)
         ErrorAction = 'Stop'
         ScriptBlock = {
-            $updateCommand = Get-Command Get-WindowsUpdate -ErrorAction Stop | Select-Object -First 1
             $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
-            [PSCustomObject]@{ UpdateCommand = [string]$updateCommand.Name; DeploymentVersion = [string]$deploymentStatus.Version }
+            [PSCustomObject]@{ DeploymentVersion = [string]$deploymentStatus.Version }
         }
     }
     if ($certificate) {
@@ -61,7 +60,6 @@ function Test-WindowsUpdateDeploymentConfiguration {
 
     try {
         $status = Invoke-Command @endpointParameters
-        if ($status.UpdateCommand -ne 'Get-WindowsUpdate') { throw 'Der WindowsUpdateAdm-Endpunkt stellt Get-WindowsUpdate nicht bereit.' }
         if ($status.DeploymentVersion -eq $ExpectedDeploymentVersion) {
             return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$status.DeploymentVersion }
         }
@@ -211,6 +209,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
         [Parameter(Mandatory)][bool]$EnableWingetUpdates,
         [Parameter(Mandatory)][System.Collections.IDictionary]$ExpectedModuleVersions,
         [Parameter(Mandatory)][System.Collections.IDictionary]$BootstrapCredentials,
+        [string[]]$ManagementServerAddresses = @(),
         [Parameter(Mandatory)][scriptblock]$WriteLog
     )
 
@@ -601,6 +600,9 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 throw "Computerkonto des Verwaltungsservers für den geplanten SYSTEM-Check konnte nicht ermittelt werden: $($_.Exception.Message)"
             }
         }
+        if (@($ManagementServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
+            $setupParameters.ManagementServerAddresses = @($ManagementServerAddresses)
+        }
 
         Write-DeployLog "[$Servername] Führe Setup aus ($DeployType)."
         $remoteSetupOutput = @(Invoke-Command -Session $session -ScriptBlock {
@@ -692,10 +694,8 @@ function Invoke-WindowsUpdateWinRMDeployment {
             ComputerName      = $Servername
             ConfigurationName = 'WindowsUpdateAdm'
             ScriptBlock       = {
-                $updateCommand = Get-Command Get-WindowsUpdate -ErrorAction Stop | Select-Object -First 1
                 $deploymentStatus = Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop
                 [PSCustomObject]@{
-                    UpdateCommand     = [string]$updateCommand.Name
                     DeploymentVersion = [string]$deploymentStatus.Version
                 }
             }
@@ -717,9 +717,6 @@ function Invoke-WindowsUpdateWinRMDeployment {
         $expectedVersionForValidation = [string]$ExpectedDeploymentVersion
         $validateEndpoint = {
             $status = Invoke-Command @testParams
-            if ($status.UpdateCommand -ne 'Get-WindowsUpdate') {
-                throw "WindowsUpdateAdm-Endpunkt auf $Servername stellt Get-WindowsUpdate nicht bereit."
-            }
             if ($status.DeploymentVersion -ne $expectedVersionForValidation) {
                 throw "WindowsUpdateAdm-Statusfunktion auf $Servername fehlt oder ist veraltet (gefunden: '$($status.DeploymentVersion)', erwartet: '$expectedVersionForValidation')."
             }
@@ -843,6 +840,7 @@ function Invoke-WindowsUpdateServerDeployment {
         [Parameter(Mandatory)][bool]$EnableWingetUpdates,
         [Parameter(Mandatory)][System.Collections.IDictionary]$ExpectedModuleVersions,
         [Parameter(Mandatory)][System.Collections.IDictionary]$BootstrapCredentials,
+        [string[]]$ManagementServerAddresses = @(),
         [Parameter(Mandatory)][scriptblock]$WriteLog
     )
 
@@ -887,6 +885,7 @@ function Invoke-WindowsUpdateServerDeployment {
                 -EnableWingetUpdates $EnableWingetUpdates `
                 -ExpectedModuleVersions $ExpectedModuleVersions `
                 -BootstrapCredentials $BootstrapCredentials `
+                -ManagementServerAddresses $ManagementServerAddresses `
                 -WriteLog $WriteLog
         }
         catch {
@@ -915,6 +914,9 @@ function Invoke-WindowsUpdateServerDeployment {
         Write-DeployLog "[$Servername] Führe lokales Setup aus."
         $localParameters = @{}
         if ($EnableWingetUpdates) { $localParameters.InstallWinGetClientModule = $true }
+        if (@($ManagementServerAddresses | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
+            $localParameters.ManagementServerAddresses = @($ManagementServerAddresses)
+        }
         if ($OfflineModulePayloadRoot -and (Test-Path -LiteralPath $OfflineModulePayloadRoot -PathType Container)) {
             $localParameters.OfflineModuleRoot = $OfflineModulePayloadRoot
         }

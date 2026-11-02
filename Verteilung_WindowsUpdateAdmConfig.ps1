@@ -250,9 +250,34 @@ if ($Serverlist.Count -gt 0 -and -not $CleanupLegacyTempOnly) {
 $Results      = @()
 $SuccessCount = 0
 $FailCount    = 0
+$SkippedCount = 0
 $LinuxConnectionErrors = 0
 $HAConnectionErrors = 0
 $script:BootstrapCredentials = @{}
+
+# Nutzbare lokale Verwaltungsserver-Adressen werden einmal ermittelt und nur
+# auf Zielserver übertragen, wenn dort eine neue HTTPS-Regel erstellt wird.
+$managementServerAddresses = @(
+    foreach ($addressEntry in @(Get-NetIPAddress -AddressState Preferred -ErrorAction SilentlyContinue)) {
+        $ipAddressText = [string]$addressEntry.IPAddress
+        $parsedAddress = $null
+        if ([string]::IsNullOrWhiteSpace($ipAddressText) -or
+            -not [System.Net.IPAddress]::TryParse($ipAddressText, [ref]$parsedAddress)) { continue }
+        if ([System.Net.IPAddress]::IsLoopback($parsedAddress) -or
+            $parsedAddress.IsIPv6LinkLocal -or
+            $parsedAddress.IsIPv6Multicast -or
+            $parsedAddress.Equals([System.Net.IPAddress]::Any) -or
+            $parsedAddress.Equals([System.Net.IPAddress]::IPv6Any)) { continue }
+        if ($parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+            $parsedAddress.GetAddressBytes()[0] -eq 169 -and $parsedAddress.GetAddressBytes()[1] -eq 254) { continue }
+        $parsedAddress.ToString()
+    } | Select-Object -Unique
+)
+if ($managementServerAddresses.Count -gt 0) {
+    Write-DeployLog "Verwaltungsserver-Adressen für neu angelegte WinRM-Regeln: $($managementServerAddresses -join ', ')" -LogOnly
+} else {
+    Write-DeployLog 'Keine nutzbare Verwaltungsserver-IP ermittelt; es wird keine unbeschränkte HTTPS-Regel angelegt.' -Level Warning
+}
 
 
 
@@ -289,6 +314,21 @@ ForEach ($Server in $Serverlist) {
         Write-DeployLog "[$Servername] Klassifizierungsfehler: $($Server.ClassificationError)" -LogOnly
     }
     else {
+        $localManagementNames = @($env:COMPUTERNAME, [System.Net.Dns]::GetHostName())
+        if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) {
+            $localManagementNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
+        }
+        $isLocalDeploymentTarget = $localManagementNames -contains $Servername
+        $winRmProbe = if ($isLocalDeploymentTarget) { $null } else {
+            Test-WindowsUpdateWinRmPorts -ComputerName $Servername -Ports @(5985, 5986) -TimeoutMilliseconds 1500
+        }
+        if ($winRmProbe -and -not $winRmProbe.Reachable) {
+            $deployResult = [PSCustomObject]@{
+                Status = 'Skipped'
+                Message = "WinRM-Ports 5985/5986 nach $($winRmProbe.AttemptsPerformed) Prüfversuch(en) nicht erreichbar; Ziel übersprungen."
+            }
+            Write-DeployLog "[$Servername] WinRM nicht erreichbar; Ziel wird wie bei Check, Download und Install übersprungen." -Level Warning
+        } else {
         $deployResult = Invoke-WindowsUpdateServerDeployment `
             -Servername                $Servername `
             -PSSCfgSkriptFile          $PSSCfgSkriptFile `
@@ -302,7 +342,9 @@ ForEach ($Server in $Serverlist) {
             -EnableWingetUpdates $enableWingetUpdates `
             -ExpectedModuleVersions $script:ExpectedModuleVersions `
             -BootstrapCredentials $script:BootstrapCredentials `
+            -ManagementServerAddresses $managementServerAddresses `
             -WriteLog { param($Message, $Level = 'Info', [switch]$LogOnly, [switch]$ConsoleOnly) Write-DeployLog -Message $Message -Level $Level -LogOnly:$LogOnly -ConsoleOnly:$ConsoleOnly }
+        }
     }
 
     $ServerResult = [PSCustomObject]@{
@@ -317,6 +359,8 @@ ForEach ($Server in $Serverlist) {
     }
     elseif ($deployResult.Status -eq "Failed") {
         $FailCount++
+    } elseif ($deployResult.Status -eq 'Skipped') {
+        $SkippedCount++
     }
 
     $Results += $ServerResult
@@ -445,6 +489,7 @@ Write-DeployLog 'Ergebnis:'
 Write-DeployLog "Windows-Ziele: $($Results.Count)"
 Write-DeployLog "Erfolgreich: $SuccessCount" -Level Success
 Write-DeployLog "Fehler: $FailCount" -Level $(if ($FailCount -eq 0) { 'Success' } else { 'Error' })
+Write-DeployLog "Übersprungen (nicht erreichbar): $SkippedCount" -Level Warning
 if ($LinuxSystemCount -gt 0 -or $LinuxConnectionErrors -gt 0) {
     $linuxConnectedCount = [Math]::Max(0, $LinuxSystemCount - $LinuxConnectionErrors)
     Write-DeployLog ''
