@@ -271,8 +271,9 @@ $managementServerAddresses = @(
         if ($parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
             $parsedAddress.GetAddressBytes()[0] -eq 169 -and $parsedAddress.GetAddressBytes()[1] -eq 254) { continue }
         $parsedAddress.ToString()
-    } | Select-Object -Unique
+    }
 )
+$managementServerAddresses = @($managementServerAddresses | Select-Object -Unique)
 if ($managementServerAddresses.Count -gt 0) {
     Write-DeployLog "Verwaltungsserver-Adressen für neu angelegte WinRM-Regeln: $($managementServerAddresses -join ', ')" -LogOnly
 } else {
