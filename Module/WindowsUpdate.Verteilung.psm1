@@ -68,7 +68,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
         ConfigurationName = 'WindowsUpdateAdm'
         SessionOption = (New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000)
         ErrorAction = 'Stop'
-        ScriptBlock = { Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop }
+        ScriptBlock = { Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated, Invoke-WindowsUpdateAdmWinGetMaintenance -ErrorAction Stop | Out-Null; Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop }
     }
     if ($certificate) {
         $endpointParameters.UseSSL = $true
@@ -735,7 +735,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
         $testParams = @{
             ComputerName      = $Servername
             ConfigurationName = 'WindowsUpdateAdm'
-            ScriptBlock       = { Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop }
+            ScriptBlock       = { Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated, Invoke-WindowsUpdateAdmWinGetMaintenance -ErrorAction Stop | Out-Null; Get-WindowsUpdateAdmDeploymentStatus -ErrorAction Stop }
             ErrorAction       = 'Stop'
         }
         if ($DeployType -ne 'AD') {

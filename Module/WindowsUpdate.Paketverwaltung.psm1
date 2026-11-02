@@ -2204,14 +2204,14 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             try {
                 $osInformation = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
                 $isWindowsServer2019 = ([int]$osInformation.ProductType -gt 1) -and ([int]$osInformation.BuildNumber -eq 17763)
-                $portableFallbackSupported = ([int]$osInformation.ProductType -gt 1) -and ([int]$osInformation.BuildNumber -ge 20348)
+                $portableFallbackSupported = ([int]$osInformation.BuildNumber -ge 20348)
                 if ([int]$osInformation.ProductType -gt 1 -and [int]$osInformation.BuildNumber -lt 17763) {
                     $wingetInstallScriptSupported = $false
                     $wingetServerUnsupported = $true
                 }
             }
             catch { }
-            $wingetPath = Resolve-WingetExecutable
+            $wingetPath = if ($PreferPortableWinGet) { $null } else { Resolve-WingetExecutable }
             $wingetBootstrapMessage = ''
             $wingetDiagnosticOutput = ''
             $wingetInteractiveUserDiagnosticOutput = ''
@@ -2308,7 +2308,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $appInstallerRegistration = Register-LatestWinGetAppInstallerForCurrentUser
                     if ($appInstallerRegistration.RegistrationChanged) {
                         $appInstallerRegistrationChanged = $true
-                        $wingetPath = Resolve-WingetExecutable
+                        $wingetPath = if ($PreferPortableWinGet) { $null } else { Resolve-WingetExecutable }
                         $wingetBootstrapMessage += " App Installer $($appInstallerRegistration.Version) für den aktuellen Remoting-Benutzer registriert; WinGet-Abfrage wird in einer neuen Verbindung fortgesetzt."
                         if (-not [string]::IsNullOrWhiteSpace([string]$appInstallerRegistration.AliasRegistrationMessage)) {
                             $wingetBootstrapMessage += " $($appInstallerRegistration.AliasRegistrationMessage)"
@@ -2506,7 +2506,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         if ($appInstallerVersion -lt $minimumElevatedAppInstallerVersion) {
                             throw "App-Installer-Reparatur abgeschlossen, aber registrierte Version $appInstallerVersion bleibt unter der benötigten Version $minimumElevatedAppInstallerVersion."
                         }
-                        $wingetPath = Resolve-WingetExecutable
+                        $wingetPath = if ($PreferPortableWinGet) { $null } else { Resolve-WingetExecutable }
                         $wingetBootstrapMessage += " App Installer wurde auf Version $appInstallerVersion repariert; WinGet-Abfrage wird in einer neuen Verbindung fortgesetzt."
                         $wingetReconnectRequired = $true
                     }
@@ -2559,7 +2559,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         if ($appInstallerRegistration.InstalledFromGitHub) {
                             $wingetBootstrapMessage += ' App Installer und fehlende Abhängigkeiten wurden aus dem offiziellen WinGet-GitHub-Release bereitgestellt.'
                         }
-                        $wingetPath = Resolve-WingetExecutable
+                        $wingetPath = if ($PreferPortableWinGet) { $null } else { Resolve-WingetExecutable }
                         $wingetHealth = Test-WingetExecutable -Path $wingetPath -FreshPowerShell
                         if (-not $wingetHealth.Works) { throw "WinGet ist nach der Reparatur weiterhin nicht funktionsfähig: $($wingetHealth.Output)" }
                         $wingetBootstrapMessage += " Reparatur erfolgreich; $($wingetHealth.Output)"
