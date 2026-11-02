@@ -3158,6 +3158,15 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
     $localNames = @($env:COMPUTERNAME, [System.Net.Dns]::GetHostName()) | Where-Object { $_ }
     if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
     $isLocalTarget = $localNames -contains $ComputerName
+    $portablePreferenceRoot = Join-Path $env:LOCALAPPDATA 'WindowsUpdateAdm\PortablePreference'
+    $preferenceHash = [Security.Cryptography.SHA256]::Create()
+    try { $preferenceKey = [BitConverter]::ToString($preferenceHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($ComputerName.ToLowerInvariant()))).Replace('-', '') }
+    finally { $preferenceHash.Dispose() }
+    $portablePreferencePath = Join-Path $portablePreferenceRoot ($preferenceKey + '.txt')
+    $preferRememberedPortable = Test-Path -LiteralPath $portablePreferencePath -PathType Leaf
+    if ($EnableWinget -and $preferRememberedPortable) {
+        Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: bewährten portablen Betrieb direkt verwenden."
+    }
     $packageResults = @()
 
     if (-not $EnableWinget) {
@@ -3202,7 +3211,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 ComputerName = $ComputerName
                 AuthInfo = $AuthInfo
                 ScriptBlock = $packageScript
-                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $false, ($Mode -eq 'Install' -and -not $isLocalTarget))
+                ArgumentList = @($Mode, $true, $false, $false, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $false, $IncludeInteractiveUserUpdates, $preferRememberedPortable, ($Mode -eq 'Install' -and -not $isLocalTarget))
                 IsLocalTarget = $isLocalTarget
                 OperationName = "WinGet-Prüfung auf $ComputerName"
                 WriteLog = $WriteLog
@@ -3230,6 +3239,10 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             # ein einzelnes Paket den Fehler gemeldet hat. Der monatliche
             # Wartungsreset wird unten ebenfalls auf diesen Pfad geleitet.
             $genericWinGetFailure = -not [bool]$firstWingetResult.Success -and -not $isMonthlyResetOnly
+            if ($genericWinGetFailure -and $preferRememberedPortable) {
+                Remove-Item -LiteralPath $portablePreferencePath -Force -ErrorAction SilentlyContinue
+                Write-CommonLog $WriteLog "Portabler WinGet-Betrieb auf $ComputerName fehlgeschlagen; Merkung entfernt, vollständige Reparatur folgt."
+            }
             if (($installScriptRequiredProperty -and [bool]$installScriptRequiredProperty.Value) -or $genericWinGetFailure) {
                 $retryRequired = $true
                 $retryRuntimeRepairRequired = $true
@@ -3476,6 +3489,14 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $retryDetail = ([string]$retryResult.ActionOutput -replace '\s+', ' ').Trim()
                     if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet meldete einen Abfragefehler.' }
                     throw "Wiederholungsprüfung fehlgeschlagen: $retryDetail"
+                }
+                if ($retryPreferPortableWinGet) {
+                    try {
+                        New-Item -ItemType Directory -Path $portablePreferenceRoot -Force -ErrorAction Stop | Out-Null
+                        [IO.File]::WriteAllText($portablePreferencePath, [DateTime]::UtcNow.ToString('o'))
+                    } catch {
+                        Write-CommonLog $WriteLog "Portablen WinGet-Betrieb auf $ComputerName nicht gespeichert: $($_.Exception.Message)"
+                    }
                 }
                 $retryMessage = if ($retryPreferPortableWinGet) {
                     'WinGet-Wiederholungsprüfung mit portabler GitHub-CLI in neuer Sitzung erfolgreich.'
