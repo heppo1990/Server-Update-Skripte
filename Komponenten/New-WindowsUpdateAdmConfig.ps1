@@ -1081,7 +1081,10 @@ exit $result.ExitCode
         }
         @{
             Name = 'Get-WUHistory'
-            Parameters = @()
+            # Eine leere Parameterliste erzeugt in Windows PowerShell 5.1
+            # ungültiges PSRC ("Parameters = }"). Der Verlaufsaufruf benötigt
+            # nur den gemeinsamen Fehlerparameter.
+            Parameters = @(@{ Name = 'ErrorAction' })
         }
         @{
             Name = 'Select-Object'
