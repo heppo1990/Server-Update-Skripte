@@ -52,15 +52,16 @@ if ($Action -eq 'ClientRepair') {
             throw "WinGet-Reparaturskript ist weder gültig signiert noch die per Online-Digest bestätigte Release-Datei."
         }
         $ps51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $out = & $ps51 -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $temp -Force 2>&1 | Out-String
-        $code = $LASTEXITCODE
+        $installerResult = Invoke-WinGet -Path $ps51 -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$temp,'-Force')
+        $out = $installerResult.Output
+        $code = $installerResult.ExitCode
         if ($code -ne 0) { throw "winget-install.ps1 -Force endete mit Exitcode $code. $out" }
         $version = (& (Get-WinGetPath) --version 2>&1 | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?m)^\s*v?\d+\.\d+') { throw "WinGet besteht den Starttest nach der Client-Reparatur nicht: $version" }
         [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output="Geprüfte winget-install.ps1 ausgeführt; WinGet $version. $out" }
         exit 0
     } catch {
-        $primaryError = $_.Exception.Message
+        $primaryError = $_.Exception.ToString() + [Environment]::NewLine + $_.InvocationInfo.PositionMessage + [Environment]::NewLine + $_.ScriptStackTrace
         try {
             Import-Module Microsoft.WinGet.Client -ErrorAction Stop
             $repairParameters = @{ Latest=$true; Force=$true; ErrorAction='Stop' }
@@ -79,7 +80,19 @@ if ($Action -eq 'ClientRepair') {
             }
             exit 0
         } catch {
-            throw "Beide WinGet-Reparaturwege fehlgeschlagen. winget-install: $primaryError; Microsoft-Fallback: $($_.Exception.Message)"
+            $fallbackError = $_.Exception.ToString() + [Environment]::NewLine + $_.InvocationInfo.PositionMessage + [Environment]::NewLine + $_.ScriptStackTrace
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $diagnostic = @(
+                'Beide WinGet-Reparaturwege fehlgeschlagen.'
+                ('Kontext: Benutzer={0}; SID={1}; PowerShell={2}; Computer={3}' -f $identity.Name, $identity.User.Value, $PSVersionTable.PSVersion, $env:COMPUTERNAME)
+                '=== winget-install ==='
+                $primaryError
+                '=== Microsoft-Fallback ==='
+                $fallbackError
+            ) -join [Environment]::NewLine
+            # stdout statt formatierter PowerShell-Fehler: verhindert Abbruch beim ersten stderr-Datensatz.
+            [Console]::Out.WriteLine($diagnostic)
+            exit 1
         }
     } finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
 }
@@ -103,4 +116,4 @@ $args = switch ($Action) {
 }
 $result = Invoke-WinGet -Path $winget -Arguments $args
 [pscustomobject]@{ Action=$Action; Success=($result.ExitCode -eq 0); ExitCode=$result.ExitCode; Output=$result.Output }
-exit $result.ExitCode
+exit $result.ExitCode
