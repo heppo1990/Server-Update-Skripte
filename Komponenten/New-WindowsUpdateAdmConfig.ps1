@@ -975,6 +975,28 @@ if ($Action -eq 'ClientRepair') {
         if ($LASTEXITCODE -ne 0 -or $version -notmatch '(?m)^\s*v?\d+\.\d+') { throw "WinGet besteht den Starttest nach der Client-Reparatur nicht: $version" }
         [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output="Geprüfte winget-install.ps1 ausgeführt; WinGet $version. $out" }
         exit 0
+    } catch {
+        $primaryError = $_.Exception.Message
+        try {
+            Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+            $repairParameters = @{ Latest=$true; Force=$true; ErrorAction='Stop' }
+            # Microsofts Reparatur unterstützt AllUsers nicht unter SYSTEM.
+            if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+                $repairParameters.AllUsers = $true
+            }
+            $repairOutput = Repair-WinGetPackageManager @repairParameters | Out-String
+            $probe = Invoke-WinGet -Path (Get-WinGetPath) -Arguments @('--version')
+            if ($probe.ExitCode -ne 0 -or $probe.Output -notmatch '(?m)^\s*v?\d+\.\d+') {
+                throw "WinGet-Starttest nach Microsoft-Reparatur fehlgeschlagen: $($probe.Output)"
+            }
+            [pscustomobject]@{
+                Action=$Action; Success=$true; ExitCode=0
+                Output="winget-install-Reparatur fehlgeschlagen: $primaryError; Microsoft-Fallback Repair-WinGetPackageManager -Latest -Force erfolgreich. WinGet: $($probe.Output). $repairOutput"
+            }
+            exit 0
+        } catch {
+            throw "Beide WinGet-Reparaturwege fehlgeschlagen. winget-install: $primaryError; Microsoft-Fallback: $($_.Exception.Message)"
+        }
     } finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
 }
 $winget = Get-WinGetPath
