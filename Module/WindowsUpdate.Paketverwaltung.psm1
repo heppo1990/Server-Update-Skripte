@@ -3238,6 +3238,10 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 try {
                     Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; starte die signaturgeprüfte winget-install.ps1-Clientreparatur ausschließlich über JEA und Windows PowerShell 5.1."
                     $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo
+                    if ([string]$installResult.Output -match '__WINGET_PORTABLE__|portable Microsoft-CLI erfolgreich') {
+                        $retryPreferPortableWinGet = $true
+                        $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
+                    }
                     $firstDiagnostic += [Environment]::NewLine + "JEA-Clientreparatur-Ausgabe:" + [Environment]::NewLine + [string]$installResult.Output
                     $firstWingetResult | Add-Member -NotePropertyName BootstrapMessage -NotePropertyValue "WinGet-Clientreparatur über die signaturgeprüfte winget-install.ps1 in JEA erfolgreich; die Prüfung wird in einer neuen Verbindung wiederholt." -Force
                     $wingetInstallScriptRan = $true
@@ -3337,13 +3341,17 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 if ($retryRuntimeRepairRequired -and -not $wingetInstallScriptRan -and -not $retryPreferPortableWinGet) {
                     Write-CommonLog $WriteLog "Zentraler WinGet-Reparaturablauf auf ${ComputerName}: signaturgeprüfte winget-install.ps1-Clientreparatur über JEA und Windows PowerShell 5.1; Paket-Installationen und -Deinstallationen sind nicht freigegeben."
                     $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo
+                    if ([string]$installResult.Output -match '__WINGET_PORTABLE__|portable Microsoft-CLI erfolgreich') {
+                        $retryPreferPortableWinGet = $true
+                        $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
+                    }
                     $wingetInstallScriptRan = $true
                     Write-CommonLog $WriteLog "Zentrale WinGet-Clientreparatur auf $ComputerName über JEA erfolgreich."
                     if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
                         Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
                     }
                 }
-                if ($retrySourcePackageRepair -or $retryPreferPortableWinGet -or $retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)') {
+                if (-not $retryPreferPortableWinGet -and ($retrySourcePackageRepair -or $retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)')) {
                     # Nach einer AppX-Registrierung meldet Add-AppxPackage den
                     # Vorgang synchron als abgeschlossen, während App Installer
                     # und WinGet-Quelle im Remoting-Kontext noch kurz den neuen

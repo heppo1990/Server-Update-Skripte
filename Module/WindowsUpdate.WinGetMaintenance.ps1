@@ -182,7 +182,7 @@ if ($Action -eq 'ClientRepair') {
                 $portableClient = Get-WinGetPortableClientFromGitHub
                 $portableProbe = Invoke-WinGet -Path $portableClient.Path -Arguments @('--version')
                 if ($portableProbe.ExitCode -ne 0 -or $portableProbe.Output -notmatch '(?m)^\s*v?\d+\.\d+') { throw "Portabler WinGet-Starttest fehlgeschlagen: $($portableProbe.Output)" }
-                [Console]::Out.WriteLine("AppX-Reparatur nicht möglich; portable Microsoft-CLI erfolgreich: $($portableProbe.Output). winget-install: $primaryError; Microsoft-AppX: $microsoftError")
+                [Console]::Out.WriteLine("__WINGET_PORTABLE__ AppX-Reparatur nicht möglich; portable Microsoft-CLI erfolgreich: $($portableProbe.Output). winget-install: $primaryError; Microsoft-AppX: $microsoftError")
                 exit 0
             } catch { $portableError = $_.Exception.ToString() }
             $fallbackError = $microsoftError + [Environment]::NewLine + 'Portabler Microsoft-Fallback: ' + $portableError
