@@ -2452,6 +2452,14 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $sourceResetState = Get-WingetSourceResetState
                 $monthlySourceResetState = Get-WingetMonthlySourceResetState
                 if ($SourceResetPerformed) {
+                    # Der vorgeschaltete JEA-Reset betrifft dessen eigenes Profil.
+                    # Reset und Suche müssen zusätzlich unter derselben Identität laufen.
+                    $contextReset = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source','reset','--name','winget','--force','--disable-interactivity') -TimeoutSeconds 180
+                    if ([int]$contextReset.ExitCode -ne 0) { throw "WinGet-Quellenreset im Suchkontext fehlgeschlagen: Exitcode=$($contextReset.ExitCode); $($contextReset.Output)" }
+                    $contextUpdate = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source','update','--name','winget','--disable-interactivity') -TimeoutSeconds 180
+                    if ([int]$contextUpdate.ExitCode -ne 0 -or [string]$contextUpdate.Output -match '(?im)^\s*(Abgebrochen|Cancelled|Canceled|Fehler beim Versuch|Failed)') { throw "WinGet-Quellenupdate im Suchkontext nicht bestätigt: $($contextUpdate.Output)" }
+                    $contextUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                    $wingetBootstrapMessage += " WinGet-Quelle winget im tatsächlichen Suchkontext '$contextUser' zurückgesetzt und aktualisiert; kundeneigene Quellen bleiben erhalten."
                     # Ein Quellenreset im vorgeschalteten Wiederherstellungspfad
                     # zählt ebenfalls für beide Schutzintervalle.
                     try {
