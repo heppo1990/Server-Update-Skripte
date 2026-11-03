@@ -1,4 +1,4 @@
-# Fachmodul: WindowsUpdate.Console
+﻿# Fachmodul: WindowsUpdate.Console
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Write-CommonLog {
@@ -204,6 +204,7 @@ function Test-WindowsUpdateConsoleMessage {
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:') { return $true }
     if ($Message -match '(?i)^\s*(Starte (Update-(Check|Download|Installation)|Windows-Updates) auf|Verarbeite (Windows|AD|Hypervisor)|Gesamtliste nach Zusammenführung|Check abgeschlossen\.|Download abgeschlossen\.|Installation abgeschlossen\.|E-Mail erfolgreich versendet|Mailkonfigurationstest erfolgreich)') { return $true }
     if ($Message -match '(?i)^\s*(Zurückgestellte Kategorien:|Zurückgestellte KBs:|Nachinstallation aktiviert$)') { return $true }
+    if ($Message -match '(?i)^\s*(Neue WindowsUpdateAdm-Verteilung nötig für:|Paketupdates auf .+: \d+ Pakete? offen;)' ) { return $true }
     if ($Message -match '(?i)keine Paketupdates verfügbar\.') { return $true }
     if ($Message -match '(?i)(Paketupdates? verfügbar|Paketupdate\(s\) (erkannt und verarbeitet|verfügbar)|\d+ Paketupdates installiert|Home-Assistant-Check: .*Update\(s\) verfügbar)') {
         $script:WindowsUpdateConsolePackageRowsActive = $Message -notmatch '(?i)Keine Paketupdates'
