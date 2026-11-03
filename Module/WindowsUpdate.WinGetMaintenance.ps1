@@ -1,5 +1,9 @@
-﻿param([Parameter(Mandatory)][ValidateSet('SourceList','SourceUpdate','SourceReset','ClientRepair')][string]$Action)
+﻿param(
+    [Parameter(Mandatory)][ValidateSet('SourceList','SourceUpdate','SourceReset','ClientRepair')][string]$Action,
+    [ValidateSet('','Appx','Asheroto','Microsoft','Portable')][string]$RepairStage = ''
+)
 $ErrorActionPreference = 'Stop'
+$script:WinGetMaintenanceWorkerPath = $PSCommandPath
 function Get-WinGetPath {
     $portableRoot = Join-Path $PSScriptRoot 'WinGetPortable'
     $portable = @(Get-ChildItem -LiteralPath $portableRoot -Filter winget.exe -File -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
@@ -196,7 +200,7 @@ function Repair-WindowsUpdateWinGetAppx {
     if ($profile.Count -ne 1) { throw "Kein geladenes echtes Benutzerprofil für '$user'." }
     $registration = Join-Path $root 'Register-AppInstaller.ps1'
     [IO.File]::WriteAllText($registration, "`$ErrorActionPreference='Stop'; Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop", [Text.UTF8Encoding]::new($true))
-    $name = 'WindowsUpdateAdm-AppxRegistration-' + [guid]::NewGuid().ToString('N')
+    $name = 'WindowsUpdateAdm-AppxRegistration-' + $PID
     try {
         $exe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $action = New-ScheduledTaskAction -Execute $exe -Argument ('-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $registration + '"')
@@ -219,15 +223,67 @@ function Repair-WindowsUpdateWinGetAppx {
     }
 }
 
-if ($Action -eq 'ClientRepair') {
-    $temp = Join-Path ([IO.Path]::GetTempPath()) ('winget-install-' + [guid]::NewGuid().ToString('N') + '.ps1')
+# Jede Stufe läuft in einem eigenen PS5-Prozess. Ein blockierendes AppX-Cmdlet
+# darf den portablen Rückfall und die spätere Paketabfrage nicht verdrängen.
+function Invoke-WinGetRepairStage {
+    param([Parameter(Mandatory)][ValidateSet('Appx','Asheroto','Microsoft','Portable')][string]$Stage,
+          [Parameter(Mandatory)][int]$TimeoutSeconds)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $script:WinGetMaintenanceWorkerPath + '" -Action ClientRepair -RepairStage ' + $Stage
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $startInfo.WorkingDirectory = $PSScriptRoot
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $timedOut = $false
+    $stageProcessId = 0
     try {
-        try {
-            $appxRepairOutput = Repair-WindowsUpdateWinGetAppx | Out-String
-            [Console]::Out.WriteLine($appxRepairOutput)
-        } catch {
-            [Console]::Out.WriteLine('AppX-Bestandsreparatur nicht vollständig: ' + $_.Exception.ToString())
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw "Reparaturstufe $Stage konnte nicht starten." }
+        $stageProcessId = $process.Id
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $timedOut = $true
+            # Auch winget-install-Unterprozesse beenden; nicht nur die PS-Hülle.
+            $kill = [Diagnostics.ProcessStartInfo]::new()
+            $kill.FileName = Join-Path $env:WINDIR 'System32\taskkill.exe'
+            $kill.Arguments = '/PID ' + $process.Id + ' /T /F'
+            $kill.UseShellExecute = $false; $kill.CreateNoWindow = $true
+            $killer = [Diagnostics.Process]::Start($kill)
+            try { if (-not $killer.WaitForExit(2000)) { $killer.Kill() } } finally { $killer.Dispose() }
+            if (-not $process.WaitForExit(1000)) { try { $process.Kill() } catch {} }
         }
+        $output = @()
+        foreach ($stream in @($stdout,$stderr)) {
+            if ($stream.Wait(1000)) { $output += $stream.GetAwaiter().GetResult() }
+        }
+        if ($timedOut) { $output += "Stufe $Stage nach $TimeoutSeconds Sekunden beendet; nächste Stufe wird versucht." }
+        [pscustomobject]@{ Stage=$Stage; Success=(-not $timedOut -and $process.HasExited -and $process.ExitCode -eq 0); TimedOut=$timedOut; Output=($output -join [Environment]::NewLine) }
+    } finally {
+        # Die vom AppX-Unterprozess angelegte Benutzeraufgabe gehört nicht zum Prozessbaum.
+        if ($Stage -eq 'Appx' -and $stageProcessId -gt 0) {
+            $taskName = 'WindowsUpdateAdm-AppxRegistration-' + $stageProcessId
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        if ($Stage -eq 'Asheroto' -and $stageProcessId -gt 0) {
+            Remove-Item -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) ('winget-install-' + $stageProcessId + '.ps1')) -Force -ErrorAction SilentlyContinue
+        }
+        $process.Dispose()
+    }
+}
+
+if ($Action -eq 'ClientRepair') {
+    if ($RepairStage) {
+        $temp = Join-Path ([IO.Path]::GetTempPath()) ('winget-install-' + $PID + '.ps1')
+        try {
+            switch ($RepairStage) {
+                'Appx' { Repair-WindowsUpdateWinGetAppx }
+                'Asheroto' {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/asheroto/winget-install/releases/latest' -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
         $assets = @($release.assets | Where-Object { $_.name -eq 'winget-install.ps1' })
@@ -253,51 +309,44 @@ if ($Action -eq 'ClientRepair') {
         $clientProbe = Invoke-WinGet -Path $clientPath -Arguments @('--version')
         $version = $clientProbe.Output
         if ($clientProbe.ExitCode -ne 0 -or $version -notmatch '(?m)^\s*v?\d+\.\d+') { throw "WinGet-Starttest fehlgeschlagen: Pfad=$clientPath; Exitcode=$($clientProbe.ExitCode); Ausgabe=$version; Installerausgabe=$out" }
-        [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output="Geprüfte winget-install.ps1 ausgeführt; WinGet $version. $out" }
-        exit 0
-    } catch {
-        $primaryError = $_.Exception.ToString() + [Environment]::NewLine + $_.InvocationInfo.PositionMessage + [Environment]::NewLine + $_.ScriptStackTrace
-        try {
-            Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-            $repairParameters = @{ Latest=$true; Force=$true; ErrorAction='Stop' }
-            # Microsofts Reparatur unterstützt AllUsers nicht unter SYSTEM.
-            if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
-                $repairParameters.AllUsers = $true
-            }
-            $repairOutput = Repair-WinGetPackageManager @repairParameters | Out-String
-            $probe = Invoke-WinGet -Path (Get-WinGetPath) -Arguments @('--version')
-            if ($probe.ExitCode -ne 0 -or $probe.Output -notmatch '(?m)^\s*v?\d+\.\d+') {
-                throw "WinGet-Starttest nach Microsoft-Reparatur fehlgeschlagen: Exitcode=$($probe.ExitCode); Ausgabe=$($probe.Output)"
-            }
-            [pscustomobject]@{
-                Action=$Action; Success=$true; ExitCode=0
-                Output="winget-install-Reparatur fehlgeschlagen: $primaryError; Microsoft-Fallback Repair-WinGetPackageManager -Latest -Force erfolgreich. WinGet: $($probe.Output). $repairOutput"
+
+                    [Console]::Out.WriteLine("Geprüfte winget-install.ps1 ausgeführt; WinGet $version. $out")
+                }
+                'Microsoft' {
+                    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+                    $repairParameters = @{ Latest=$true; Force=$true; ErrorAction='Stop' }
+                    if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') { $repairParameters.AllUsers=$true }
+                    Repair-WinGetPackageManager @repairParameters | Out-String | Write-Output
+                    $probe = Invoke-WinGet -Path (Get-WinGetPath) -Arguments @('--version')
+                    if ($probe.ExitCode -ne 0 -or $probe.Output -notmatch '(?m)^\s*v?\d+\.\d+') { throw 'WinGet-Starttest nach Microsoft-Reparatur fehlgeschlagen.' }
+                    [Console]::Out.WriteLine("Microsoft-Reparatur erfolgreich: $($probe.Output)")
+                }
+                'Portable' {
+                    $portableClient = Get-WinGetPortableClientFromGitHub
+                    $probe = Invoke-WinGet -Path $portableClient.Path -Arguments @('--version')
+                    if ($probe.ExitCode -ne 0 -or $probe.Output -notmatch '(?m)^\s*v?\d+\.\d+') { throw 'Portabler WinGet-Starttest fehlgeschlagen.' }
+                    [Console]::Out.WriteLine("__WINGET_PORTABLE__ portable Microsoft-CLI erfolgreich: $($probe.Output)")
+                }
             }
             exit 0
-        } catch {
-            $microsoftError = $_.Exception.ToString()
-            try {
-                $portableClient = Get-WinGetPortableClientFromGitHub
-                $portableProbe = Invoke-WinGet -Path $portableClient.Path -Arguments @('--version')
-                if ($portableProbe.ExitCode -ne 0 -or $portableProbe.Output -notmatch '(?m)^\s*v?\d+\.\d+') { throw "Portabler WinGet-Starttest fehlgeschlagen: Pfad=$($portableClient.Path); Exitcode=$($portableProbe.ExitCode); Ausgabe=$($portableProbe.Output)" }
-                [Console]::Out.WriteLine("__WINGET_PORTABLE__ AppX-Reparatur nicht möglich; portable Microsoft-CLI erfolgreich: $($portableProbe.Output). winget-install: $primaryError; Microsoft-AppX: $microsoftError")
-                exit 0
-            } catch { $portableError = $_.Exception.ToString() }
-            $fallbackError = $microsoftError + [Environment]::NewLine + 'Portabler Microsoft-Fallback: ' + $portableError
-            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-            $diagnostic = @(
-                'Beide WinGet-Reparaturwege fehlgeschlagen.'
-                ('Kontext: Benutzer={0}; SID={1}; PowerShell={2}; Computer={3}' -f $identity.Name, $identity.User.Value, $PSVersionTable.PSVersion, $env:COMPUTERNAME)
-                '=== winget-install ==='
-                $primaryError
-                '=== Microsoft-Fallback ==='
-                $fallbackError
-            ) -join [Environment]::NewLine
-            # stdout statt formatierter PowerShell-Fehler: verhindert Abbruch beim ersten stderr-Datensatz.
-            [Console]::Out.WriteLine($diagnostic)
-            exit 1
-        }
-    } finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+        } catch { [Console]::Out.WriteLine($_.Exception.ToString()); exit 1 }
+        finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+    }
+    $usable = $false
+    foreach ($stage in @(
+        @{Name='Appx';Seconds=20}, @{Name='Asheroto';Seconds=35},
+        @{Name='Microsoft';Seconds=20}, @{Name='Portable';Seconds=60}
+    )) {
+        try {
+            $result = Invoke-WinGetRepairStage -Stage $stage.Name -TimeoutSeconds $stage.Seconds
+            [Console]::Out.WriteLine("Reparaturstufe $($stage.Name): Erfolg=$($result.Success); Zeitlimit=$($stage.Seconds)s")
+            [Console]::Out.WriteLine($result.Output)
+            if ($result.Success -and $stage.Name -ne 'Appx') { $usable = $true }
+        } catch { [Console]::Out.WriteLine("Reparaturstufe $($stage.Name) fehlgeschlagen: $($_.Exception.Message)") }
+    }
+    if ($usable) { exit 0 }
+    [Console]::Out.WriteLine('Keine Reparaturstufe hat eine startfähige WinGet-CLI bestätigt.')
+    exit 1
 }
 $winget = Get-WinGetPath
 $args = switch ($Action) {

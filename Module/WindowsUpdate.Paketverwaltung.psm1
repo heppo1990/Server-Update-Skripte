@@ -3241,10 +3241,11 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         $hasCheckTimeout = $Mode -eq 'Check'
         $wingetCheckDeadline = if ($hasCheckTimeout) { [DateTime]::UtcNow.AddSeconds($wingetTimeoutSeconds) } else { [DateTime]::MaxValue }
         function Get-WinGetRemainingSeconds {
-            if (-not $hasCheckTimeout) { return 1800 }
-            $remaining = [int][Math]::Floor(($wingetCheckDeadline - [DateTime]::UtcNow).TotalSeconds)
-            if ($remaining -lt 1) { throw [TimeoutException]::new('WinGet-Gesamtzeitlimit von 5 Minuten einschließlich Reparatur und Wiederholungen erreicht.') }
-            return $remaining
+            param([int]$ReserveSeconds = 0, [int]$MaxSeconds = 1800)
+            if (-not $hasCheckTimeout) { return $MaxSeconds }
+            $remaining = [int][Math]::Floor(($wingetCheckDeadline - [DateTime]::UtcNow).TotalSeconds) - $ReserveSeconds
+            if ($remaining -lt 1) { throw [TimeoutException]::new('WinGet-Gesamtzeitlimit erreicht; reservierte Zeit für die Abschlussabfrage bleibt geschützt.') }
+            return [Math]::Min($remaining, $MaxSeconds)
         }
         $wingetResults = @()
         $firstWingetResult = $null
@@ -3272,7 +3273,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 OperationName = "WinGet-Prüfung auf $ComputerName"
                 WriteLog = $WriteLog
             }
-            if ($hasCheckTimeout) { $initialParameters.TimeoutSeconds = Get-WinGetRemainingSeconds }
+            if ($hasCheckTimeout) { $initialParameters.TimeoutSeconds = Get-WinGetRemainingSeconds -MaxSeconds 45 }
             else { $initialParameters.NoTimeout = $true }
             $wingetResults = @(Invoke-WindowsUpdatePackageWorker @initialParameters | Where-Object { $_.Manager -eq 'Winget' })
             if ($Mode -eq 'Install' -and -not $isLocalTarget) {
@@ -3306,7 +3307,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $retryReason = 'WinGet-Installation/Reparatur über winget-install.ps1'
                 try {
                     Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; starte die signaturgeprüfte winget-install.ps1-Clientreparatur ausschließlich über JEA und Windows PowerShell 5.1."
-                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds)
+                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 180)
                     if ([string]$installResult.Output -match '__WINGET_PORTABLE__|portable Microsoft-CLI erfolgreich') {
                         $retryPreferPortableWinGet = $true
                         $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
@@ -3409,7 +3410,8 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             try {
                 if ($retryRuntimeRepairRequired -and -not $wingetInstallScriptRan -and -not $retryPreferPortableWinGet) {
                     Write-CommonLog $WriteLog "Zentraler WinGet-Reparaturablauf auf ${ComputerName}: signaturgeprüfte winget-install.ps1-Clientreparatur über JEA und Windows PowerShell 5.1; Paket-Installationen und -Deinstallationen sind nicht freigegeben."
-                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds)
+                    try {
+                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 180)
                     if ([string]$installResult.Output -match '__WINGET_PORTABLE__|portable Microsoft-CLI erfolgreich') {
                         $retryPreferPortableWinGet = $true
                         $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
@@ -3418,6 +3420,11 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     Write-CommonLog $WriteLog "Zentrale WinGet-Clientreparatur auf $ComputerName über JEA erfolgreich."
                     if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
                         Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
+                    }
+                    } catch {
+                        $wingetInstallScriptRan = $true
+                        $firstDiagnostic += [Environment]::NewLine + 'Clientreparatur: ' + $_.Exception.ToString()
+                        Write-CommonLog $WriteLog "WinGet-Reparatur auf ${ComputerName} nicht vollständig; reservierte Abschlussabfrage wird trotzdem versucht." $true
                     }
                 }
                 if (-not $retryPreferPortableWinGet -and ($retrySourcePackageRepair -or $retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)')) {
@@ -3433,11 +3440,12 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     Start-Sleep -Seconds $appxSettleDelaySeconds
                 }
                 if ($retryRequiresSourceReset) {
+                    try {
                     $sourceResetResult = $null
                     if ($isLocalTarget) {
-                        $sourceResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds) -WriteLog $WriteLog
+                        $sourceResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 20) -WriteLog $WriteLog
                     } else {
-                        $sourceResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds) -WriteLog $WriteLog
+                        $sourceResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 20) -WriteLog $WriteLog
                     }
                     $sourceResetPerformed = if ($sourceResetResult -and $sourceResetResult.PSObject.Properties['ResetPerformed']) {
                         [bool]$sourceResetResult.ResetPerformed
@@ -3446,6 +3454,10 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen Sitzung."
                     } else {
                         Write-CommonLog $WriteLog "WinGet-Quellenreset auf $ComputerName wegen des 24-Stunden-Schutzes ausgelassen; WinGet-Quellenpaket wird geprüft und die Abfrage in einer neuen Sitzung wiederholt."
+                    }
+                    } catch {
+                        Write-CommonLog $WriteLog "WinGet-Quellenreset auf ${ComputerName} nicht abgeschlossen: $($_.Exception.Message). Abschlussabfrage wird trotzdem versucht." $true
+                        $sourceResetPerformed = $false
                     }
                 }
                 $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $retryRequiresSourceReset -or $wingetInstallScriptRan
@@ -3484,15 +3496,20 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $followupResetPerformed = $false
                     if ($retryResetProperty -and [bool]$retryResetProperty.Value) {
                         Write-CommonLog $WriteLog "WinGet auf $ComputerName blieb nach der ersten Wiederholung leer; Quellenreset wird jetzt ausgeführt, danach folgt eine weitere neue Verbindung."
+                        try {
                         $followupResetResult = $null
                         if ($isLocalTarget) {
-                            $followupResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds) -WriteLog $WriteLog
+                            $followupResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 20) -WriteLog $WriteLog
                         } else {
-                            $followupResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds) -WriteLog $WriteLog
+                            $followupResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 20) -WriteLog $WriteLog
                         }
                         $followupResetPerformed = if ($followupResetResult -and $followupResetResult.PSObject.Properties['ResetPerformed']) {
                             [bool]$followupResetResult.ResetPerformed
                         } else { $true }
+                        } catch {
+                            Write-CommonLog $WriteLog "WinGet-Folgequellenreset auf ${ComputerName} nicht abgeschlossen; Abschlussabfrage wird mit verbleibendem Budget versucht: $($_.Exception.Message)" $true
+                            $followupResetPerformed = $false
+                        }
                         $retryRequiresSourceReset = $followupResetPerformed
                     }
                     else {
