@@ -1069,7 +1069,7 @@ try {
         $jeaVisibleFunctions = @($jeaVisibleFunctions | Where-Object { $_ -ne 'Invoke-WindowsUpdateAdmWinGetMaintenance' })
         $jeaVisibleExternalCommands = @($chocolateyWrapper, $chocolateyQueryWrapper)
     }
-    $jeaModulesToImport = @('PSWindowsUpdate', $JeaModuleName)
+    [string[]]$jeaModulesToImport = @('PSWindowsUpdate', [string]$JeaModuleName)
     $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
     if ($InstallWinGetClientModule -and $winGetClientAvailable) {
         $jeaModulesToImport += 'Microsoft.WinGet.Client'
@@ -1093,19 +1093,18 @@ try {
     
     Write-SetupLog "Erlaubte Cmdlets: $($VisibleCmdlets.Count)" "INFO"
     
-    # New-PSRoleCapabilityFile hat keinen -Force Parameter -> Datei vorher loeschen
-    if (Test-Path $RoleCapabilityFile) {
-        Remove-Item -Path $RoleCapabilityFile -Force -ErrorAction Stop
-        Write-SetupLog "Alte Role Capability Datei entfernt" "INFO"
-    }
+    # Bestehende Rolle bis zur erfolgreichen Neuerstellung behalten.
+    $roleStagingFile = Join-Path $RoleCapDir ('WindowsUpdateRole-' + [guid]::NewGuid().ToString('N') + '.psrc')
     # ModuleVersion NICHT angeben - PowerShell findet das Modul sonst nicht wenn
     # es unter einem anderen Pfad installiert ist (z.B. SYSTEM-Profil vs. ProgramFiles)
-    New-PSRoleCapabilityFile -Path $RoleCapabilityFile `
-                             -ModulesToImport $jeaModulesToImport `
+    New-PSRoleCapabilityFile -Path $roleStagingFile `
+                             -ModulesToImport ([string[]]$jeaModulesToImport) `
                              -VisibleCmdlets $VisibleCmdlets `
                              -VisibleFunctions $jeaVisibleFunctions `
                              -VisibleExternalCommands $jeaVisibleExternalCommands `
                              -VisibleAliases @()
+    $null = Import-PowerShellDataFile -LiteralPath $roleStagingFile -ErrorAction Stop
+    Move-Item -LiteralPath $roleStagingFile -Destination $RoleCapabilityFile -Force -ErrorAction Stop
     Write-SetupLog "Role Capability erstellt: $RoleCapabilityFile" "SUCCESS"
 
     # Für geplante Checks unter SYSTEM authentifiziert sich der Verwaltungsserver
@@ -1117,15 +1116,15 @@ try {
             Parameters = @(@{ Name = 'MicrosoftUpdate' })
         }
     )
-    if (Test-Path -LiteralPath $CheckRoleCapabilityFile) {
-        Remove-Item -LiteralPath $CheckRoleCapabilityFile -Force -ErrorAction Stop
-    }
-    New-PSRoleCapabilityFile -Path $CheckRoleCapabilityFile `
-                             -ModulesToImport @('PSWindowsUpdate', $JeaModuleName) `
+    $checkRoleStagingFile = Join-Path $RoleCapDir ('WindowsUpdateCheckRole-' + [guid]::NewGuid().ToString('N') + '.psrc')
+    New-PSRoleCapabilityFile -Path $checkRoleStagingFile `
+                             -ModulesToImport ([string[]]@('PSWindowsUpdate', [string]$JeaModuleName)) `
                              -VisibleCmdlets $checkRoleCmdlets `
                              -VisibleFunctions @('Get-WindowsUpdateAdmDeploymentStatus') `
                              -VisibleExternalCommands @() `
                              -VisibleAliases @()
+    $null = Import-PowerShellDataFile -LiteralPath $checkRoleStagingFile -ErrorAction Stop
+    Move-Item -LiteralPath $checkRoleStagingFile -Destination $CheckRoleCapabilityFile -Force -ErrorAction Stop
     Write-SetupLog "Eingeschränkte Check-Rolle erstellt: $CheckRoleCapabilityFile" "SUCCESS"
     
     # =========================================================
