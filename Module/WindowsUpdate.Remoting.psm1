@@ -1,4 +1,4 @@
-# Fachmodul: WindowsUpdate.Remoting
+﻿# Fachmodul: WindowsUpdate.Remoting
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function New-WindowsUpdateInvokeCommandParams {
@@ -440,19 +440,23 @@ function Invoke-WindowsUpdateRemoteCommandWithTimeout {
         $AuthInfo,
         [Parameter(Mandatory)][scriptblock]$ScriptBlock,
         [object[]]$ArgumentList = @(),
+        [string]$ConfigurationName = '',
         [ValidateRange(1, 3600)][int]$TimeoutSeconds = 300,
         [Parameter(Mandatory)][string]$OperationName,
         [scriptblock]$WriteLog
     )
 
-    $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -OpenTimeoutSeconds ([Math]::Min(30, $TimeoutSeconds))
+    if ($ConfigurationName) { $invokeParameters.ConfigurationName = $ConfigurationName }
     $invokeParameters.ScriptBlock = $ScriptBlock
     if ($ArgumentList.Count -gt 0) { $invokeParameters.ArgumentList = $ArgumentList }
     $invokeParameters.AsJob = $true
     $job = $null
     try {
         $job = Invoke-Command @invokeParameters
-        $completedJob = Wait-Job -Job $job -Timeout $TimeoutSeconds
+        $waitSeconds = [int][Math]::Floor($TimeoutSeconds - $timer.Elapsed.TotalSeconds)
+        $completedJob = if ($waitSeconds -gt 0) { Wait-Job -Job $job -Timeout $waitSeconds } else { $null }
         if (-not $completedJob) {
             $timeoutDetails = [System.Collections.Generic.List[string]]::new()
             try { $null = Stop-Job -Job $job -ErrorAction Stop }

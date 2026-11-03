@@ -1,4 +1,4 @@
-# Fachmodul: WindowsUpdate.Paketquellen
+﻿# Fachmodul: WindowsUpdate.Paketquellen
 # Quellenpflege wird ausschließlich über die eng begrenzte JEA-Funktion ausgeführt.
 
 function Reset-WindowsUpdateRemoteWinGetSources {
@@ -10,6 +10,7 @@ function Reset-WindowsUpdateRemoteWinGetSources {
         [scriptblock]$WriteLog
     )
 
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $firstFailure = ''
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         try {
@@ -17,7 +18,9 @@ function Reset-WindowsUpdateRemoteWinGetSources {
                 -AuthInfo $AuthInfo -ConfigurationName 'WindowsUpdateAdm' -OpenTimeoutSeconds 30 `
                 -OperationTimeoutSeconds ([Math]::Min(14400, [Math]::Max(60, $TimeoutSeconds + 30)))
             $invokeParameters.ScriptBlock = { Invoke-WindowsUpdateAdmWinGetMaintenance -Action SourceReset -ErrorAction Stop }
-            $result = @(Invoke-Command @invokeParameters | Select-Object -Last 1)
+            $remaining = [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalSeconds)
+            if ($remaining -lt 1) { throw [TimeoutException]::new('Zeitlimit für den WinGet-Quellenreset erreicht.') }
+            $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $AuthInfo -ConfigurationName 'WindowsUpdateAdm' -ScriptBlock $invokeParameters.ScriptBlock -TimeoutSeconds $remaining -OperationName "WinGet-Quellenreset auf $ComputerName" -WriteLog $WriteLog | Select-Object -Last 1)
             if ($result.Count -eq 0 -or -not [bool]$result[0].Success) {
                 $detail = if ($result.Count -gt 0) { [string]$result[0].Output } else { 'keine strukturierte Rückgabe' }
                 throw "JEA-Quellenreset lieferte keinen bestätigten Erfolg. $detail"
@@ -46,6 +49,7 @@ function Reset-WindowsUpdateRemoteWinGetSources {
             $firstFailure = $failure
             Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'JEA-WinGet-Quellenreset wiederholen' -Target $ComputerName `
                 -DiagnosticText $failure -Context @('Transienter AppX-Fehler; Wiederholung=1/1; Wartezeit=10s; frische JEA-Verbindung')
+            if (($deadline - [DateTime]::UtcNow).TotalSeconds -le 10) { throw [TimeoutException]::new('Zeitlimit vor Wiederholung des WinGet-Quellenresets erreicht.') }
             Start-Sleep -Seconds 10
         }
     }
