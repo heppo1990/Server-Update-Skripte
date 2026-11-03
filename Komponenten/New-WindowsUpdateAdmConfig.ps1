@@ -1100,8 +1100,8 @@ try {
     New-PSRoleCapabilityFile -Path $roleStagingFile `
                              -ModulesToImport ([string[]]$jeaModulesToImport) `
                              -VisibleCmdlets $VisibleCmdlets `
-                             -VisibleFunctions $jeaVisibleFunctions `
-                             -VisibleExternalCommands $jeaVisibleExternalCommands `
+                             -VisibleFunctions ([string[]]$jeaVisibleFunctions) `
+                             -VisibleExternalCommands ([string[]]$jeaVisibleExternalCommands) `
                              -VisibleAliases @()
     $null = Import-PowerShellDataFile -LiteralPath $roleStagingFile -ErrorAction Stop
     Move-Item -LiteralPath $roleStagingFile -Destination $RoleCapabilityFile -Force -ErrorAction Stop
