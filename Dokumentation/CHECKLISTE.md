@@ -48,3 +48,5 @@ Bereits passend modularisiert: Linux- und Home-Assistant-Updatefunktionen liegen
 - **KD2 – HOST-SERVER / SERVER2:** Verteilung am 03.11.2026 08:34 erfolgreich auf 2 Windows-Zielen; beide V4-Endpunkte und Statusfunktionen per Kerberos geprüft, keine Fehler oder übersprungenen Ziele. Fehlendes Microsoft.WinGet.Client auf SERVER2 bereitgestellt; Check, Download und Install noch offen.
 
 - **KD3 – SRVDOM01 / SRVSVC / TP-M08 / SrvHV01:** Check vom 03.11.2026 08:20 nur teilweise vorliegend. Windows-Abfragen auf SRVDOM01 und SRVSVC erfolgreich; WinGet-Reparatur auf SRVDOM01 scheitert zusätzlich in der Diagnose-Textverkettung. Allgemeiner Diagnosefix wird zusammen mit dieser Checklistenpflege ausgeliefert. WinGet-Fehler bleibt bis zum vollständigen Folgelog offen.
+
+- **KD3, Folgelog 03.11.2026 08:43:** SRVDOM01 WinGet weiterhin fehlerhaft. SRVSVC und TP-M08 melden nach portabler Wiederholung leer; laut Nutzer sind auf TP-M08 Updates vorhanden, Ergebnis daher nicht als Erfolg bestätigt. Worker-Download wurde wegen durch Textaustausch beschädigter Quelldatei verworfen; Syntax wird im allgemeinen Fix wiederhergestellt. Prüfung des leeren TP-M08-Ergebnisses bleibt offen.
