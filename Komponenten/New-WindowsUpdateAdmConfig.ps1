@@ -193,6 +193,12 @@ try {
     Write-SetupLog "=== NuGet Provider Check ===" "INFO"
     
     $offlineModulesPresent = Test-Path -LiteralPath $offlinePSWU -PathType Container
+    # Gilt auch für direkte Aufrufe und die lokale SYSTEM-Finalisierung.
+    $setupOsForWinGet = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    if ([int]$setupOsForWinGet.ProductType -gt 1 -and [int]$setupOsForWinGet.BuildNumber -lt 17763) {
+        $InstallWinGetClientModule = $false
+        Write-SetupLog 'WinGet-Modul und Paketupdatefreigabe auf Windows Server vor 2019 ausgelassen.' 'INFO'
+    }
     if ($ModulesVerifiedCurrent) {
         $nugetReady = $true
     } else {
@@ -881,7 +887,7 @@ try {
     $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
     $JeaModuleSource = New-WindowsUpdateAdmDeploymentStatusModuleSource -Version $deploymentVersion `
         -WinGetUpdateOnly ([bool]($InstallWinGetClientModule -and $winGetClientAvailable)) -ChocolateyUpdateOnly $true `
-        -WinGetMaintenanceOnly $true -ChocolateyMaintenanceOnly $true
+        -WinGetMaintenanceOnly ([bool]([int]$setupOsForWinGet.BuildNumber -ge 17763)) -ChocolateyMaintenanceOnly $true
     if (-not (Test-Path -LiteralPath $JeaBaseDir)) { New-Item -Path $JeaBaseDir -ItemType Directory -Force | Out-Null }
     [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
     Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"
@@ -1054,6 +1060,10 @@ try {
             'ClientRepair' { Join-Path $JeaBaseDir 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
         }
     })
+    if ([int]$setupOsForWinGet.ProductType -gt 1 -and [int]$setupOsForWinGet.BuildNumber -lt 17763) {
+        $jeaVisibleFunctions = @($jeaVisibleFunctions | Where-Object { $_ -ne 'Invoke-WindowsUpdateAdmWinGetMaintenance' })
+        $jeaVisibleExternalCommands = @($chocolateyWrapper, $chocolateyQueryWrapper)
+    }
     $jeaModulesToImport = @('PSWindowsUpdate', $JeaModuleName)
     $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
     if ($InstallWinGetClientModule -and $winGetClientAvailable) {

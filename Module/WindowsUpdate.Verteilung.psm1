@@ -77,12 +77,16 @@ function Test-WindowsUpdateDeploymentConfiguration {
 
     try {
         $rawStatus = Invoke-Command @endpointParameters
+        if ($rawStatus.PSObject.Properties['TargetBuild'] -and [int]$rawStatus.TargetBuild -lt 17763) {
+            $ExpectedWinGetUpdateOnly = $false
+            $ExpectedWinGetMaintenanceOnly = $false
+        }
         $status = ConvertFrom-WindowsUpdateAdmDeploymentStatus -Status $rawStatus
         if ($status.DeploymentVersion -eq $ExpectedDeploymentVersion -and
             $status.ChocolateyUpdateOnly -eq $ExpectedChocolateyUpdateOnly -and
             $status.WinGetMaintenanceOnly -eq $ExpectedWinGetMaintenanceOnly -and
             $status.ChocolateyMaintenanceOnly -eq $ExpectedChocolateyMaintenanceOnly -and
-            (-not $ExpectedWinGetUpdateOnly -or $status.WinGetUpdateOnly)) {
+            ($status.WinGetUpdateOnly -eq $ExpectedWinGetUpdateOnly)) {
             return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$status.DeploymentVersion }
         }
         $reason = "Konfigurationsversion $($status.DeploymentVersion) oder eingeschränkte Paketmanager-Funktionen weichen vom Sollstand ab (WinGet-Update-only=$($status.WinGetUpdateOnly), WinGet-Wartung=$($status.WinGetMaintenanceOnly), Chocolatey-Update-only=$($status.ChocolateyUpdateOnly), Chocolatey-Wartung=$($status.ChocolateyMaintenanceOnly))."
@@ -453,6 +457,16 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 Status = 'Success'
                 Message = 'Temp-Altlasten geprüft; WindowsUpdateAdm-Setup wurde auf Wunsch nicht erneut ausgeführt.'
             }
+        }
+
+        $targetOsForWinGet = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+            Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object BuildNumber, ProductType
+        }
+        if ([int]$targetOsForWinGet.ProductType -gt 1 -and [int]$targetOsForWinGet.BuildNumber -lt 17763) {
+            $EnableWingetUpdates = $false
+            $ExpectedWinGetUpdateOnly = $false
+            $ExpectedWinGetMaintenanceOnly = $false
+            Write-DeployLog "[$Servername] WinGet-Bereitstellung ausgelassen: Windows Server älter als 2019."
         }
 
         # Nur veraltete oder fehlende Komponenten werden als Offlinepaket erstellt.

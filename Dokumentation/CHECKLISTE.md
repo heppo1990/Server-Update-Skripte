@@ -43,7 +43,6 @@ Bereits passend modularisiert: Linux- und Home-Assistant-Updatefunktionen liegen
 - [ ] **26. Fehlendes Chocolatey:** Ohne Installation keine Konsolenwarnung oder überflüssige Übersprungen-Meldung; vorhandene Installation weiter prüfen.
 ## Aktueller Kundenstand ab 03.11.2026
 
-- **KD1 – WBG Pfarrhuebel:** Check am 03.11.2026 08:23 erfolgreich auf 3 Windows-Zielen; 15 Windows- und 21 WinGet-Updates, Mail erfolgreich. Portabler Folgelauf auf SrvHV01 direkt aus Cache ohne Reparaturwartezeit. Download am 03.11.2026 08:27 auf allen 3 Zielen ohne gemeldeten Fehler abgeschlossen (15 Ergebniszeilen; Defender auf SrvHV01 nur A------, übrige AD-----). Install noch offen.
 
 - **KD2 – HOST-SERVER / SERVER2:** Verteilung am 03.11.2026 08:34 erfolgreich auf 2 Windows-Zielen; beide V4-Endpunkte und Statusfunktionen per Kerberos geprüft, keine Fehler oder übersprungenen Ziele. Fehlendes Microsoft.WinGet.Client auf SERVER2 bereitgestellt; Check, Download und Install noch offen.
 
@@ -51,10 +50,13 @@ Bereits passend modularisiert: Linux- und Home-Assistant-Updatefunktionen liegen
 
 - **KD3, Folgelog 03.11.2026 08:43:** SRVDOM01 WinGet weiterhin fehlerhaft. SRVSVC und TP-M08 melden nach portabler Wiederholung leer; laut Nutzer sind auf TP-M08 Updates vorhanden, Ergebnis daher nicht als Erfolg bestätigt. Worker-Download wurde wegen durch Textaustausch beschädigter Quelldatei verworfen; Syntax wird im allgemeinen Fix wiederhergestellt. Prüfung des leeren TP-M08-Ergebnisses bleibt offen.
 
-- **KD1 Install 03.11.2026 08:28–09:22 fehlgeschlagen:** Windows-Installergebnisse melden SRVAPP=5, SRVDOM01=3, SrvHV01=5, jeweils Neustartbedarf. Anschließende JEA-Abfrage mit nicht freigegebenem Get-CimInstance bricht alle 3 Serverabläufe ab; Zusammenfassung zählt deshalb fälschlich Windows=0. Nachinstallation/Neustartplanung nicht bestätigt. WinGet teils fälschlich leer, SrvHV01 RPC-Fehler; TeamViewer auf SRVDOM01 Exitcode 2, PowerShell auf HV manuell zu prüfen. Verwaltungsserver-PS7-Update samt Fortsetzung erfolgreich.
 
 - [ ] **27. Install-Abschluss und Mail trotz Folgefehler:** VM-Inventar über vorhandene administrative Verbindung statt CIM im eingeschränkten JEA. Windows-Ergebnisse direkt nach Installation in Mail/Zähler übernehmen. KD1 muss nach Fix Neustart- und Nachinstallationsplanung sowie vollständigen Mailbericht bestätigen; keine zusätzliche JEA-Freigabe.
 
 - [ ] **28. WinGet-Quellenkontext und portable Abhängigkeiten:** KD3 09:32 bestätigt DOM-Startfehler 0xC0000135 und JEA-/Suchkontext-Abweichung. Portable Abhängigkeiten aus dynamischem Microsoft-Release sowie winget-Reset/Update im tatsächlichen Suchkonto prüfen; Abbruchtext trotz Exitcode 0 nicht als Erfolg werten. Kundeneigene Quellen erhalten. TP-M08 meldet nach manuellem Eingriff 10 Updates; automatischer Weg bleibt zu bestätigen.
 
 - **KD3 03.11.2026 10:21:** DOM-Wartungsworker startet portable CLI erfolgreich, Wiederholungsabfrage im separaten Benutzer-Cache jedoch weiterhin fehlerhaft. Abhängigkeitsbereitstellung wird auch im portablen Abfragepfad ergänzt. Andere Ziele melden Paketupdates; DOM erst nach Folgelauf abschließen. Keine Ausweitung von JEA-Rechten, keine neue Verteilung erforderlich.
+
+Kundenabschluss 03.11.2026: KD1 / WBG Pfarrhuebel vom Nutzer als abgeschlossen bestätigt. Nachinstallation war bereits eingerichtet; keine Bestätigung einer frischen Aufgabeneinrichtung durch diesen Abschluss. KD1 gehört nicht mehr zu den offenen Kunden.
+
+- [ ] **29. Verteilung auf Server 2016:** WinGet-Modulübertragung und Paketupdatefreigabe für Server-Builds vor 17763 auslassen, auch bei direktem Setup und SYSTEM-Finalisierung. Windows Update/Chocolatey unverändert. Folge-Verteilung darf nicht wegen fehlendem WinGet erneut einrichten. Bestehende Module nicht deinstallieren.
