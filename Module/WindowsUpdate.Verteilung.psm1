@@ -82,7 +82,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
             $ExpectedWinGetMaintenanceOnly = $false
         }
         $status = ConvertFrom-WindowsUpdateAdmDeploymentStatus -Status $rawStatus
-        if ($status.DeploymentVersion -eq $ExpectedDeploymentVersion -and
+        if ((Test-WindowsUpdateAdmVersion -Actual $status.DeploymentVersion -Expected $ExpectedDeploymentVersion) -and
             $status.ChocolateyUpdateOnly -eq $ExpectedChocolateyUpdateOnly -and
             $status.WinGetMaintenanceOnly -eq $ExpectedWinGetMaintenanceOnly -and
             $status.ChocolateyMaintenanceOnly -eq $ExpectedChocolateyMaintenanceOnly -and
@@ -115,7 +115,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
                     }
                 }
             if ([int]$legacyStatus.Build -le 17763) {
-                if ($legacyStatus.MaintenanceCurrent -and $legacyStatus.HasStatusFunction -and $legacyStatus.DeploymentVersion -eq $ExpectedDeploymentVersion -and
+                if ($legacyStatus.MaintenanceCurrent -and $legacyStatus.HasStatusFunction -and (Test-WindowsUpdateAdmVersion -Actual $legacyStatus.DeploymentVersion -Expected $ExpectedDeploymentVersion) -and
                     $legacyStatus.ChocolateyUpdateOnly -eq $ExpectedChocolateyUpdateOnly -and
                     $legacyStatus.WinGetMaintenanceOnly -eq $ExpectedWinGetMaintenanceOnly -and
                     $legacyStatus.ChocolateyMaintenanceOnly -eq $ExpectedChocolateyMaintenanceOnly -and
@@ -765,7 +765,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
         # GetNewClosure erfasst lokale Variablen zuverlässig. Die zentrale
         # Version liegt auf Skriptebene; zuerst in eine Funktionsvariable
         # kopieren, damit die Endpunktprüfung nicht mit leerem Sollwert läuft.
-        $expectedVersionForValidation = [string]$ExpectedDeploymentVersion
+        $expectedVersionForValidation = ((@([string]$ExpectedDeploymentVersion -split '\.') + @('0','0','0'))[0..2] -join '.')
         $validationRequirements = @{
             ChocolateyUpdateOnly = [bool]$ExpectedChocolateyUpdateOnly
             WinGetMaintenanceOnly = [bool]$ExpectedWinGetMaintenanceOnly
@@ -779,7 +779,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
             $maintenanceProperty = $deploymentStatus.PSObject.Properties['WinGetMaintenanceOnly']
             $chocolateyMaintenanceProperty = $deploymentStatus.PSObject.Properties['ChocolateyMaintenanceOnly']
             $status = [PSCustomObject]@{
-                DeploymentVersion = [string]$deploymentStatus.Version
+                DeploymentVersion = ((@([string]$deploymentStatus.Version -split '\.') + @('0','0','0'))[0..2] -join '.')
                 WinGetUpdateOnly = [bool]$(if ($winGetProperty) { $winGetProperty.Value } else { $false })
                 ChocolateyUpdateOnly = [bool]$(if ($chocolateyProperty) { $chocolateyProperty.Value } else { $false })
                 WinGetMaintenanceOnly = [bool]$(if ($maintenanceProperty) { $maintenanceProperty.Value -and $deploymentStatus.PSObject.Properties['MaintenanceRevision'] -and $deploymentStatus.MaintenanceRevision -eq '6' } else { $false })

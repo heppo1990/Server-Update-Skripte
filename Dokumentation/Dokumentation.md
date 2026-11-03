@@ -445,3 +445,11 @@ Für einen Test kann eine einzelne KB zurückgestellt und eine VM sofort neu ges
 ```
 
 Danach den gezielten Lauf ausführen. Die Nachinstallation wartet nach dem Neustart automatisch auf die Bereitschaft von Windows Update.
+
+### Versionsschema und erforderliche Verteilung
+
+Versionen haben drei Stellen: Hauptversion.Nebenversion.Korrektur, aktuell 5.0.0. Große Architektur-, Sicherheits- oder Schnittstellenänderungen erhöhen die Hauptversion; kleinere Funktionen die Nebenversion; Fehlerkorrekturen die Korrekturstelle. Nach einer Erhöhung werden nachfolgende Stellen auf 0 gesetzt.
+
+`Get-WindowsUpdateScriptsVersion` bezeichnet den Skriptstand. `Get-WindowsUpdateAdmDeploymentVersion` bezeichnet den erforderlichen Stand des fest installierten Endpunkts. Beide werden nur dann gemeinsam erhöht, wenn der Fix eine Änderung auf den Zielsystemen durch die Verteilung benötigt. Automatisch nachgeladene Wartungsworker und reine Steuerungs-/Anzeigeänderungen erhöhen den Skriptstand, ohne deswegen eine Verteilung anzufordern. Auch eine kleine Korrektur kann eine Verteilung erfordern, wenn sie im festen Endpunkt liegt. Die Entscheidung richtet sich nach der technischen Notwendigkeit, nicht nach der Versionsstufe.
+
+Vorhandene Kennungen wie 5 und 5.0 gelten als 5.0.0. Die reine Umstellung der Schreibweise fordert daher keine erneute Einrichtung an. Abweichende Endpunktversionen und fehlende benötigte Fähigkeiten bleiben Gründe für eine Neuverteilung.

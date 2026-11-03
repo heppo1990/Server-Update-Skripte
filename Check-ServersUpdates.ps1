@@ -641,7 +641,7 @@ if ($ServerADList -ne $null) {
                 $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
                 if ([string]::IsNullOrWhiteSpace($actualDeploymentVersion)) {
                   Add-CheckRedistributionNotice -Target $Servername -Reason 'Die WindowsUpdateAdm-Bereitstellungskennung fehlt.'
-                } elseif ($actualDeploymentVersion -ne $expectedDeploymentVersion) {
+                } elseif (-not (Test-WindowsUpdateAdmVersion -Actual $actualDeploymentVersion -Expected $expectedDeploymentVersion)) {
                   Add-CheckRedistributionNotice -Target $Servername -Reason "WindowsUpdateAdm-Version $actualDeploymentVersion ist veraltet; erwartet wird $expectedDeploymentVersion."
                 } else {
                   Write-ScriptLog "WindowsUpdateAdm-Version $actualDeploymentVersion auf $Servername ist aktuell." $true
