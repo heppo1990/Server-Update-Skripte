@@ -635,20 +635,11 @@ if ($ServerADList -ne $null) {
                 $deploymentAuth = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $svcCredential -ConfigurationName 'WindowsUpdateAdm'
                 foreach ($k in $deploymentAuth.Keys) { if ($k -ne 'ComputerName') { $deploymentStatusParams[$k] = $deploymentAuth[$k] } }
               }
-              try {
-                $deploymentStatus = Invoke-Command @deploymentStatusParams
-                $actualDeploymentVersion = [string]$deploymentStatus.Version
-                $expectedDeploymentVersion = Get-WindowsUpdateAdmDeploymentVersion
-                if ([string]::IsNullOrWhiteSpace($actualDeploymentVersion)) {
-                  Add-CheckRedistributionNotice -Target $Servername -Reason 'Die WindowsUpdateAdm-Bereitstellungskennung fehlt.'
-                } elseif (-not (Test-WindowsUpdateAdmVersion -Actual $actualDeploymentVersion -Expected $expectedDeploymentVersion)) {
-                  Add-CheckRedistributionNotice -Target $Servername -Reason "WindowsUpdateAdm-Version $actualDeploymentVersion ist veraltet; erwartet wird $expectedDeploymentVersion."
-                } else {
-                  Write-ScriptLog "WindowsUpdateAdm-Version $actualDeploymentVersion auf $Servername ist aktuell." $true
-                }
-              } catch {
-                Add-CheckRedistributionNotice -Target $Servername -Reason 'Der WindowsUpdateAdm-Bereitstellungsstatus ist nicht lesbar; eine Neuverteilung wird empfohlen.'
-                Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message $true } -Operation 'WindowsUpdateAdm-Bereitstellungsstatus' -Target $Servername -ErrorRecord $_
+              $deploymentRequirement = Test-WindowsUpdateDeploymentRequirement -InvokeParameters $deploymentStatusParams
+              if ($deploymentRequirement.RequiresDeployment) {
+                Add-CheckRedistributionNotice -Target $Servername -Reason $deploymentRequirement.Reason
+              } else {
+                Write-ScriptLog "WindowsUpdateAdm-Version $($deploymentRequirement.Version) auf $Servername ist aktuell." $true
               }
             }
             $UpdResult = $jeaEndpointProbe

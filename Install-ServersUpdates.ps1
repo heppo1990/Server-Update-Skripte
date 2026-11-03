@@ -1371,6 +1371,11 @@ if ($ServerADList -ne $null) {
         # zentral; AD-Ziele bleiben bei Kerberos ohne Zertifikat.
         $remoting = Initialize-WindowsUpdateRemoting -UpdateSettings $UpdateSettings -TargetComputer $Servername -IsNonAdTarget ([bool]($Server.IsAdditional -or $Server.IsHypervisor)) -WriteLog { param($message) Write-ScriptLog $message }
         $svcCredential = $remoting.AuthInfo
+        $versionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $svcCredential -OpenTimeoutSeconds 10 -OperationTimeoutSeconds 60
+        $deploymentRequirement = Test-WindowsUpdateDeploymentRequirement -InvokeParameters $versionParameters
+        if ($deploymentRequirement.RequiresDeployment) {
+          throw "Erneute WindowsUpdateAdm-Verteilung auf $Servername erforderlich: $($deploymentRequirement.Reason)"
+        }
 
         # Package-Manager-Updates
         $localManagementTargets = @($env:COMPUTERNAME, $ComputerFQDN, [System.Net.Dns]::GetHostName())

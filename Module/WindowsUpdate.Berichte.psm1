@@ -188,19 +188,3 @@ function Add-WindowsUpdateTrustedHost {
         Write-WindowsUpdateDiagnostic -WriteLog $WriteLog -Operation 'TrustedHosts aktualisieren' -Target $ComputerName -ErrorRecord $_
     }
 }
-
-function Get-WindowsUpdateAdmDeploymentVersion {
-    '5.0.0'
-}
-
-function Get-WindowsUpdateScriptsVersion {
-    '5.0.0'
-}
-
-function Test-WindowsUpdateAdmVersion {
-    param([string]$Actual, [string]$Expected)
-    if ($Actual -notmatch '^\d+(?:\.\d+){0,2}$' -or $Expected -notmatch '^\d+(?:\.\d+){0,2}$') { return $false }
-    $actualParts = @($Actual -split '\.') + @('0','0','0')
-    $expectedParts = @($Expected -split '\.') + @('0','0','0')
-    return ([version]($actualParts[0..2] -join '.')) -eq ([version]($expectedParts[0..2] -join '.'))
-}
