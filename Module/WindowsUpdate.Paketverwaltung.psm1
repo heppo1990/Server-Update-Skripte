@@ -211,6 +211,7 @@ function Resolve-WindowsUpdateJeaWinGetResults {
             $success = $status -eq 'Ok' -and $installerCode -in @('', '0') -and $extendedCode -in @('', '0')
             $exitCode = if ($success) { 0 } else { 1 }
             $updateOutput = "JEA-Update-WinGetPackage: Status=$status; InstallerErrorCode=$installerCode; ExtendedErrorCode=$extendedCode; RebootRequired=$([bool]$update[0].RebootRequired)"
+            if ($update[0].PSObject.Properties['Output']) { $updateOutput += [Environment]::NewLine + [string]$update[0].Output }
         }
         catch {
             $updateOutput = [string]$_.Exception.Message

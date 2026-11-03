@@ -1,4 +1,4 @@
-# Fachmodul: WindowsUpdate.Berichte
+﻿# Fachmodul: WindowsUpdate.Berichte
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Invoke-WindowsUpdateFileRetention {
@@ -190,5 +190,5 @@ function Add-WindowsUpdateTrustedHost {
 }
 
 function Get-WindowsUpdateAdmDeploymentVersion {
-    '4'
+    '5'
 }

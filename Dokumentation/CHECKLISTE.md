@@ -66,4 +66,11 @@ Kundenabschluss 03.11.2026: KD1 / WBG Pfarrhuebel vom Nutzer als abgeschlossen b
 
 - **Neuer KD1 (ersetzt die freigewordene Nummer, nicht Pfarrhuebel):** Verteilung 03.11.2026 08:48: SRVDOM, SRVEX01, SRVFILE, SRVMAIL erfolgreich; HV01 und HV02 Setupfehler unmittelbar nach Erkennung bestehender HTTPS-Listener. 4/6 erfolgreich. Konkrete Ursache nur in lokalen Setup-Logs, noch anzufordern. Kunde offen.
 
-- [ ] **30. Bestehende WinRM-Zertifikatsverwaltung migrieren:** Nur nach durch die Verteilung erfolgreich getesteter Clientzertifikatsanmeldung darf die vorhandene HTTP.sys-Bindung auf 5986 die erforderliche Clientzertifikataushandlung aktivieren (PreserveExistingCertificateMapping). Ohne diesen Nachweis bleibt die Baseline-Sperre erhalten. Neuer KD1/HV01: Ursache bestätigt, Folge-Verteilung prüfen; HV02 separat bestätigen.
+
+- **KD3 Download 03.11.2026 12:48 erfolgreich:** 7 Systeme verarbeitet; 12 Windows-Ergebnisse auf 4 Zielen, 7 Linux-Updates verfügbar, HA keine Updates; Mail erfolgreich, keine Fehler. A------ gemäß geklärtem Anzeigeverhalten nicht als Downloadfehler gewertet. Install KD3 noch offen.
+
+- **Neuer KD1 Verteilung 03.11.2026 12:55 erfolgreich:** Alle 6 Ziele V4, keine Fehler. HV01 und HV02 nach bestätigter Bestands-Zertifikatsverbindung migriert; Clientzertifikataushandlung aktiviert/verifiziert, Endpunkte anschließend per Zertifikat erfolgreich getestet. Prüfpunkt 30 entfernt. Check, Download und Install noch offen.
+
+- **KD3 Install 03.11.2026 12:54 vom Nutzer abgebrochen:** Verwaltungsserver-Vorabpfad findet Microsoft.PowerShell als Upgrade, Upgrade-Aufruf meldet aber kein installiertes Paket (Exitcode -1978335212); Paket wird anschließend trotzdem aus dem regulären Lauf ausgeschlossen. SRVSVC: Install-Modus verwirft den zuvor erfolgreichen portablen Betrieb und startet erneut Clientreparatur. Linux: 7 Updates erfolgreich. Keine Bestätigung der Windows-/Paketinstallation aus diesem abgebrochenen Lauf. Check-Erfolg ist kein Install-Nachweis; unterschiedliche Konten/Backends im Installpfad offen.
+
+- [ ] **31. WinGet-Installpfad:** Fester JEA-Updateaufruf erhält CLI-upgrade-Rückfall aus signaturgeprüftem geschütztem portablen Cache; nur validierte ID/Quelle und machine-Scope. Keine Install-/Uninstall-Freigabe. PowerShell-Verwaltungsupdate wählt wix/machine; bei Fehlschlag keine Fortsetzung mit still ausgeschlossenem Paket. KD3: Bereitstellungsversion 5 verteilen, danach Install prüfen. Erzeugte Modulsyntax geprüft.

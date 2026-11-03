@@ -12,7 +12,7 @@
 
     $moduleSource = @'
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '__VERSION__'; TargetBuild = [Environment]::OSVersion.Version.Build; MaintenanceRevision = '5'; MaintenanceFunctionsPresent = [bool]((Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated -CommandType Function -ErrorAction SilentlyContinue) -and (Get-Command -Name Invoke-WindowsUpdateAdmWinGetMaintenance -CommandType Function -ErrorAction SilentlyContinue)); WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
+    [PSCustomObject]@{ Version = '__VERSION__'; TargetBuild = [Environment]::OSVersion.Version.Build; MaintenanceRevision = '6'; MaintenanceFunctionsPresent = [bool]((Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated -CommandType Function -ErrorAction SilentlyContinue) -and (Get-Command -Name Invoke-WindowsUpdateAdmWinGetMaintenance -CommandType Function -ErrorAction SilentlyContinue)); WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
 }
 function Update-WindowsUpdateAdmWinGetPackage {
     [CmdletBinding()]
@@ -23,17 +23,38 @@ function Update-WindowsUpdateAdmWinGetPackage {
 
     # JEA veröffentlicht ausschließlich diesen validierten Paket-Update-Aufruf.
     # Install-, Uninstall- und generische Prozessbefehle sind nicht Teil der Rolle.
-    $updates = @(Update-WinGetPackage -Id $Id -Source $Source `
-        -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:$false -ErrorAction Stop)
-    if ($updates.Count -eq 0) { throw "WinGet lieferte für '$Id' kein Update-Ergebnis." }
-    $last = $updates[-1]
-    [PSCustomObject]@{
-        Id = $Id
-        Status = [string]$last.Status
-        InstallerErrorCode = [string]$last.InstallerErrorCode
-        ExtendedErrorCode = [string]$last.ExtendedErrorCode
-        RebootRequired = [bool]$last.RebootRequired
-    }
+    try {
+        $updates = @(Update-WinGetPackage -Id $Id -Source $Source -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:$false -ErrorAction Stop)
+        if ($updates.Count -gt 0 -and [string]$updates[-1].Status -eq 'Ok') {
+            $last = $updates[-1]
+            return [PSCustomObject]@{ Id=$Id; Status=[string]$last.Status; InstallerErrorCode=[string]$last.InstallerErrorCode; ExtendedErrorCode=[string]$last.ExtendedErrorCode; RebootRequired=[bool]$last.RebootRequired }
+        }
+    } catch { }
+    # Fester Update-only-Rückfall: kein Install/Uninstall und keine freien Argumente.
+    $portableRoot = Join-Path $PSScriptRoot 'WinGetPortable'
+    $candidates = @(Get-ChildItem -LiteralPath $portableRoot -Filter winget.exe -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    if ($candidates.Count -eq 0) { throw 'WinGet-Modul fehlgeschlagen; geprüfte portable CLI im JEA-Wartungsverzeichnis fehlt. Clientreparatur erforderlich.' }
+    $exe = $candidates[0].FullName
+    $signature = Get-AuthenticodeSignature -FilePath $exe -ErrorAction Stop
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') { throw 'Portable CLI hat keine gültige Microsoft-Signatur.' }
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $exe
+    $start.WorkingDirectory = Split-Path -Parent $exe
+    $start.EnvironmentVariables['PATH'] = $start.WorkingDirectory + ';' + $env:PATH
+    $start.Arguments = 'upgrade --id ' + $Id + ' --exact --source ' + $Source + ' --scope machine --silent --accept-package-agreements --accept-source-agreements --disable-interactivity'
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    try {
+        $process.StartInfo = $start
+        if (-not $process.Start()) { throw 'WinGet-Updateprozess konnte nicht gestartet werden.' }
+        $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(1800000)) { try { $process.Kill() } catch {}; throw 'WinGet-Update überschritt 30 Minuten.' }
+        $process.WaitForExit()
+        $output = $stdout.GetAwaiter().GetResult() + [Environment]::NewLine + $stderr.GetAwaiter().GetResult()
+        $code = [int]$process.ExitCode
+        [PSCustomObject]@{ Id=$Id; Status=$(if ($code -in @(0,3010)) {'Ok'} else {'Failed'}); InstallerErrorCode=$(if ($code -eq 3010) {'0'} else {[string]$code}); ExtendedErrorCode=''; RebootRequired=($code -eq 3010); Output=$output }
+    } finally { $process.Dispose() }
 }
 function Update-WindowsUpdateAdmChocolateyPackages {
     [CmdletBinding()]

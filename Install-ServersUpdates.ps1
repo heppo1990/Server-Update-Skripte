@@ -879,7 +879,7 @@ try {
         $chocolateyArguments = @('upgrade','powershell-core','--version',[string]$configuration.TargetVersion,'--yes','--limit-output')
         $updateOutput = @(& ([string]$configuration.ChocolateyPath) @chocolateyArguments 2>&1)
     } else {
-        $wingetArguments = @('upgrade','--id','Microsoft.PowerShell','--exact','--source','winget','--version',[string]$configuration.TargetVersion,'--silent','--accept-package-agreements','--accept-source-agreements','--disable-interactivity')
+        $wingetArguments = @('upgrade','--id','Microsoft.PowerShell','--exact','--source','winget','--installer-type','wix','--scope','machine','--version',[string]$configuration.TargetVersion,'--silent','--accept-package-agreements','--accept-source-agreements','--disable-interactivity')
         $updateOutput = @(& ([string]$configuration.WingetPath) @wingetArguments 2>&1)
     }
     $exitCode = $LASTEXITCODE
@@ -906,7 +906,7 @@ $state = [ordered]@{
 }
 [IO.File]::WriteAllText([string]$configuration.StatePath, (ConvertTo-Json -InputObject $state -Depth 5), [Text.UTF8Encoding]::new($false))
 if ($exitCode -eq 0) { Write-HandoffLog "$($configuration.Manager) meldet PowerShell-Update erfolgreich; starte den Installationslauf in PowerShell 7 neu." 'SUCCESS' }
-else { Write-HandoffLog 'Der Installationslauf wird in PowerShell 7 fortgesetzt; das PowerShell-Paket wird nicht erneut installiert.' 'WARNING' }
+else { Write-HandoffLog 'PowerShell-Vorabupdate fehlgeschlagen; keine Fortsetzung mit ausgeschlossenem PowerShell-Paket.' 'ERROR'; exit 30 }
 try {
     Write-HandoffLog "Starte die Installationsfortsetzung sichtbar in PowerShell 7: $($configuration.PwshPath)"
     $resumeProcess = Start-Process -FilePath ([string]$configuration.PwshPath) -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',[string]$configuration.ContinuationEncoded) -PassThru -Wait -WindowStyle Normal
