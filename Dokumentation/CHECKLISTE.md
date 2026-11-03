@@ -38,7 +38,13 @@ Bereits passend modularisiert: Linux- und Home-Assistant-Updatefunktionen liegen
 
 - [ ] **21. Automatischer Wartungsworker:** Neuen Worker aus dem festen GitHub-Pfad unter PS5.1 übernehmen; ohne Neuverteilung ausführen. Bei Onlinefehlern vorhandenen Worker behalten. Keine freien URLs oder Skriptparameter über JEA.
 - [ ] **22. Reparatur im JEA-Kontext:** Installer-, Microsoft- und portablen Rückfallweg mit vollständiger Diagnose prüfen; Windows Server 2022/2025 und Windows 11 berücksichtigen.
-- [ ] **23. Portablen Betrieb merken:** Nach erfolgreicher portabler Abfrage direkt damit starten; bei Fehler Merkung entfernen und vollständige Reparatur ausführen.
 - [ ] **24. AppX-Bestand und Benutzerregistrierung:** Aktuelles Microsoft-Release samt Abhängigkeiten und Lizenz provisionieren; Registrierung nur in geeignetem echten Benutzerprofil bestätigen. Ohne angemeldeten Benutzer als ausstehend melden.
-- [ ] **25. Konsolen-Ergebnisbewertung:** Nach erfolgreicher Wiederholung keine abschließende Fehlermeldung aus früheren Versuchen anzeigen; gilt für Check und Install. Tatsächliche Fehler bleiben sichtbar.
+- [ ] **25. Konsolen-Ergebnisbewertung bei Install:** Nach erfolgreicher Wiederholung keine abschließende Fehlermeldung aus früheren Versuchen anzeigen. Check ist bestätigt; Install bleibt zu prüfen. Tatsächliche Fehler bleiben sichtbar.
 - [ ] **26. Fehlendes Chocolatey:** Ohne Installation keine Konsolenwarnung oder überflüssige Übersprungen-Meldung; vorhandene Installation weiter prüfen.
+## Aktueller Kundenstand ab 03.11.2026
+
+- **KD1 – WBG Pfarrhuebel:** Check am 03.11.2026 08:23 erfolgreich auf 3 Windows-Zielen; 15 Windows- und 21 WinGet-Updates, Mail erfolgreich. Portabler Folgelauf auf SrvHV01 direkt aus Cache ohne Reparaturwartezeit. Download am 03.11.2026 08:27 auf allen 3 Zielen ohne gemeldeten Fehler abgeschlossen (15 Ergebniszeilen; Defender auf SrvHV01 nur A------, übrige AD-----). Install noch offen.
+
+- **KD2 – HOST-SERVER / SERVER2:** Verteilung am 03.11.2026 08:34 erfolgreich auf 2 Windows-Zielen; beide V4-Endpunkte und Statusfunktionen per Kerberos geprüft, keine Fehler oder übersprungenen Ziele. Fehlendes Microsoft.WinGet.Client auf SERVER2 bereitgestellt; Check, Download und Install noch offen.
+
+- **KD3 – SRVDOM01 / SRVSVC / TP-M08 / SrvHV01:** Check vom 03.11.2026 08:20 nur teilweise vorliegend. Windows-Abfragen auf SRVDOM01 und SRVSVC erfolgreich; WinGet-Reparatur auf SRVDOM01 scheitert zusätzlich in der Diagnose-Textverkettung. Allgemeiner Diagnosefix wird zusammen mit dieser Checklistenpflege ausgeliefert. WinGet-Fehler bleibt bis zum vollständigen Folgelog offen.
