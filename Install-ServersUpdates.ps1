@@ -1375,7 +1375,7 @@ if ($ServerADList -ne $null) {
         $deploymentRequirement = Test-WindowsUpdateDeploymentRequirement -InvokeParameters $versionParameters
         if ($deploymentRequirement.RequiresDeployment) {
           $deploymentNotice = "Erneute WindowsUpdateAdm-Verteilung auf $Servername erforderlich: $($deploymentRequirement.Reason) Der Lauf wird mit dem vorhandenen Stand trotzdem versucht."
-          Write-ScriptLog $deploymentNotice $true
+          Write-ScriptLog $deploymentNotice -LogOnly:$true
           $script:DeploymentRequiredTargets += $Servername
 
         }
