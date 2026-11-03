@@ -480,6 +480,7 @@ function Invoke-WindowsUpdatePackageManagers {
         # Remoting kann ein nicht vorhandenes 8.3-Profil oder Arbeitsverzeichnis
         # übernehmen. Nur einen tatsächlich vorhandenen SID-Profilpfad verwenden.
         Set-Location -LiteralPath $env:WINDIR -ErrorAction Stop
+        $profilePath = ''
         $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         $profileKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $sid
         $profileData = Get-ItemProperty -LiteralPath $profileKey -ErrorAction SilentlyContinue
@@ -493,6 +494,20 @@ function Invoke-WindowsUpdatePackageManagers {
                     if ($oldProfile -and $value -and ($value.Equals($oldProfile, [StringComparison]::OrdinalIgnoreCase) -or $value.StartsWith($oldProfile.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase))) {
                         [Environment]::SetEnvironmentVariable($envName, $profilePath + $value.Substring($oldProfile.Length))
                     }
+                }
+            }
+        }
+        if ($profilePath -and [IO.Directory]::Exists($profilePath)) {
+            $localData = [IO.Path]::Combine($profilePath, 'AppData', 'Local')
+            $roamingData = [IO.Path]::Combine($profilePath, 'AppData', 'Roaming')
+            if (-not [IO.Directory]::Exists($env:LOCALAPPDATA) -and [IO.Directory]::Exists($localData)) { $env:LOCALAPPDATA = $localData }
+            if (-not [IO.Directory]::Exists($env:APPDATA) -and [IO.Directory]::Exists($roamingData)) { $env:APPDATA = $roamingData }
+            foreach ($name in @('TEMP','TMP')) {
+                $path = [Environment]::GetEnvironmentVariable($name)
+                if (-not [IO.Directory]::Exists($path) -and [IO.Directory]::Exists($localData)) {
+                    $validTemp = [IO.Path]::Combine($localData, 'Temp')
+                    [void][IO.Directory]::CreateDirectory($validTemp)
+                    [Environment]::SetEnvironmentVariable($name, $validTemp)
                 }
             }
         }
@@ -2244,7 +2259,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             try {
                 $osInformation = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
                 $isWindowsServer2019 = ([int]$osInformation.ProductType -gt 1) -and ([int]$osInformation.BuildNumber -eq 17763)
-                $portableFallbackSupported = ([int]$osInformation.BuildNumber -ge 20348)
+                $portableFallbackSupported = ([int]$osInformation.BuildNumber -ge 17763)
                 if ([int]$osInformation.ProductType -gt 1 -and [int]$osInformation.BuildNumber -lt 17763) {
                     $wingetInstallScriptSupported = $false
                     $wingetServerUnsupported = $true
@@ -2265,7 +2280,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 if (-not $portableFallbackSupported) {
                     $result += [PSCustomObject]@{
                         Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
-                        Packages=@(); AvailableOutput=''; ActionOutput='Der portable WinGet-Fallback ist nur für Windows Server 2022 oder neuer freigegeben.'
+                        Packages=@(); AvailableOutput=''; ActionOutput='Der portable WinGet-Fallback benötigt mindestens Windows-Build 17763; anschließend entscheidet der Starttest der CLI.'
                         DiagnosticOutput='Das Zielbetriebssystem erfüllt die Mindestversion des portablen WinGet-Fallbacks nicht.'
                     }
                     return @($result)
@@ -2485,7 +2500,17 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 catch {
                     $wingetPreparationSucceeded = $false
                     $wingetBootstrapMessage += ' WinGet-Quellenpaket konnte für den aktuellen Benutzer nicht registriert werden; Details im Log.'
-                    $wingetDiagnosticOutput += "WinGet-Quellenpaket:`r`n$($_.Exception.ToString())`r`n"
+                    $wingetDiagnosticOutput += "WinGet-Quellenpaket:`r`n$($_.Exception.ToString())`r`n$($_.InvocationInfo.PositionMessage)`r`n$($_.ScriptStackTrace)`r`n"
+                    if ($wingetPortableMode) {
+                        try {
+                            $sourceRecovery = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source','update','--name','winget','--disable-interactivity') -TimeoutSeconds 45
+                            if ($sourceRecovery.ExitCode -ne 0 -or $sourceRecovery.Output -match '(?im)^\s*(Abgebrochen|Cancelled|Canceled)\s*$|Fehler beim Versuch, die Quelle zu aktualisieren|Failed when attempting to update source') { throw "CLI-Quellenupdate nicht bestätigt: $($sourceRecovery.Output)" }
+                            $wingetPreparationSucceeded = $true
+                            $wingetDiagnosticOutput += "Portable CLI hat Quellenupdate nach AppX-Fehler bestätigt:`r`n$($sourceRecovery.Output)`r`n"
+                        } catch {
+                            $wingetDiagnosticOutput += "CLI-Quellenwiederherstellung:`r`n$($_.Exception.ToString())`r`n"
+                        }
+                    }
                 }
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
