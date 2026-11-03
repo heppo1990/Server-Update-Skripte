@@ -770,6 +770,24 @@ if (-not $response.Success) { exit 1 }
                 $extractedExecutable = @(Get-ChildItem -LiteralPath $packageRoot -Filter winget.exe -File -Recurse -ErrorAction Stop | Select-Object -First 1)
                 if ($extractedExecutable.Count -eq 0) { throw 'Das entpackte GitHub-App-Installer-Paket enthält keine winget.exe.' }
 
+                $dependencyAsset = @($release.assets | Where-Object name -eq 'DesktopAppInstaller_Dependencies.zip')
+                if ($dependencyAsset.Count -ne 1 -or [string]$dependencyAsset[0].digest -notmatch '^sha256:([a-fA-F0-9]{64})$') { throw 'Microsoft-Abhängigkeiten oder ihr Release-Digest fehlen.' }
+                $dependencyHash = $Matches[1]
+                $dependencyUri = [uri]$dependencyAsset[0].browser_download_url
+                if ($dependencyUri.Scheme -ne 'https' -or $dependencyUri.Host -ne 'github.com' -or $dependencyUri.AbsolutePath -notlike '/microsoft/winget-cli/releases/download/*') { throw 'Ungültige Abhängigkeitsquelle.' }
+                $dependencyZip = Join-Path $workingRoot 'Dependencies.zip'
+                Invoke-WebRequest -Uri $dependencyUri.AbsoluteUri -OutFile $dependencyZip -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                if ((Get-FileHash -LiteralPath $dependencyZip -Algorithm SHA256).Hash -ine $dependencyHash) { throw 'Abhängigkeitsprüfsumme stimmt nicht.' }
+                $dependencyRoot = Join-Path $workingRoot 'Dependencies'
+                Expand-Archive -LiteralPath $dependencyZip -DestinationPath $dependencyRoot -ErrorAction Stop
+                foreach ($dependencyPackage in @(Get-ChildItem -LiteralPath $dependencyRoot -Recurse -File | Where-Object { $_.Extension -in '.appx','.msix' -and $_.FullName -match '[\\/]x64[\\/]' })) {
+                    $dllRoot = Join-Path $workingRoot ([guid]::NewGuid().ToString('N'))
+                    [IO.Compression.ZipFile]::ExtractToDirectory($dependencyPackage.FullName, $dllRoot)
+                    foreach ($dll in @(Get-ChildItem -LiteralPath $dllRoot -Recurse -Filter '*.dll' -File)) {
+                        $destination = Join-Path (Split-Path -Parent $extractedExecutable[0].FullName) $dll.Name
+                        if (-not (Test-Path -LiteralPath $destination)) { Copy-Item -LiteralPath $dll.FullName -Destination $destination -ErrorAction Stop }
+                    }
+                }
                 $packageVersion = $releaseTag
                 $manifestPath = Join-Path $packageRoot 'AppxManifest.xml'
                 if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
