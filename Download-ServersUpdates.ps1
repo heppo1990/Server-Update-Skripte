@@ -205,7 +205,9 @@ if ($ServerADList -ne $null) {
         $versionParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $svcCredential -OpenTimeoutSeconds 10 -OperationTimeoutSeconds 60
         $deploymentRequirement = Test-WindowsUpdateDeploymentRequirement -InvokeParameters $versionParameters
         if ($deploymentRequirement.RequiresDeployment) {
-          throw "Erneute WindowsUpdateAdm-Verteilung auf $Servername erforderlich: $($deploymentRequirement.Reason)"
+          $deploymentNotice = "Erneute WindowsUpdateAdm-Verteilung auf $Servername erforderlich: $($deploymentRequirement.Reason) Der Lauf wird mit dem vorhandenen Stand trotzdem versucht."
+          Write-ScriptLog "WARNUNG: $deploymentNotice"
+          $RepBody += "<div class='warning-box'><strong>$([System.Net.WebUtility]::HtmlEncode($deploymentNotice))</strong></div>"
         }
 
         # Teste ob WindowsUpdateAdm verfügbar ist
