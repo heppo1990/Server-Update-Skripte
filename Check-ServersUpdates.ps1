@@ -137,7 +137,7 @@ if ($script:LocalSystemDetectionError) {
 
 function Add-CheckRedistributionNotice {
   param([Parameter(Mandatory)][string]$Target,[Parameter(Mandatory)][string]$Reason)
-  $notice = New-WindowsUpdateCheckRedistributionNotice -Target $Target -Reason $Reason
+  $notice = New-WindowsUpdateCheckRedistributionNotice -Target $Target -Reason $Reason -ScriptRoot $PSScriptRoot -ManagementServer $env:COMPUTERNAME
   $script:CheckActionNotices += $notice
   Write-ScriptLog "HANDLUNGSBEDARF: $Target ($($notice.Area)) – $Reason $($notice.NextStep)" $true
 }

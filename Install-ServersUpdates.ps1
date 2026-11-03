@@ -132,6 +132,8 @@ $script:ManagementPowerShellPreflightFailure = ''
 # Funktionen
 ############################################################################################################################################################################
 
+$script:DeploymentRequiredTargets = @()
+
 function Write-ScriptLog {
   param(
     [Parameter(Mandatory=$false)]
@@ -1375,8 +1377,9 @@ if ($ServerADList -ne $null) {
         $deploymentRequirement = Test-WindowsUpdateDeploymentRequirement -InvokeParameters $versionParameters
         if ($deploymentRequirement.RequiresDeployment) {
           $deploymentNotice = "Erneute WindowsUpdateAdm-Verteilung auf $Servername erforderlich: $($deploymentRequirement.Reason) Der Lauf wird mit dem vorhandenen Stand trotzdem versucht."
-          Write-ScriptLog "WARNUNG: $deploymentNotice"
-          $RepBody += "<div class='warning-box'><strong>$([System.Net.WebUtility]::HtmlEncode($deploymentNotice))</strong></div>"
+          Write-ScriptLog $deploymentNotice $true
+          $script:DeploymentRequiredTargets += $Servername
+
         }
 
         # Package-Manager-Updates
@@ -1967,6 +1970,11 @@ foreach ($manualAction in @($ManualActions)) {
   $summaryLines += "  • $($manualAction.Server) / $($manualAction.Manager) / $packageLabel — $reason"
 }
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-INSTALLATION ZUSAMMENFASSUNG' -Lines $summaryLines -WriteLog { param($message) Write-ScriptLog $message }
+if ($script:DeploymentRequiredTargets.Count -gt 0) {
+  $deploymentSummary = New-WindowsUpdateDeploymentNotice -Targets @($script:DeploymentRequiredTargets | Sort-Object -Unique) -ScriptRoot $PSScriptRoot -ManagementServer $env:COMPUTERNAME
+  Write-ScriptLog $deploymentSummary.Text
+  $RepBody += $deploymentSummary.Html
+}
 # E-Mail versenden
 # SendMail und Subject direkt hier auswerten - sicher in PS5.1 und PS7
 $mailBlock = $MailSettings.Install

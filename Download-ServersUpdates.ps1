@@ -92,6 +92,8 @@ $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${Script
 # Funktionen
 ############################################################################################################################################################################
 
+$script:DeploymentRequiredTargets = @()
+
 function Write-ScriptLog ($Message, [bool]$LogOnly = $false) {
   Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) -LogOnly:$LogOnly
 }
@@ -206,8 +208,9 @@ if ($ServerADList -ne $null) {
         $deploymentRequirement = Test-WindowsUpdateDeploymentRequirement -InvokeParameters $versionParameters
         if ($deploymentRequirement.RequiresDeployment) {
           $deploymentNotice = "Erneute WindowsUpdateAdm-Verteilung auf $Servername erforderlich: $($deploymentRequirement.Reason) Der Lauf wird mit dem vorhandenen Stand trotzdem versucht."
-          Write-ScriptLog "WARNUNG: $deploymentNotice"
-          $RepBody += "<div class='warning-box'><strong>$([System.Net.WebUtility]::HtmlEncode($deploymentNotice))</strong></div>"
+          Write-ScriptLog $deploymentNotice $true
+          $script:DeploymentRequiredTargets += $Servername
+
         }
 
         # Teste ob WindowsUpdateAdm verfügbar ist
@@ -439,6 +442,11 @@ if ($LinuxCheckAttempted -and $LinuxConfiguredHostCount -gt 0) { $processedSyste
 if ($HACheckAttempted) { $processedSystemParts += 'Home Assistant: 1' }
 $processedSystemBreakdown = $processedSystemParts -join ', '
 
+if ($script:DeploymentRequiredTargets.Count -gt 0) {
+  $deploymentSummary = New-WindowsUpdateDeploymentNotice -Targets @($script:DeploymentRequiredTargets | Sort-Object -Unique) -ScriptRoot $PSScriptRoot -ManagementServer $env:COMPUTERNAME
+  Write-ScriptLog $deploymentSummary.Text
+  $RepBody += $deploymentSummary.Html
+}
 $RepBody = Complete-WindowsUpdateDownloadReport -ReportBody $RepBody -DownloadedUpdateCount $UpdCount -UnreachableWindowsCount $WindowsUnreachableHosts -ProcessedSystemCount $ProcessedSystemCount -ProcessedSystemBreakdown $processedSystemBreakdown -DurationMinutes ([string]$ScriptDuration) -IncludeLinux:$LinuxCheckExecuted -LinuxAvailableUpdateCount $LinuxAvailableUpdateCount -IncludeHomeAssistant:$HACheckExecuted -HomeAssistantAvailableUpdateCount $HAAvailableUpdateCount
 $downloadSummaryLines = New-WindowsUpdateDownloadConsoleSummary -PowerShellVersion ([string]$PSVersionTable.PSVersion) -ProcessedSystemCount $ProcessedSystemCount -ProcessedSystemBreakdown $processedSystemBreakdown -DownloadedUpdateCount $UpdCount -UnreachableWindowsCount $WindowsUnreachableHosts -IncludeLinux:$LinuxCheckExecuted -LinuxAvailableUpdateCount $LinuxAvailableUpdateCount -IncludeHomeAssistant:$HACheckExecuted -HomeAssistantAvailableUpdateCount $HAAvailableUpdateCount -DurationMinutes ([string]$ScriptDuration)
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-DOWNLOAD ZUSAMMENFASSUNG' -Lines $downloadSummaryLines -WriteLog { param($message) Write-ScriptLog $message }

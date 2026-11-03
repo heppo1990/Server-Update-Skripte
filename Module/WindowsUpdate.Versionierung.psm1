@@ -3,7 +3,7 @@
 }
 
 function Get-WindowsUpdateScriptsVersion {
-    '5.1.2'
+    '5.1.3'
 }
 
 function Test-WindowsUpdateAdmVersion {
@@ -50,4 +50,14 @@ function Test-WindowsUpdateDeploymentRequirement {
     $current = Test-WindowsUpdateAdmVersion -Actual $actual -Expected $expected
     $reason = if ($current) { '' } else { "WindowsUpdateAdm-Version '$actual' weicht vom erforderlichen Stand '$expected' ab; Verteilung ausführen." }
     [pscustomobject]@{ RequiresDeployment=(-not $current); Skipped=$false; Version=$actual; ExpectedVersion=$expected; Reason=$reason }
+}
+function New-WindowsUpdateDeploymentNotice {
+    param([string[]]$Targets, [Parameter(Mandatory)][string]$ScriptRoot, [Parameter(Mandatory)][string]$ManagementServer)
+    $path = Join-Path $ScriptRoot 'Verteilung_WindowsUpdateAdmConfig.ps1'
+    $command = "& '" + $path.Replace("'", "''") + "'"
+    $text = "Neue WindowsUpdateAdm-Verteilung nötig für: $($Targets -join ', '). Auf $ManagementServer in PowerShell ausführen: $command"
+    [pscustomobject]@{
+        Text = $text
+        Html = "<div class='warning-box'><strong>Neue WindowsUpdateAdm-Verteilung nötig</strong><br>Betroffene Ziele: $([Net.WebUtility]::HtmlEncode(($Targets -join ', ')))<br>Auf $([Net.WebUtility]::HtmlEncode($ManagementServer)) in PowerShell ausführen:<br><code>$([Net.WebUtility]::HtmlEncode($command))</code></div>"
+    }
 }

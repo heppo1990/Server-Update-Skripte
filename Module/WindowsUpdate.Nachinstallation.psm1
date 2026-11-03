@@ -43,6 +43,32 @@ function Get-DeferredWindowsUpdates {
       $updates = @()
       foreach ($kb in @($KBs)) { $updates += @(Get-WindowsUpdate @wuParams -KBArticleID $kb) }
       foreach ($category in @($Categories)) { $updates += @(Get-WindowsUpdate @wuParams -Category $category) }
+      $updates
+    }
+
+    if ($isLocal) {
+      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -WriteLog $deferredLogCallback
+      if (-not $jeaSupported) { throw "WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver $Servername nicht verfügbar; zurückgestellte Updates können nicht sicher lokal geprüft werden." }
+      $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -ConfigurationName 'WindowsUpdateAdm'
+      $params.ScriptBlock = $query
+      $params.ArgumentList = @($SucheOnline, $DeferredCategories, $DeferredKBs)
+      $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "JEA-Prüfung zurückgestellter Updates auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params })
+    } else {
+      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog $deferredLogCallback
+      if (-not $jeaSupported -and $AuthInfo) {
+        Write-DeferredModuleLog -WriteLog $WriteLog -Message "Prüfe zurückgestellte Updates als SYSTEM-Aufgabe auf $Servername..."
+        $updates = @(Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $AuthInfo -Mode Check -SearchOnline $SucheOnline -DeferredCategories $DeferredCategories -DeferredKBs $DeferredKBs -DeferredOnly $true -WriteLog $deferredLogCallback)
+      }
+      else {
+        $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo -ConfigurationName $(if ($jeaSupported) { 'WindowsUpdateAdm' } else { $null })
+        $params.ScriptBlock = $query
+        $params.ArgumentList = @($SucheOnline, $DeferredCategories, $DeferredKBs)
+        $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "Prüfung zurückgestellter Updates auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params })
+      }
+    }
+    # Komplexe Objektnormalisierung läuft nur im vollen lokalen Sprachmodus.
+    $normalizeUpdates = {
+      param($updates)
       # Eigenschaften vor dem Remoting vereinheitlichen: JEA und PS-Remoting
       # liefern je nach PSWindowsUpdate-Version unterschiedlich serialisierte
       # Objekte. Ohne diese Normalisierung gehen KB und Titel im Bericht verloren.
@@ -108,7 +134,7 @@ function Get-DeferredWindowsUpdates {
           $property = $update.PSObject.Properties[$propertyName]
           if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) { [string]$property.Value; break }
         }
-        if ([string]::IsNullOrWhiteSpace([string]$computerValue)) { $computerValue = $env:COMPUTERNAME }
+        if ([string]::IsNullOrWhiteSpace([string]$computerValue)) { $computerValue = $Servername }
         [PSCustomObject]@{ ComputerName = $computerValue; Status = $statusValue; KB = $kbValue; Size = $sizeValue; Title = $titleValue }
       }
       if ($unresolvedUpdateCount -gt 0) {
@@ -122,27 +148,7 @@ function Get-DeferredWindowsUpdates {
         }
       }
     }
-
-    if ($isLocal) {
-      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -WriteLog $deferredLogCallback
-      if (-not $jeaSupported) { throw "WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver $Servername nicht verfügbar; zurückgestellte Updates können nicht sicher lokal geprüft werden." }
-      $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -ConfigurationName 'WindowsUpdateAdm'
-      $params.ScriptBlock = $query
-      $params.ArgumentList = @($SucheOnline, $DeferredCategories, $DeferredKBs)
-      $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "JEA-Prüfung zurückgestellter Updates auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params })
-    } else {
-      $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog $deferredLogCallback
-      if (-not $jeaSupported -and $AuthInfo) {
-        Write-DeferredModuleLog -WriteLog $WriteLog -Message "Prüfe zurückgestellte Updates als SYSTEM-Aufgabe auf $Servername..."
-        $updates = @(Invoke-WindowsUpdateSystemTask -TargetComputer $Servername -AuthInfo $AuthInfo -Mode Check -SearchOnline $SucheOnline -DeferredCategories $DeferredCategories -DeferredKBs $DeferredKBs -DeferredOnly $true -WriteLog $deferredLogCallback)
-      }
-      else {
-        $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo -ConfigurationName $(if ($jeaSupported) { 'WindowsUpdateAdm' } else { $null })
-        $params.ScriptBlock = $query
-        $params.ArgumentList = @($SucheOnline, $DeferredCategories, $DeferredKBs)
-        $updates = @(Invoke-WindowsUpdateWithRetry -OperationName "Prüfung zurückgestellter Updates auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params })
-      }
-    }
+    $updates = @(& $normalizeUpdates $updates)
     # Normale Updateobjekte besitzen MetadataMissing nicht. Unter StrictMode
     # darf die optionale Eigenschaft deshalb nur über PSObject.Properties gelesen werden.
     $unresolved = @($updates | Where-Object {

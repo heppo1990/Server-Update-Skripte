@@ -1,14 +1,16 @@
-function New-WindowsUpdateCheckRedistributionNotice {
+﻿function New-WindowsUpdateCheckRedistributionNotice {
     param(
         [Parameter(Mandatory)][string]$Target,
-        [Parameter(Mandatory)][string]$Reason
+        [Parameter(Mandatory)][string]$Reason,
+        [string]$ScriptRoot = '',
+        [string]$ManagementServer = $env:COMPUTERNAME
     )
 
     [pscustomobject]@{
         Area = 'WindowsUpdateAdm'
         Target = $Target
         Reason = $Reason
-        NextStep = 'WindowsUpdateAdm-Verteilung und WinRM-Verbindung prüfen; bei fehlendem oder veraltetem JEA-Endpunkt Verteilung erneut ausführen.'
+        NextStep = if ($ScriptRoot) { (New-WindowsUpdateDeploymentNotice -Targets @($Target) -ScriptRoot $ScriptRoot -ManagementServer $ManagementServer).Text } else { 'WindowsUpdateAdm-Verteilung und WinRM-Verbindung prüfen; bei fehlendem oder veraltetem JEA-Endpunkt Verteilung erneut ausführen.' }
     }
 }
 
