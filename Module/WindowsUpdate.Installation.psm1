@@ -1,4 +1,4 @@
-function Get-NextScheduledTime {
+﻿function Get-NextScheduledTime {
   param([Parameter(Mandatory)][string]$Time)
   if ([string]::IsNullOrWhiteSpace($Time)) { return $null }
   $parsed = [datetime]::MinValue
@@ -67,12 +67,10 @@ function Test-ServerIsVirtual {
         ($cs.Manufacturer + ' ' + $cs.Model + ' ' + $bios.Manufacturer) -match 'VMware|VirtualBox|Virtual Machine|KVM|QEMU|Xen|Bochs'
     }
     $isLocal = $Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ComputerFQDN -or $Servername -ieq "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
-    $jeaSupported = Test-WindowsUpdateJeaSupported -TargetComputer $Servername -AuthInfo $AuthInfo -IsNonAdTarget ([bool]$AuthInfo) -WriteLog $writeLogForRemoting
-    if ($isLocal -and -not $jeaSupported) {
-        throw "WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver $Servername nicht verfügbar; der Virtualisierungsstatus wird nicht direkt lokal abgefragt."
-    }
-    $configurationName = if ($jeaSupported) { 'WindowsUpdateAdm' } else { $null }
-    $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo -ConfigurationName $configurationName
+    # Inventardaten gehören zur vorhandenen administrativen Verwaltungsverbindung,
+    # nicht zur eingeschränkten WindowsUpdateAdm-Rolle.
+    if ($isLocal) { return [bool](& $sb) }
+    $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
     $params.ScriptBlock = $sb
     return [bool](Invoke-Command @params)
 }

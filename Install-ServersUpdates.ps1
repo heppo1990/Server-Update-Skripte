@@ -1451,6 +1451,68 @@ if ($ServerADList -ne $null) {
         # Windows-Updates installieren (ohne zurückgestellte Kategorien)
         $UpdResult = Invoke-WindowsUpdates -Servername $Servername -SucheOnline $SucheOnline -AuthInfo $svcCredential -DeferredCategories $deferredCategories -DeferredKBs $deferredKBs -DeferredOnly $false
 
+        Write-ScriptLog "Ergebnis der Installation:"
+
+        if ($UpdResult -and -not ($UpdResult -is [Array])) {
+            $UpdResult = @($UpdResult)
+        }
+
+        if ($UpdResult -and @($UpdResult).Count -gt 0) {
+          $ServerUpdateCount = @($UpdResult).Count
+
+          Write-ScriptLog "Server ${Servername}: $ServerUpdateCount Update(s) gefunden" -IsDebug
+
+          try {
+            ($UpdResult | Select-Object ComputerName, Status, KB, Size, Title -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String) `
+              -split "\r?\n" | ForEach-Object { if ($_ -and $_.Trim()) { Write-ScriptLog $_ } }
+          } catch {
+            Write-ScriptLog "Fehler beim Formatieren der Update-Liste: $($_.Exception.Message)" -IsDebug
+          }
+
+          $validUpdates = $UpdResult | Where-Object {
+            $_ -and
+            $_.GetType().Name -ne 'String' -and
+            ($_.KB -or $_.Title -or $_.PSObject.Properties.Name -contains 'KB')
+          }
+
+          if ($validUpdates -and @($validUpdates).Count -gt 0) {
+            $UpdResultFull += @($validUpdates)
+
+            $RepBody += "<table>`n"
+            $RepBody += "<tr><th>ComputerName</th><th>Status</th><th>KB</th><th>Size</th><th>Title</th></tr>`n"
+
+            foreach ($upd in $validUpdates) {
+              $RepBody += "<tr>"
+              $RepBody += "<td>$($upd.ComputerName)</td>"
+              $RepBody += "<td>$($upd.Status)</td>"
+              $RepBody += "<td>$($upd.KB)</td>"
+              $RepBody += "<td>$($upd.Size)</td>"
+              $RepBody += "<td>$($upd.Title)</td>"
+              $RepBody += "</tr>`n"
+
+              $WindowsUpdateDetails += [PSCustomObject]@{
+                Server = $Servername
+                KB = $upd.KB
+                Title = $upd.Title
+                Status = $upd.Status
+              }
+            }
+
+            $RepBody += "</table>"
+
+            $UpdCount += @($validUpdates).Count
+            Write-ScriptLog "Installierte Updates auf ${Servername}: $(@($validUpdates).Count) (Gesamt: $UpdCount)"
+          } else {
+            Write-ScriptLog "Keine gültigen Update-Objekte gefunden" -IsDebug
+            Write-ScriptLog "Keine Windows-Updates installiert auf ${Servername}."
+            $RepBody += "<div class='no-updates'>Keine Updates installiert.</div>"
+          }
+        } else {
+          Write-ScriptLog "Keine Windows-Updates installiert auf ${Servername}."
+          $RepBody += "<div class='no-updates'>Keine Updates installiert.</div>"
+        }
+
+
         # Ohne installierte Hauptupdates gibt es keinen durch diesen Lauf
         # verursachten Neustartbedarf. Insbesondere auf Server 2016 vermeiden
         # wir damit eine unnötige privilegierte Statusabfrage.
@@ -1558,66 +1620,6 @@ if ($ServerADList -ne $null) {
           Remove-DeferredUpdateTask -Servername $Servername -AuthInfo $svcCredential -WriteLog { param($message, $logOnly) if ($logOnly) { Write-ScriptLog $message -LogOnly } else { Write-ScriptLog $message } }
         }
 
-        Write-ScriptLog "Ergebnis der Installation:"
-        
-        if ($UpdResult -and -not ($UpdResult -is [Array])) {
-            $UpdResult = @($UpdResult)
-        }
-        
-        if ($UpdResult -and @($UpdResult).Count -gt 0) {
-          $ServerUpdateCount = @($UpdResult).Count
-          
-          Write-ScriptLog "Server ${Servername}: $ServerUpdateCount Update(s) gefunden" -IsDebug
-          
-          try {
-            ($UpdResult | Select-Object ComputerName, Status, KB, Size, Title -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String) `
-              -split "\r?\n" | ForEach-Object { if ($_ -and $_.Trim()) { Write-ScriptLog $_ } }
-          } catch {
-            Write-ScriptLog "Fehler beim Formatieren der Update-Liste: $($_.Exception.Message)" -IsDebug
-          }
-
-          $validUpdates = $UpdResult | Where-Object { 
-            $_ -and 
-            $_.GetType().Name -ne 'String' -and 
-            ($_.KB -or $_.Title -or $_.PSObject.Properties.Name -contains 'KB')
-          }
-          
-          if ($validUpdates -and @($validUpdates).Count -gt 0) {
-            $UpdResultFull += @($validUpdates)
-            
-            $RepBody += "<table>`n"
-            $RepBody += "<tr><th>ComputerName</th><th>Status</th><th>KB</th><th>Size</th><th>Title</th></tr>`n"
-            
-            foreach ($upd in $validUpdates) {
-              $RepBody += "<tr>"
-              $RepBody += "<td>$($upd.ComputerName)</td>"
-              $RepBody += "<td>$($upd.Status)</td>"
-              $RepBody += "<td>$($upd.KB)</td>"
-              $RepBody += "<td>$($upd.Size)</td>"
-              $RepBody += "<td>$($upd.Title)</td>"
-              $RepBody += "</tr>`n"
-              
-              $WindowsUpdateDetails += [PSCustomObject]@{
-                Server = $Servername
-                KB = $upd.KB
-                Title = $upd.Title
-                Status = $upd.Status
-              }
-            }
-            
-            $RepBody += "</table>"
-
-            $UpdCount += @($validUpdates).Count
-            Write-ScriptLog "Installierte Updates auf ${Servername}: $(@($validUpdates).Count) (Gesamt: $UpdCount)"
-          } else {
-            Write-ScriptLog "Keine gültigen Update-Objekte gefunden" -IsDebug
-            Write-ScriptLog "Keine Windows-Updates installiert auf ${Servername}."
-            $RepBody += "<div class='no-updates'>Keine Updates installiert.</div>"
-          }
-        } else {
-          Write-ScriptLog "Keine Windows-Updates installiert auf ${Servername}."
-          $RepBody += "<div class='no-updates'>Keine Updates installiert.</div>"
-        }
       }
       Catch {
         Write-ScriptLog ("Es ist ein Fehler bei Server " + $Servername + " aufgetreten!")
