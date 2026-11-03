@@ -183,7 +183,7 @@ function Invoke-PackageManagerUpdates {
     if ($enableWinget) {
       $null = Update-WinGetClientModule -ComputerName $Servername -AuthInfo $AuthInfo -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
     }
-    $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -ExcludeWinGetIds $ExcludeWinGetIds -ExcludeChocolateyIds $ExcludeChocolateyIds -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:([bool]$logOnly) })
+    $results = @(Invoke-WindowsUpdatePackageManagers -ComputerName $Servername -AuthInfo $AuthInfo -Mode Install -EnableWinget $enableWinget -EnableChocolatey $enableChocolatey -ExcludeWinGetIds $ExcludeWinGetIds -ExcludeChocolateyIds $ExcludeChocolateyIds -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly })
     if ($wingetSkipReason) {
       foreach ($wingetResult in @($results | Where-Object { $_.Manager -eq 'Winget' -and $_.Skipped })) {
         $wingetResult.SkipReason = $wingetSkipReason
@@ -209,10 +209,8 @@ function Invoke-PackageManagerUpdates {
         $managerHadFailure[[string]$result.Manager] = $true
         $manualActionProperty = $result.PSObject.Properties['RequiresManualAction']
         $requiresManualAction = $manualActionProperty -and [bool]$manualActionProperty.Value
-        if ($requiresManualAction) {
-          $failedPackageCount = @($result.Packages).Count
-          $manualPackageCount += [Math]::Max(1, $failedPackageCount)
-        }
+        $failedPackageCount = @($result.Packages).Count
+        $manualPackageCount += [Math]::Max(1, $failedPackageCount)
         $manualTextProperty = $result.PSObject.Properties['ManualActionText']
         $errorSummaryProperty = $result.PSObject.Properties['ErrorSummary']
         $errorSummary = if ($manualTextProperty -and -not [string]::IsNullOrWhiteSpace([string]$manualTextProperty.Value)) {
@@ -232,7 +230,7 @@ function Invoke-PackageManagerUpdates {
             Text = $errorSummary
           })
         } else {
-          Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $errorSummary"
+          Write-ScriptLog "Fehler bei $($result.Manager) auf ${Servername}: $errorSummary" -LogOnly
         }
         $diagnosticProperty = $result.PSObject.Properties['DiagnosticOutput']
         $debugActionOutput = if ($diagnosticProperty) { [string]$diagnosticProperty.Value } else { [string]$result.ActionOutput }
@@ -317,7 +315,7 @@ function Invoke-PackageManagerUpdates {
     if ($successfulPackagesByManager.Count -eq 0 -and $manualPackageCount -eq 0) { Write-ScriptLog '' }
     if ($manualPackageCount -gt 0) {
       $manualPackageLabel = if ($manualPackageCount -eq 1) { 'Paket' } else { 'Pakete' }
-      Write-ScriptLog "Manuelle Aktion erforderlich: $manualPackageCount $manualPackageLabel auf ${Servername}."
+      Write-ScriptLog "Paketupdates auf ${Servername}: $manualPackageCount $manualPackageLabel offen; Übersicht am Laufende."
       foreach ($manualAction in $manualPackageActions) {
         $manualRows = @($manualAction.Packages)
         $manualPackageName = ''
@@ -338,7 +336,7 @@ function Invoke-PackageManagerUpdates {
           }
         }
         if ([string]::IsNullOrWhiteSpace($manualPackageName)) { $manualPackageName = [string]$manualAction.Manager }
-        Write-ScriptLog "  $manualPackageName`: $($manualAction.Text)"
+        Write-ScriptLog "  $manualPackageName`: $($manualAction.Text)" -LogOnly
       }
       Write-ScriptLog ''
     }
@@ -718,7 +716,7 @@ elseif ($shouldPreflightManagementPowerShell -and ($wingetEnabledForManagement -
   Write-ScriptLog "Prüfe vorab auf ein PowerShell-7-Update für den Verwaltungsserver $env:COMPUTERNAME..."
   $managementPowerShellHandoffStarted = $false
   try {
-    $managementPreflightResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $env:COMPUTERNAME -Mode Check -EnableWinget $wingetEnabledForManagement -EnableChocolatey $chocolateyEnabledForManagement -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:([bool]$logOnly) })
+    $managementPreflightResults = @(Invoke-WindowsUpdatePackageManagers -ComputerName $env:COMPUTERNAME -Mode Check -EnableWinget $wingetEnabledForManagement -EnableChocolatey $chocolateyEnabledForManagement -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly })
     $managementPowerShellCandidates = @()
     $managementPreflightFailures = @()
     foreach ($managerName in @('Winget', 'Chocolatey')) {
@@ -1938,11 +1936,13 @@ if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesInsta
 if ($HASkippedHosts -gt 0) { $summaryLines += "  • Home Assistant übersprungen: $HASkippedHosts (SSH nicht erreichbar; nicht auf Updates geprüft)" }
 if ($WindowsUnreachableHosts -gt 0) { $summaryLines += "  • Windows übersprungen: $WindowsUnreachableHosts (WinRM-Ports 5985/5986 nicht erreichbar; nicht auf Updates geprüft)" }
 $summaryLines += @('', "Fehler: $TotalUpdatesFailed", "  • Windows: $ErrorCount")
-if (@($ManualActions).Count -gt 0) { $summaryLines += "Manuelle Prüfung/Aktion erforderlich: $(@($ManualActions).Count)" }
+
 if ($LinuxScriptExecuted) { $summaryLines += "  • Linux: $LinuxUpdatesFailed" }
 if ($LinuxRebootScheduleFailures -gt 0) { $summaryLines += "  • Linux-Neustartplanung offen: $LinuxRebootScheduleFailures" }
 if ($HAScriptExecuted) { $summaryLines += "  • Home Assistant: $HAUpdatesFailed" }
 $summaryLines += @('', "Dauer: $ScriptDuration Minuten")
+if (@($ManualActions).Count -gt 0) { $summaryLines += "Anwendungsupdates mit Prüfbedarf: $(@($ManualActions).Count) (zusätzlich zu den obigen Fehlern)" }
+$manualConsoleRows = @()
 foreach ($manualAction in @($ManualActions)) {
   $manualPackages = @($manualAction.Packages | ForEach-Object {
     if ($null -eq $_) { continue }
@@ -1967,7 +1967,13 @@ foreach ($manualAction in @($ManualActions)) {
     $_ -match '(?i)(hash|fehlgeschlagen|abgebrochen|abbruch|verwendet|zugriff verweigert|nicht unterstützt|nicht gefunden|error|failed|canceled|cancelled)'
   } | Select-Object -Unique | Select-Object -First 2)
   $reason = if ($reasonLines.Count -gt 0) { $reasonLines -join ' ' } else { 'Update bitte manuell prüfen; Details stehen in der Warnung bzw. im Laufprotokoll.' }
-  $summaryLines += "  • $($manualAction.Server) / $($manualAction.Manager) / $packageLabel — $reason"
+  Write-ScriptLog "Offenes Paket: $($manualAction.Server) / $($manualAction.Manager) / $packageLabel — $reason" -LogOnly
+  $manualConsoleRows += [pscustomobject]@{ Server = $manualAction.Server; Manager = $manualAction.Manager; Packages = $packageLabel }
+}
+foreach ($group in @($manualConsoleRows | Group-Object Server, Manager)) {
+  $first = $group.Group[0]
+  $names = @($group.Group | ForEach-Object { $_.Packages } | Select-Object -Unique) -join ', '
+  $summaryLines += "  • $($first.Server) / $($first.Manager): $names"
 }
 Write-WindowsUpdateConsoleSummary -Title 'UPDATE-INSTALLATION ZUSAMMENFASSUNG' -Lines $summaryLines -WriteLog { param($message) Write-ScriptLog $message }
 if ($script:DeploymentRequiredTargets.Count -gt 0) {
