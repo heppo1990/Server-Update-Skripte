@@ -529,8 +529,13 @@ try {
 
             $clientCertificateNegotiationEnabled = $negotiationMatch.Groups[1].Value -match '^(?i:Enabled|Aktiviert)$'
             if (-not $clientCertificateNegotiationEnabled) {
+                if ($sslBindingExistedBeforeSetup -and -not $PreserveExistingCertificateMapping) {
+                    throw 'Die vorhandene HTTP.sys-SSL-Bindung hat Clientzertifikataushandlung deaktiviert. Ohne zuvor bestätigte Clientzertifikatsverbindung bleibt die bestehende Baseline unverändert.'
+                }
                 if ($sslBindingExistedBeforeSetup) {
-                    throw 'Die vorhandene HTTP.sys-SSL-Bindung hat Clientzertifikataushandlung deaktiviert. Die bestehende Baseline wird nicht geändert; WinRM-Clientzertifikatauthentifizierung kann ohne separate Freigabe nicht eingerichtet werden.'
+                    # Die Verteilung setzt diesen Schalter nur nach erfolgreicher
+                    # Anmeldung per vorhandenem Clientzertifikat.
+                    Write-SetupLog 'Bestehende Clientzertifikatsverbindung wurde vor dem Setup bestätigt; Clientzertifikataushandlung der WinRM-Bindung wird gezielt aktiviert.' 'INFO'
                 }
                 $certificateHash = $certificateHashMatch.Groups[1].Value
                 $applicationId = $applicationIdMatch.Groups[1].Value
