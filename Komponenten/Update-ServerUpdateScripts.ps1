@@ -18,6 +18,59 @@ function Get-ServerUpdateGitBlobSha1 {
     finally { $sha1.Dispose() }
 }
 
+# Rückfall ohne GitHub-API: dieselbe feste Commit-ID wie für Raw-Downloads.
+function Get-ServerUpdateArchiveManifest {
+    param([Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
+          [Parameter(Mandatory)][string]$ArchivePath)
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    $blobs = @{}
+    $totalBytes = 0L
+    $prefix = 'Server-Update-Skripte-' + $Commit + '/'
+    try {
+        foreach ($entry in $archive.Entries) {
+            if ($entry.FullName.EndsWith('/')) { continue }
+            if (-not $entry.FullName.StartsWith($prefix, [StringComparison]::Ordinal)) { throw 'Archiv enthält einen unerwarteten Repository-/Commitpfad.' }
+            $relative = $entry.FullName.Substring($prefix.Length)
+            if (-not $relative -or $relative -match '(^|/)\.\.(/|$)|[:\\]' -or [IO.Path]::IsPathRooted($relative)) { throw 'Archiv enthält einen ungültigen Dateipfad.' }
+            if ($blobs.ContainsKey($relative)) { throw 'Archiv enthält einen doppelten Dateipfad.' }
+            $totalBytes += $entry.Length
+            if ($entry.Length -gt 67108864 -or $totalBytes -gt 268435456) { throw 'Repositoryarchiv überschreitet die zulässige Größe.' }
+            $sha = [Security.Cryptography.SHA1]::Create()
+            $stream = $entry.Open()
+            try {
+                $header = [Text.Encoding]::UTF8.GetBytes(('blob ' + $entry.Length + [char]0))
+                [void]$sha.TransformBlock($header, 0, $header.Length, $header, 0)
+                $buffer = New-Object byte[] 65536
+                $readTotal = 0L
+                while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $readTotal += $read
+                    if ($readTotal -gt $entry.Length) { throw 'Archivdatei ist größer als angekündigt.' }
+                    [void]$sha.TransformBlock($buffer, 0, $read, $buffer, 0)
+                }
+                if ($readTotal -ne $entry.Length) { throw 'Archivdatei ist unvollständig.' }
+                [void]$sha.TransformFinalBlock((New-Object byte[] 0),0,0)
+                $blobs[$relative] = [BitConverter]::ToString($sha.Hash).Replace('-','').ToLowerInvariant()
+            } finally { $stream.Dispose(); $sha.Dispose() }
+        }
+    } finally { $archive.Dispose() }
+    if ($blobs.Count -eq 0) { throw 'Das Repositoryarchiv enthält keine Dateien.' }
+    return $blobs
+}
+
+function Get-ServerUpdateRepositoryBlobsWithoutApi {
+    param([Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit)
+    $archivePath = Join-Path ([IO.Path]::GetTempPath()) ('ServerUpdateManifest-' + [guid]::NewGuid().ToString('N') + '.zip')
+    try {
+        $url = 'https://codeload.github.com/heppo1990/Server-Update-Skripte/zip/' + $Commit
+        $null = Invoke-ServerUpdateGitHubRequest -Description 'Commitarchiv' -Request {
+            Invoke-WebRequest -Uri $url -OutFile $archivePath -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
+        }
+        return Get-ServerUpdateArchiveManifest -Commit $Commit -ArchivePath $archivePath
+    } finally { Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue }
+}
+
 function Get-ServerUpdateConfiguration {
     param(
         [Parameter(Mandatory)][string]$ScriptRoot,
@@ -662,6 +715,7 @@ function Invoke-ServerUpdateScripts {
         if ($manifestCommit -ne $latestCommit -or $repositoryBlobs.Count -eq 0) {
             $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'Server-Update-Skripte-Updater' }
             $treeUrl = "https://api.github.com/repos/$repoOwner/$repoName/git/trees/$latestCommit`?recursive=1"
+            try {
             $treeResponse = Invoke-ServerUpdateGitHubRequest -Description 'Dateiliste' -Request {
                 Invoke-RestMethod -Uri $treeUrl -Headers $headers -TimeoutSec 20 -ErrorAction Stop
             }
@@ -671,6 +725,11 @@ function Invoke-ServerUpdateScripts {
                 $repositoryBlobs[[string]$item.path] = [string]$item.sha
             }
             if ($repositoryBlobs.Count -eq 0) { throw 'Die Dateiliste des Repositorys ist leer.' }
+            } catch {
+                Write-ServerUpdateUpdaterDiagnostic -Operation 'GitHub-Dateiliste: Commitarchiv verwenden' -ErrorRecord $_
+                Write-Host 'GitHub-API nicht verfügbar; Dateiliste wird aus dem festen Commitarchiv ermittelt.' -ForegroundColor DarkGray
+                $repositoryBlobs = Get-ServerUpdateRepositoryBlobsWithoutApi -Commit $latestCommit
+            }
             $manifestCommit = $latestCommit
         }
 
