@@ -12,6 +12,7 @@ $script:WindowsUpdateModuleRoot = $PSScriptRoot
 
 $componentModules = @(
     'WindowsUpdate.Console.psm1',
+    'WindowsUpdate.DownloadCache.psm1',
     'WindowsUpdate.NuGet.psm1',
     'WindowsUpdate.ModulPakete.psm1',
     'WindowsUpdate.PSWindowsUpdate.psm1',

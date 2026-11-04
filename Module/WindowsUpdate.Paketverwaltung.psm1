@@ -475,7 +475,132 @@ function Invoke-WindowsUpdatePackageManagers {
     # Er gibt ausschließlich strukturierte Daten zurück; Darstellung und Bericht
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
+
         param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true, [bool]$PreferPortableWinGet = $false, [bool]$UseJeaForMachineWingetUpdates = $false, [bool]$UseJeaForChocolateyUpdates = $false)
+
+# BEGIN GENERATED DOWNLOAD CACHE
+function Invoke-WindowsUpdateCachedDownload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][uri]$Uri,
+        [string]$CacheRoot = (Join-Path $env:ProgramData 'WindowsUpdateAdm\DownloadCache'),
+        [string]$DestinationPath,
+        [long]$ExpectedBytes = 0,
+        [string]$ExpectedSha256 = '',
+        [ValidateRange(1,3600)][int]$IdleTimeoutSeconds = 120,
+        [ValidateRange(1,86400)][int]$MaximumSeconds = 3600,
+        [long]$MaximumBytes = 1073741824,
+        [switch]$AllowHttpForTest,
+        [scriptblock]$WriteLog
+    )
+    $ErrorActionPreference = 'Stop'
+    if ($Uri.Scheme -ne 'https' -and -not ($AllowHttpForTest -and $Uri.IsLoopback -and $Uri.Scheme -eq 'http')) { throw 'Download erfordert HTTPS.' }
+    if ($ExpectedBytes -lt 0 -or $MaximumBytes -lt 1 -or $ExpectedBytes -gt $MaximumBytes) { throw 'Ungültige erwartete Downloadgröße.' }
+    if ($ExpectedSha256 -and $ExpectedSha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Ungültige SHA256-Prüfsumme.' }
+    $emit = {
+        param($message)
+        $line = '[{0:yyyy-MM-dd HH:mm:ss}] {1}' -f (Get-Date),$message
+        $progressPath = Join-Path $folder 'progress.log'
+        if ((Test-Path -LiteralPath $progressPath) -and (Get-Item -LiteralPath $progressPath).Length -gt 1048576) { Move-Item -LiteralPath $progressPath -Destination ($progressPath + '.1') -Force }
+        Add-Content -LiteralPath $progressPath -Value $line -Encoding UTF8
+        if ($WriteLog) { & $WriteLog $line | Out-Null } else { Write-Verbose $line }
+    }
+    New-Item -ItemType Directory -Path $CacheRoot -Force | Out-Null
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Uri.AbsoluteUri))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+    $folder = Join-Path $CacheRoot $key
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $file = Join-Path $folder 'payload.bin'
+    $metadata = Join-Path $folder 'payload.json'
+    $partial = Join-Path $folder 'payload.part'
+    $lock = $null; $client = $null; $response = $null; $inputStream = $null; $outputStream = $null
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        # FileShare.None verhindert parallele Downloads desselben Artefakts.
+        while (-not $lock) {
+            try { $lock = [IO.File]::Open((Join-Path $folder 'download.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+            catch [IO.IOException] {
+                if ($timer.Elapsed.TotalSeconds -ge $IdleTimeoutSeconds) { throw 'Downloadcache ist durch einen anderen Lauf belegt.' }
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        if ((Test-Path -LiteralPath $file) -and (Test-Path -LiteralPath $metadata)) {
+            try {
+                $saved = [IO.File]::ReadAllText($metadata) | ConvertFrom-Json
+                $length = (Get-Item -LiteralPath $file).Length
+                $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+                if ($length -gt 0 -and $length -eq [long]$saved.Bytes -and $length -le $MaximumBytes -and
+                    ($ExpectedBytes -eq 0 -or $length -eq $ExpectedBytes) -and $hash -eq [string]$saved.Sha256 -and
+                    (-not $ExpectedSha256 -or $hash -eq $ExpectedSha256)) {
+                    & $emit "Downloadcache gültig: $length Bytes; kein Download."
+                    if ($DestinationPath) { Copy-Item -LiteralPath $file -Destination $DestinationPath -Force }
+                    return [pscustomobject]@{Path=$file;Bytes=$length;Sha256=$hash;Cached=$true;Seconds=$timer.Elapsed.TotalSeconds}
+                }
+            } catch { & $emit 'Cacheprüfung fehlgeschlagen; Datei wird erneut beschafft.' }
+        }
+        Add-Type -AssemblyName System.Net.Http
+        $handler = [Net.Http.HttpClientHandler]::new()
+        $handler.AutomaticDecompression = [Net.DecompressionMethods]::None
+        $client = [Net.Http.HttpClient]::new($handler)
+        $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+        $client.DefaultRequestHeaders.UserAgent.ParseAdd('Server-Update-Skripte')
+        & $emit 'Download beginnt; HTTP-Kopfzeilen werden angefordert.'
+        $request = $client.GetAsync($Uri,[Net.Http.HttpCompletionOption]::ResponseHeadersRead)
+        while (-not $request.Wait(250)) {
+            if ($timer.Elapsed.TotalSeconds -ge [Math]::Min($IdleTimeoutSeconds,$MaximumSeconds)) { $client.CancelPendingRequests(); throw 'Zeitlimit beim Verbindungsaufbau.' }
+        }
+        $response = $request.GetAwaiter().GetResult()
+        [void]$response.EnsureSuccessStatusCode()
+        $finalUri = $response.RequestMessage.RequestUri
+        if ($finalUri.Scheme -ne 'https' -and -not ($AllowHttpForTest -and $finalUri.IsLoopback -and $finalUri.Scheme -eq 'http')) { throw 'Downloadweiterleitung auf unverschlüsselte Verbindung abgelehnt.' }
+        $httpBytes = if ($null -ne $response.Content.Headers.ContentLength) { [long]$response.Content.Headers.ContentLength } else { 0 }
+        if ($httpBytes -gt $MaximumBytes -or ($ExpectedBytes -gt 0 -and $httpBytes -gt 0 -and $httpBytes -ne $ExpectedBytes)) { throw 'HTTP-Dateigröße stimmt nicht mit der erlaubten Größe überein.' }
+        $total = if ($ExpectedBytes -gt 0) { $ExpectedBytes } else { $httpBytes }
+        & $emit "HTTP-Antwort empfangen; erwartete Größe: $total Bytes (0 = unbekannt)."
+        $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $outputStream = [IO.File]::Open($partial,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        $buffer = New-Object byte[] 131072
+        $received = [long]0; $lastData = $timer.Elapsed.TotalSeconds; $lastLog = $lastData; $lastBytes = [long]0
+        while ($true) {
+            $read = $inputStream.ReadAsync($buffer,0,$buffer.Length)
+            while (-not $read.Wait(250)) {
+                if ($timer.Elapsed.TotalSeconds - $lastData -ge $IdleTimeoutSeconds) { throw "Downloadstillstand: $IdleTimeoutSeconds Sekunden ohne neue Daten; empfangen: $received Bytes." }
+                if ($timer.Elapsed.TotalSeconds -ge $MaximumSeconds) { throw "Absolutes Downloadzeitlimit erreicht; empfangen: $received Bytes." }
+            }
+            $count = $read.GetAwaiter().GetResult()
+            if ($count -eq 0) { break }
+            $received += $count
+            if ($received -gt $MaximumBytes -or ($total -gt 0 -and $received -gt $total)) { throw "Download überschreitet erlaubte Größe: $received Bytes." }
+            $outputStream.Write($buffer,0,$count)
+            $lastData = $timer.Elapsed.TotalSeconds
+            if ($lastData -ge $MaximumSeconds) { throw "Absolutes Downloadzeitlimit erreicht; empfangen: $received Bytes." }
+            if ($lastData - $lastLog -ge 10) {
+                $speed = [Math]::Round(($received - $lastBytes) / ($lastData - $lastLog) / 1048576,2)
+                & $emit "Download: $received / $total Bytes; $speed MiB/s; Laufzeit $([int]$lastData)s."
+                $lastLog=$lastData; $lastBytes=$received
+            }
+        }
+        $outputStream.Dispose(); $outputStream=$null
+        if ($received -eq 0 -or ($total -gt 0 -and $received -ne $total)) { throw "Download unvollständig: $received / $total Bytes." }
+        & $emit "Download beendet: $received Bytes; SHA256-Prüfung beginnt."
+        $hash = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash
+        if ($ExpectedSha256 -and $hash -ne $ExpectedSha256) { throw 'Download-Prüfsumme stimmt nicht.' }
+        if (Test-Path -LiteralPath $file) { [IO.File]::Replace($partial,$file,[Management.Automation.Language.NullString]::Value) }
+        else { [IO.File]::Move($partial,$file) }
+        @{Bytes=$received;Sha256=$hash;CompletedUtc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $metadata -Encoding UTF8
+        & $emit "Downloadcache übernommen; Dauer $([int]$timer.Elapsed.TotalSeconds)s."
+        if ($DestinationPath) { Copy-Item -LiteralPath $file -Destination $DestinationPath -Force }
+        return [pscustomobject]@{Path=$file;Bytes=$received;Sha256=$hash;Cached=$false;Seconds=$timer.Elapsed.TotalSeconds}
+    } finally {
+        if ($outputStream) { $outputStream.Dispose() }
+        if ($inputStream) { $inputStream.Dispose() }
+        if ($response) { $response.Dispose() }
+        if ($client) { $client.Dispose() }
+        if ($lock) { $lock.Dispose() }
+        $timer.Stop()
+    }
+}
+# END GENERATED DOWNLOAD CACHE
 
         # Remoting kann ein nicht vorhandenes 8.3-Profil oder Arbeitsverzeichnis
         # übernehmen. Nur einen tatsächlich vorhandenen SID-Profilpfad verwenden.
@@ -815,8 +940,9 @@ if (-not $response.Success) { exit 1 }
             $packagePath = Join-Path $workingRoot 'AppInstaller_x64.msix'
             try {
                 New-Item -Path $workingRoot -ItemType Directory -Force -ErrorAction Stop | Out-Null
-                Invoke-WebRequest -Uri ([string]$asset[0].browser_download_url) -OutFile $bundlePath `
-                    -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                $downloadSize = if ($asset[0].PSObject.Properties['size']) { [long]$asset[0].size } else { 0 }
+                $downloadHash = ([string]$asset[0].digest -replace '^sha256:','')
+                Invoke-WindowsUpdateCachedDownload -Uri ([uri]$asset[0].browser_download_url) -DestinationPath $bundlePath -ExpectedBytes $downloadSize -ExpectedSha256 $downloadHash -MaximumSeconds 1200 -WriteLog { param($line) [Console]::Out.WriteLine($line) } | Out-Null
                 if ((Get-Item -LiteralPath $bundlePath -ErrorAction Stop).Length -le 0) { throw 'Das GitHub-MSIX-Bundle ist leer.' }
 
                 Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
@@ -852,7 +978,8 @@ if (-not $response.Success) { exit 1 }
                 $dependencyUri = [uri]$dependencyAsset[0].browser_download_url
                 if ($dependencyUri.Scheme -ne 'https' -or $dependencyUri.Host -ne 'github.com' -or $dependencyUri.AbsolutePath -notlike '/microsoft/winget-cli/releases/download/*') { throw 'Ungültige Abhängigkeitsquelle.' }
                 $dependencyZip = Join-Path $workingRoot 'Dependencies.zip'
-                Invoke-WebRequest -Uri $dependencyUri.AbsoluteUri -OutFile $dependencyZip -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                $dependencySize = if ($dependencyAsset[0].PSObject.Properties['size']) { [long]$dependencyAsset[0].size } else { 0 }
+                Invoke-WindowsUpdateCachedDownload -Uri $dependencyUri -DestinationPath $dependencyZip -ExpectedBytes $dependencySize -ExpectedSha256 $dependencyHash -MaximumSeconds 1200 -WriteLog { param($line) [Console]::Out.WriteLine($line) } | Out-Null
                 if ($dependencyHash -and (Get-FileHash -LiteralPath $dependencyZip -Algorithm SHA256).Hash -ine $dependencyHash) { throw 'Abhängigkeitsprüfsumme stimmt nicht.' }
                 $dependencyRoot = Join-Path $workingRoot 'Dependencies'
                 Expand-Archive -LiteralPath $dependencyZip -DestinationPath $dependencyRoot -ErrorAction Stop
@@ -3374,15 +3501,15 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             if ($isMonthlyResetOnly -and $hasCheckTimeout) {
                 # Monatliche Wartung erhält ein eigenes Budget, damit die
                 # Reparatur nicht das eigentliche Quellenreset verdrängt.
-                $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(8)
-                Write-CommonLog $WriteLog "Monatliche WinGet-Wartung auf $ComputerName fällig; erweitertes Zeitbudget: 8 Minuten einschließlich Abschlussabfrage."
+                $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(48)
+                Write-CommonLog $WriteLog "Monatliche WinGet-Wartung auf $ComputerName fällig; erweitertes Zeitbudget: 48 Minuten einschließlich Abschlussabfrage; Downloads mit Stillstandsüberwachung."
             }
             # Jeder fehlgeschlagene WinGet-Aufruf läuft durch denselben
             # Reparaturpfad, unabhängig davon, ob CLI, Modul, RPC, Quelle oder
             # ein einzelnes Paket den Fehler gemeldet hat. Der monatliche
             # Wartungsreset wird unten ebenfalls auf diesen Pfad geleitet.
             $genericWinGetFailure = -not [bool]$firstWingetResult.Success -and -not $isMonthlyResetOnly
-            if ($genericWinGetFailure -and $hasCheckTimeout) { $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(8) }
+            if ($genericWinGetFailure -and $hasCheckTimeout) { $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(48) }
             if ($genericWinGetFailure -and $preferRememberedPortable) {
                 Remove-Item -LiteralPath $portablePreferencePath -Force -ErrorAction SilentlyContinue
                 Write-CommonLog $WriteLog "Portabler WinGet-Betrieb auf $ComputerName fehlgeschlagen; Merkung entfernt, vollständige Reparatur folgt."
@@ -3394,7 +3521,8 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $retryReason = 'WinGet-Installation/Reparatur über winget-install.ps1'
                 try {
                     Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; starte die signaturgeprüfte winget-install.ps1-Clientreparatur ausschließlich über JEA und Windows PowerShell 5.1."
-                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 420)
+                    if ($hasCheckTimeout) { $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(48) }
+                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 2820)
                     if ([string]$installResult.Output -match '__WINGET_PORTABLE__|portable Microsoft-CLI erfolgreich') {
                         $retryPreferPortableWinGet = $true
                         $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
@@ -3500,7 +3628,8 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 if ($retryRuntimeRepairRequired -and -not $wingetInstallScriptRan -and -not $retryPreferPortableWinGet) {
                     Write-CommonLog $WriteLog "Zentraler WinGet-Reparaturablauf auf ${ComputerName}: signaturgeprüfte winget-install.ps1-Clientreparatur über JEA und Windows PowerShell 5.1; Paket-Installationen und -Deinstallationen sind nicht freigegeben."
                     try {
-                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 420)
+                    if ($hasCheckTimeout) { $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(48) }
+                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 2820)
                     if ([string]$installResult.Output -match '__WINGET_PORTABLE__|portable Microsoft-CLI erfolgreich') {
                         $retryPreferPortableWinGet = $true
                         $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'

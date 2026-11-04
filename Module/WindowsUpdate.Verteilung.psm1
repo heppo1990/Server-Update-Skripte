@@ -572,6 +572,45 @@ function Invoke-WindowsUpdateWinRMDeployment {
         } -ArgumentList $remoteTemp -ErrorAction Stop
 
         Write-DeployLog "[$Servername] Übertrage Setup."
+        if ($EnableWingetUpdates) {
+            Write-DeployLog "[$Servername] Prüfe zentralen WinGet-Downloadcache auf dem Verwaltungsserver."
+            $cachedArtifacts = @(Get-WindowsUpdateWinGetCachedArtifacts -WriteLog { param($line) Write-DeployLog $line })
+            foreach ($artifact in $cachedArtifacts) {
+                $key = Split-Path -Leaf $artifact.Folder
+                $alreadyPresent = Invoke-Command -Session $session -ArgumentList $key,$artifact.Bytes,$artifact.Sha256 -ErrorAction Stop -ScriptBlock {
+                    param($key,$bytes,$hash)
+                    if ($key -notmatch '^[a-f0-9]{64}$') { throw 'Ungültiger Cachebezeichner.' }
+                    $path = Join-Path (Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm\DownloadCache') $key) 'payload.bin'
+                    $manifest = Join-Path (Split-Path -Parent $path) 'payload.json'
+                    if (-not (Test-Path -LiteralPath $path) -or -not (Test-Path -LiteralPath $manifest)) { return $false }
+                    try {
+                        $saved = [IO.File]::ReadAllText($manifest) | ConvertFrom-Json
+                        return ((Get-Item -LiteralPath $path).Length -eq $bytes -and $saved.Bytes -eq $bytes -and $saved.Sha256 -eq $hash -and (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $hash)
+                    } catch { return $false }
+                }
+                if ($alreadyPresent) { Write-DeployLog "[$Servername] Cachedatei $($artifact.Name) bereits vollständig vorhanden."; continue }
+                $stage = Invoke-Command -Session $session -ArgumentList $remoteTemp,$key -ErrorAction Stop -ScriptBlock {
+                    param($root,$key)
+                    $folder = Join-Path $root $key
+                    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+                    $folder
+                }
+                foreach ($name in @('payload.bin','payload.json')) {
+                    Copy-Item -LiteralPath (Join-Path $artifact.Folder $name) -Destination (Join-Path $stage $name) -ToSession $session -Force -ErrorAction Stop
+                }
+                Invoke-Command -Session $session -ArgumentList $stage,$key,$artifact.Bytes,$artifact.Sha256 -ErrorAction Stop -ScriptBlock {
+                    param($stage,$key,$bytes,$hash)
+                    if ($key -notmatch '^[a-f0-9]{64}$') { throw 'Ungültiger Cachebezeichner.' }
+                    $source = Join-Path $stage 'payload.bin'
+                    if ((Get-Item -LiteralPath $source).Length -ne $bytes -or (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $hash) { throw 'Übertragene WinGet-Cachedatei ist unvollständig oder beschädigt.' }
+                    $destination = Join-Path (Join-Path $env:ProgramData 'WindowsUpdateAdm\DownloadCache') $key
+                    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+                    Move-Item -LiteralPath $source -Destination (Join-Path $destination 'payload.bin') -Force
+                    Copy-Item -LiteralPath (Join-Path $stage 'payload.json') -Destination (Join-Path $destination 'payload.json') -Force
+                } | Out-Null
+                Write-DeployLog "[$Servername] Cachedatei $($artifact.Name) übertragen und SHA256 geprüft."
+            }
+        }
         Copy-Item -Path (Join-Path (Join-Path $RootDirectory 'Komponenten') $PSSCfgSkriptFile) `
                   -Destination (Join-Path $remoteTemp $PSSCfgSkriptFile) `
                   -ToSession $session -Force -ErrorAction Stop
