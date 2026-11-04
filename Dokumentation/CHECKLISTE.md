@@ -1,10 +1,10 @@
-﻿# Offene Arbeiten und Prüfungen
+# Offene Arbeiten und Prüfungen
 
 Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennamen, Kundennummern oder konkrete Servernamen aufnehmen. Ein erfolgreicher Kundenlauf reicht je Prüfung. Erledigtes wird gelöscht. Checklistenänderungen nur zusammen mit Skriptänderungen committen/pushen.
 
 ## Aktuell
 
-- [ ] **1. WinGet-Abschlussabfrage:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. PS5-Test-Unterprozess bestätigt Quellenwahl und Leermeldungen; echten Zielcheck nach Resetfehler noch bestätigen.
+- [ ] **1. WinGet-Abschlussabfrage und Quellenreset:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. Bei verweigertem Start der installierten CLI wird der vollständige Reset mit der signaturgeprüften portablen CLI wiederholt. PS5-Unterprozess und echter Zielcheck nach Resetfehler noch bestätigen.
 - [ ] **2. Native AppX-Reparatur:** Provisionierung und Registrierung im echten Benutzerprofil bestätigen; ohne angemeldeten Benutzer als ausstehend melden. Portable WinGet-Nutzung ist bereits bestätigt.
 - [ ] **3. Wartungsworker und Offlinefallback:** Automatische Workeraktualisierung ohne Verteilung sowie Rückgriff auf geprüften Cache bei GitHub-/Downloadfehlern bestätigen. Keine beschädigten Dateien ausführen.
 - [ ] **4. Konsolenbereinigung:** Bei verwertbaren WinGet-Treffern Teilfehler nur im Log/Bericht ausweisen, nicht als zusätzliche Konsolen-Fehlermeldung. Ausgabe auf einem echten Lauf bestätigen; echte Fehler ohne Treffer weiter anzeigen.
@@ -35,3 +35,4 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 Baseline nur ergänzen, bestehende Einstellungen nicht verschärfen oder entfernen. Fachmodule importieren einander nicht; Common bindet sie ein. Updater bleibt eigenständig. Neue Funktionen passend modularisieren. Skriptversion und erforderliche Bereitstellungsversion getrennt pflegen; Neuverteilung nur bei technisch nötiger Zieländerung.
 
 - [ ] **20. Updater bei API-Sperre:** GitHub-Dateiliste bei API-Fehler aus dem Archiv derselben festen Commit-ID ermitteln; Git-Blob-Prüfsummen weiter prüfen. Simulierter HTTP403 und echter Codeload-Download mit Git-Objektvergleich unter PS5 bestätigt. Automatische Aktualisierung auf betroffenem Ziel nach einmaligem Nachladen des Updaters bestätigen.
+

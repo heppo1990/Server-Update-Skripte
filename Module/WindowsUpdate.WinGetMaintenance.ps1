@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory)][ValidateSet('SourceList','SourceUpdate','SourceReset','ClientRepair')][string]$Action,
     [ValidateSet('','Appx','Asheroto','Microsoft','Portable')][string]$RepairStage = ''
 )
@@ -170,6 +170,31 @@ function Invoke-WinGet {
                 if (Test-Path -LiteralPath $workingRoot) { Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue }
             }
         }
+
+function Test-WinGetStartAccessDenied {
+    param([Parameter(Mandatory)][System.Exception]$Exception)
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [System.ComponentModel.Win32Exception] -and $current.NativeErrorCode -eq 5) { return $true }
+        if ($current.HResult -eq -2147024891) { return $true }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Invoke-WinGetSourceResetSequence {
+    param([Parameter(Mandatory)][string]$Path)
+    $list = Invoke-WinGet -Path $Path -Arguments @('source','list','--disable-interactivity')
+    if ($list.ExitCode -ne 0) { throw "WinGet-Quellenliste fehlgeschlagen: $($list.Output)" }
+    $names = @($list.Output -split "`r?`n" | ForEach-Object { if ($_ -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name } })
+    $custom = @($names | Where-Object { $_ -notin @('winget','msstore','winget-font') } | Select-Object -Unique)
+    if ($custom.Count -gt 0) { throw "Quellenreset zum Schutz kundeneigener Quelle(n) ausgelassen: $($custom -join ', ')" }
+    $reset = Invoke-WinGet -Path $Path -Arguments @('source','reset','--force')
+    if ($reset.ExitCode -ne 0) { throw "WinGet-Quellenreset fehlgeschlagen: $($reset.Output)" }
+    $refresh = Invoke-WinGet -Path $Path -Arguments @('source','update','--name','winget','--disable-interactivity')
+    if ($refresh.ExitCode -ne 0) { throw "WinGet-Quellenaktualisierung nach Reset fehlgeschlagen: $($refresh.Output)" }
+    return [pscustomobject]@{ Path=$Path; Output=($reset.Output + [Environment]::NewLine + $refresh.Output).Trim() }
+}
 
 # Fester Wartungsbaustein; keine vom JEA-Aufrufer gelieferten Pfade oder Befehle.
 function Repair-WindowsUpdateWinGetAppx {
@@ -371,19 +396,24 @@ $args = switch ($Action) {
     'SourceList' { @('source','list','--disable-interactivity') }
     'SourceUpdate' { @('source','update','--disable-interactivity') }
     'SourceReset' {
-        $list = Invoke-WinGet -Path $winget -Arguments @('source','list','--disable-interactivity')
-        if ($list.ExitCode -ne 0) { throw "WinGet-Quellenliste fehlgeschlagen: $($list.Output)" }
-        $names = @($list.Output -split "`r?`n" | ForEach-Object { if ($_ -match '^\s*(?<Name>[^\s]+)\s+\S+\s+(?:true|false)\s*$') { $Matches.Name } })
-        $custom = @($names | Where-Object { $_ -notin @('winget','msstore','winget-font') } | Select-Object -Unique)
-        if ($custom.Count -gt 0) { throw "Quellenreset zum Schutz kundeneigener Quelle(n) ausgelassen: $($custom -join ', ')" }
-        $reset = Invoke-WinGet -Path $winget -Arguments @('source','reset','--force')
-        if ($reset.ExitCode -ne 0) { throw "WinGet-Quellenreset fehlgeschlagen: $($reset.Output)" }
-        $refresh = Invoke-WinGet -Path $winget -Arguments @('source','update','--name','winget','--disable-interactivity')
-        if ($refresh.ExitCode -ne 0) { throw "WinGet-Quellenaktualisierung nach Reset fehlgeschlagen: $($refresh.Output)" }
-        [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output=($reset.Output + [Environment]::NewLine + $refresh.Output).Trim() }
+        try {
+            $resetResult = Invoke-WinGetSourceResetSequence -Path $winget
+        } catch {
+            if (-not (Test-WinGetStartAccessDenied -Exception $_.Exception)) { throw }
+            $deniedPath = $winget
+            $portable = Get-WinGetPortableClientFromGitHub
+            if ([string]::Equals([IO.Path]::GetFullPath($portable.Path), [IO.Path]::GetFullPath($deniedPath), [StringComparison]::OrdinalIgnoreCase)) {
+                throw "WinGet-Start wurde verweigert und der geprüfte portable Fallback entspricht demselben Pfad '$deniedPath'."
+            }
+            $winget = $portable.Path
+            $resetResult = Invoke-WinGetSourceResetSequence -Path $winget
+            $resetResult.Output = "WinGet-Start verweigert; Quellenreset mit signaturgeprüfter portabler CLI Version $($portable.Version) wiederholt.`r`n$($resetResult.Output)"
+        }
+        [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output=$resetResult.Output }
         exit 0
     }
 }
 $result = Invoke-WinGet -Path $winget -Arguments $args
 [pscustomobject]@{ Action=$Action; Success=($result.ExitCode -eq 0); ExitCode=$result.ExitCode; Output=$result.Output }
 exit $result.ExitCode
+

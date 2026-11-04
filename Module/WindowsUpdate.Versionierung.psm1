@@ -1,9 +1,9 @@
-﻿function Get-WindowsUpdateAdmDeploymentVersion {
+function Get-WindowsUpdateAdmDeploymentVersion {
     '5.0.0'
 }
 
 function Get-WindowsUpdateScriptsVersion {
-    '5.1.15'
+    '5.1.16'
 }
 
 function Test-WindowsUpdateAdmVersion {
@@ -61,3 +61,4 @@ function New-WindowsUpdateDeploymentNotice {
         Html = "<div class='warning-box'><strong>Neue WindowsUpdateAdm-Verteilung nötig</strong><br>Betroffene Ziele: $([Net.WebUtility]::HtmlEncode(($Targets -join ', ')))<br>Auf $([Net.WebUtility]::HtmlEncode($ManagementServer)) in PowerShell ausführen:<br><code>$([Net.WebUtility]::HtmlEncode($command))</code></div>"
     }
 }
+
