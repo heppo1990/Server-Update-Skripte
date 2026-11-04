@@ -879,6 +879,11 @@ if ($ServerADList -ne $null) {
           $packageResults = @()
         }
         $packageOutputWritten = $false
+        $wingetHasAnyPackageResults = @(
+          $packageResults | Where-Object {
+            $_.Manager -eq 'Winget' -and @($_.Packages).Count -gt 0
+          }
+        ).Count -gt 0
         foreach ($packageResult in $packageResults) {
           if ($packageResult.Skipped) {
             if ($packageOutputWritten) { Write-ScriptLog '' }
@@ -902,7 +907,13 @@ if ($ServerADList -ne $null) {
           if (-not $packageResult.Success) {
             $hasPackageResults = $packageResult.Manager -eq 'Winget' -and $packages.Count -gt 0
             if ($hasPackageResults) {
-              Write-ScriptLog "WARNUNG: WinGet auf ${Servername} meldet eine Quellenwarnung; gefundene Updates werden trotzdem übernommen. Details: $($packageResult.ActionOutput)"
+              Write-ScriptLog "WARNUNG: WinGet auf ${Servername} meldet eine Quellenwarnung; gefundene Updates werden trotzdem übernommen. Details: $($packageResult.ActionOutput)" $true
+            } elseif ($packageResult.Manager -eq 'Winget' -and $wingetHasAnyPackageResults) {
+              # Ein Quellen-/Folgefehler darf verwertbare Treffer desselben
+              # Checks nicht mit einer zweiten, irreführenden Konsolenmeldung
+              # als fehlgeschlagen darstellen. Die Diagnose bleibt im Log und
+              # im HTML-Bericht; die Treffer werden danach normal ausgegeben.
+              Write-ScriptLog "WARNUNG: WinGet-Prüfung auf ${Servername} hatte einen Teilfehler; verwertbare Paketupdates werden angezeigt. Details: $($packageResult.ActionOutput)" $true
             } elseif ($packageResult.Manager -eq 'Winget') {
               Write-ScriptLog "WARNUNG: WinGet-Prüfung auf ${Servername} fehlgeschlagen; Details im Log."
             } else {

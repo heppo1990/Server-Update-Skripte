@@ -7,7 +7,7 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 - [ ] **1. WinGet-Abschlussabfrage:** Falsch leere Skriptabfrage durch direkte lokale CLI mit 13 Treffern widerlegt. Gemeinsamer Check-/Install-Abfragehelfer verwendet jetzt upgrade pro benannter App-Quelle statt list --upgrade-available über Standardquellen. Unbestätigte Leerausgabe trotz Exitcode0 ist Fehler; Prosa wird nicht als Paket gezählt. Echter Test-Unterprozess unter PS5 bestätigt 13 Treffer, Quellenwahl und Leermeldungen; betroffenen Zielcheck noch bestätigen.
 - [ ] **2. Native AppX-Reparatur:** Provisionierung und Registrierung im echten Benutzerprofil bestätigen; ohne angemeldeten Benutzer als ausstehend melden. Portable WinGet-Nutzung ist bereits bestätigt.
 - [ ] **3. Wartungsworker und Offlinefallback:** Automatische Workeraktualisierung ohne Verteilung sowie Rückgriff auf geprüften Cache bei GitHub-/Downloadfehlern bestätigen. Keine beschädigten Dateien ausführen.
-- [ ] **4. Konsolenbereinigung:** Neue Ausgabe praktisch bestätigen: ein Hinweis pro Ziel, offene Paketnamen einmal am Ende, Verteilungsaufruf sichtbar. Tatsächliche Fehler bleiben im Log und Bericht.
+- [ ] **4. Konsolenbereinigung:** Bei verwertbaren WinGet-Treffern Teilfehler nur im Log/Bericht ausweisen, nicht als zusätzliche Konsolen-Fehlermeldung. Ausgabe auf einem echten Lauf bestätigen; echte Fehler ohne Treffer weiter anzeigen.
 
 ## Verbleibende Funktions- und Sicherheitsprüfungen
 
