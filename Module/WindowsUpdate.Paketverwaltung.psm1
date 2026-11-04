@@ -3336,6 +3336,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         $retryRuntimeRepairRequired = $false
         $retryPreferPortableWinGet = $false
         $wingetInstallScriptRan = $false
+        $clientAcquisitionFailed = $false
         $retryReason = ''
         $firstDiagnostic = ''
         $retryDiagnostic = ''
@@ -3381,6 +3382,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             # ein einzelnes Paket den Fehler gemeldet hat. Der monatliche
             # Wartungsreset wird unten ebenfalls auf diesen Pfad geleitet.
             $genericWinGetFailure = -not [bool]$firstWingetResult.Success -and -not $isMonthlyResetOnly
+            if ($genericWinGetFailure -and $hasCheckTimeout) { $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(8) }
             if ($genericWinGetFailure -and $preferRememberedPortable) {
                 Remove-Item -LiteralPath $portablePreferencePath -Force -ErrorAction SilentlyContinue
                 Write-CommonLog $WriteLog "Portabler WinGet-Betrieb auf $ComputerName fehlgeschlagen; Merkung entfernt, vollständige Reparatur folgt."
@@ -3392,7 +3394,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $retryReason = 'WinGet-Installation/Reparatur über winget-install.ps1'
                 try {
                     Write-CommonLog $WriteLog "WinGet fehlt oder ist defekt auf $ComputerName; starte die signaturgeprüfte winget-install.ps1-Clientreparatur ausschließlich über JEA und Windows PowerShell 5.1."
-                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 180)
+                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 420)
                     if ([string]$installResult.Output -match '__WINGET_PORTABLE__|portable Microsoft-CLI erfolgreich') {
                         $retryPreferPortableWinGet = $true
                         $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
@@ -3406,6 +3408,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     }
                 }
                 catch {
+                    $clientAcquisitionFailed = $true
                     $failureDiagnostic = $_.Exception.ToString()
                     $firstDiagnostic += [Environment]::NewLine + 'WinGet-Installationsskript:' + [Environment]::NewLine + $failureDiagnostic
                     $portableFallbackProperty = $firstWingetResult.PSObject.Properties['PortableFallbackSupported']
@@ -3493,10 +3496,11 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $sourceResetPerformed = $false
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
+                if ($clientAcquisitionFailed) { throw 'CLI-Beschaffung fehlgeschlagen; kein erneuter Download oder Quellenreset im selben Lauf. Details im Reparaturprotokoll.' }
                 if ($retryRuntimeRepairRequired -and -not $wingetInstallScriptRan -and -not $retryPreferPortableWinGet) {
                     Write-CommonLog $WriteLog "Zentraler WinGet-Reparaturablauf auf ${ComputerName}: signaturgeprüfte winget-install.ps1-Clientreparatur über JEA und Windows PowerShell 5.1; Paket-Installationen und -Deinstallationen sind nicht freigegeben."
                     try {
-                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 180)
+                    $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 420)
                     if ([string]$installResult.Output -match '__WINGET_PORTABLE__|portable Microsoft-CLI erfolgreich') {
                         $retryPreferPortableWinGet = $true
                         $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
@@ -3507,11 +3511,13 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
                     }
                     } catch {
+                        $clientAcquisitionFailed = $true
                         $wingetInstallScriptRan = $true
                         $firstDiagnostic += [Environment]::NewLine + 'Clientreparatur: ' + $_.Exception.ToString()
                         Write-CommonLog $WriteLog "WinGet-Reparatur auf ${ComputerName} nicht vollständig; reservierte Abschlussabfrage wird trotzdem versucht." $true
                     }
                 }
+                if ($clientAcquisitionFailed) { throw 'CLI-Beschaffung fehlgeschlagen; Quellenreset und erneute Beschaffung im selben Lauf unterbleiben.' }
                 if (-not $retryPreferPortableWinGet -and ($retrySourcePackageRepair -or $retryReason -match '(?i)(WinGet nach Reparatur oder App-Installer-Registrierung|winget-install\.ps1)')) {
                     # Nach einer AppX-Registrierung meldet Add-AppxPackage den
                     # Vorgang synchron als abgeschlossen, während App Installer

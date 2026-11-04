@@ -5,9 +5,17 @@
 $ErrorActionPreference = 'Stop'
 $script:WinGetMaintenanceWorkerPath = $PSCommandPath
 function Get-WinGetPath {
+
     $portableRoot = Join-Path $PSScriptRoot 'WinGetPortable'
-    $portable = @(Get-ChildItem -LiteralPath $portableRoot -Filter winget.exe -File -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
-    if ($portable.Count -gt 0) { return $portable[0].FullName }
+    $portable = @(Get-ChildItem -LiteralPath $portableRoot -Filter winget.exe -File -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    foreach ($candidate in $portable) {
+        try {
+            $signature = Get-AuthenticodeSignature -FilePath $candidate.FullName -ErrorAction Stop
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') { continue }
+            $probe = Invoke-WinGet -Path $candidate.FullName -Arguments @('--version') -TimeoutSeconds 10
+            if ($probe.ExitCode -eq 0 -and $probe.Output -match '\d+\.\d+') { return $candidate.FullName }
+        } catch { }
+    }
     $packages = @()
     try {
         $packages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
@@ -23,10 +31,14 @@ function Get-WinGetPath {
     }
     if ($packages.Count -gt 0) {
         $path = Join-Path ([string]$packages[0].InstallLocation) 'winget.exe'
-        if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            try {
+                $probe = Invoke-WinGet -Path $path -Arguments @('--version') -TimeoutSeconds 10
+                if ($probe.ExitCode -eq 0 -and $probe.Output -match '\d+\.\d+') { return $path }
+            } catch { }
+        }
     }
-    $portableClient = Get-WinGetPortableClientFromGitHub
-    return [string]$portableClient.Path
+    return $null
 }
 function Invoke-WinGet {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string[]]$Arguments, [ValidateRange(1,300)][int]$TimeoutSeconds=300)
@@ -103,7 +115,7 @@ function Invoke-WinGet {
                 try {
                     $cachedSignature = Get-AuthenticodeSignature -FilePath $cachedExecutable[0].FullName -ErrorAction Stop
                     if ($cachedSignature.Status -ne 'Valid' -or $cachedSignature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') { throw 'Portable CLI im Cache hat keine gültige Microsoft-Signatur.' }
-                    $cachedProbe = Invoke-WinGet -Path $cachedExecutable[0].FullName -Arguments @('--version')
+                    $cachedProbe = Invoke-WinGet -Path $cachedExecutable[0].FullName -Arguments @('--version') -TimeoutSeconds 10
                     if ([int]$cachedProbe.ExitCode -eq 0 -and [string]$cachedProbe.Output -match '(?m)^\s*v?\d+\.\d+') {
                         return [pscustomobject]@{ Path = $cachedExecutable[0].FullName; Version = $releaseTag; ReleaseTag = $releaseTag; Cached = $true }
                     }
@@ -371,7 +383,7 @@ if ($Action -eq 'ClientRepair') {
         $code = $installerResult.ExitCode
         if ($code -ne 0) { throw "winget-install.ps1 -Force endete mit Exitcode $code. $out" }
         $clientPath = Get-WinGetPath
-        $clientProbe = Invoke-WinGet -Path $clientPath -Arguments @('--version')
+        $clientProbe = Invoke-WinGet -Path $clientPath -Arguments @('--version') -TimeoutSeconds 10
         $version = $clientProbe.Output
         if ($clientProbe.ExitCode -ne 0 -or $version -notmatch '(?m)^\s*v?\d+\.\d+') { throw "WinGet-Starttest fehlgeschlagen: Pfad=$clientPath; Exitcode=$($clientProbe.ExitCode); Ausgabe=$version; Installerausgabe=$out" }
 
@@ -382,13 +394,13 @@ if ($Action -eq 'ClientRepair') {
                     $repairParameters = @{ Latest=$true; Force=$true; ErrorAction='Stop' }
                     if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') { $repairParameters.AllUsers=$true }
                     Repair-WinGetPackageManager @repairParameters | Out-String | Write-Output
-                    $probe = Invoke-WinGet -Path (Get-WinGetPath) -Arguments @('--version')
+                    $probe = Invoke-WinGet -Path (Get-WinGetPath) -Arguments @('--version') -TimeoutSeconds 10
                     if ($probe.ExitCode -ne 0 -or $probe.Output -notmatch '(?m)^\s*v?\d+\.\d+') { throw 'WinGet-Starttest nach Microsoft-Reparatur fehlgeschlagen.' }
                     [Console]::Out.WriteLine("Microsoft-Reparatur erfolgreich: $($probe.Output)")
                 }
                 'Portable' {
                     $portableClient = Get-WinGetPortableClientFromGitHub
-                    $probe = Invoke-WinGet -Path $portableClient.Path -Arguments @('--version')
+                    $probe = Invoke-WinGet -Path $portableClient.Path -Arguments @('--version') -TimeoutSeconds 10
                     if ($probe.ExitCode -ne 0 -or $probe.Output -notmatch '(?m)^\s*v?\d+\.\d+') { throw 'Portabler WinGet-Starttest fehlgeschlagen.' }
                     [Console]::Out.WriteLine("__WINGET_PORTABLE__ portable Microsoft-CLI erfolgreich: $($probe.Output)")
                 }
@@ -397,16 +409,22 @@ if ($Action -eq 'ClientRepair') {
         } catch { [Console]::Out.WriteLine($_.Exception.ToString()); exit 1 }
         finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     }
+    $existing = Get-WinGetPath
+    if ($existing) {
+        [Console]::Out.WriteLine("Vorhandene CLI erfolgreich geprüft: $existing")
+        if ($existing -like '*WinGetPortable*') { [Console]::Out.WriteLine('__WINGET_PORTABLE__') }
+        exit 0
+    }
     $usable = $false
     foreach ($stage in @(
         @{Name='Appx';Seconds=20}, @{Name='Asheroto';Seconds=35},
-        @{Name='Microsoft';Seconds=20}, @{Name='Portable';Seconds=60}
+        @{Name='Microsoft';Seconds=20}, @{Name='Portable';Seconds=300}
     )) {
         try {
             $result = Invoke-WinGetRepairStage -Stage $stage.Name -TimeoutSeconds $stage.Seconds
             [Console]::Out.WriteLine("Reparaturstufe $($stage.Name): Erfolg=$($result.Success); Zeitlimit=$($stage.Seconds)s")
             [Console]::Out.WriteLine($result.Output)
-            if ($result.Success -and $stage.Name -ne 'Appx') { $usable = $true }
+            if ($result.Success -and ($stage.Name -ne 'Appx' -or (Get-WinGetPath))) { $usable = $true; break }
         } catch { [Console]::Out.WriteLine("Reparaturstufe $($stage.Name) fehlgeschlagen: $($_.Exception.Message)") }
     }
     if ($usable) { exit 0 }
@@ -414,6 +432,7 @@ if ($Action -eq 'ClientRepair') {
     exit 1
 }
 $winget = Get-WinGetPath
+if (-not $winget) { throw 'Keine startfähige CLI vorhanden. ClientRepair muss die Beschaffung zuerst erfolgreich abschließen; diese Aktion startet keinen erneuten Download.' }
 $args = switch ($Action) {
     'SourceList' { @('source','list','--disable-interactivity') }
     'SourceUpdate' { @('source','update','--disable-interactivity') }
@@ -422,14 +441,7 @@ $args = switch ($Action) {
             $resetResult = Invoke-WinGetSourceResetSequence -Path $winget
         } catch {
             if (-not (Test-WinGetStartAccessDenied -Exception $_.Exception)) { throw }
-            $deniedPath = $winget
-            $portable = Get-WinGetPortableClientFromGitHub
-            if ([string]::Equals([IO.Path]::GetFullPath($portable.Path), [IO.Path]::GetFullPath($deniedPath), [StringComparison]::OrdinalIgnoreCase)) {
-                throw "WinGet-Start wurde verweigert und der geprüfte portable Fallback entspricht demselben Pfad '$deniedPath'."
-            }
-            $winget = $portable.Path
-            $resetResult = Invoke-WinGetSourceResetSequence -Path $winget
-            $resetResult.Output = "WinGet-Start verweigert; Quellenreset mit signaturgeprüfter portabler CLI Version $($portable.Version) wiederholt.`r`n$($resetResult.Output)"
+            throw 'Bestätigte CLI wurde beim Quellenreset verweigert; kein weiterer Download im selben Lauf.'
         }
         [pscustomobject]@{ Action=$Action; Success=$true; ExitCode=0; Output=$resetResult.Output }
         exit 0
