@@ -4,7 +4,7 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 ## Aktuell
 
-- [ ] **1. WinGet-Abschlussabfrage und Quellenreset:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. Bei verweigertem Start der installierten CLI wird der vollständige Reset mit der signaturgeprüften portablen CLI wiederholt. PS5-Unterprozess und echter Zielcheck nach Resetfehler noch bestätigen.
+- [ ] **1. WinGet-Abschlussabfrage und Quellenreset:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. Startverweigerung und nicht verfügbare AppX-Abfrage fallen auf die signaturgeprüfte portable CLI zurück; Resetzeit ist dynamisch bis 120 Sekunden im Check-Zeitbudget. Echter Zielcheck nach Resetfehler noch bestätigen.
 - [ ] **2. Native AppX-Reparatur:** Provisionierung und Registrierung im echten Benutzerprofil bestätigen; ohne angemeldeten Benutzer als ausstehend melden. Portable WinGet-Nutzung ist bereits bestätigt.
 - [ ] **3. Wartungsworker und Offlinefallback:** Automatische Workeraktualisierung ohne Verteilung sowie Rückgriff auf geprüften Cache bei GitHub-/Downloadfehlern bestätigen. Keine beschädigten Dateien ausführen.
 - [ ] **4. Konsolenbereinigung:** Bei verwertbaren WinGet-Treffern Teilfehler nur im Log/Bericht ausweisen, nicht als zusätzliche Konsolen-Fehlermeldung. Ausgabe auf einem echten Lauf bestätigen; echte Fehler ohne Treffer weiter anzeigen.

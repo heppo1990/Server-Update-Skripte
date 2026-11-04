@@ -8,18 +8,25 @@ function Get-WinGetPath {
     $portableRoot = Join-Path $PSScriptRoot 'WinGetPortable'
     $portable = @(Get-ChildItem -LiteralPath $portableRoot -Filter winget.exe -File -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
     if ($portable.Count -gt 0) { return $portable[0].FullName }
-    $packages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
-        Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
-        Sort-Object { [version]$_.Version } -Descending)
-    if ($packages.Count -eq 0) {
-        $packages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+    $packages = @()
+    try {
+        $packages = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
             Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
             Sort-Object { [version]$_.Version } -Descending)
+    } catch { }
+    if ($packages.Count -eq 0) {
+        try {
+            $packages = @(Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+                Where-Object { $_.Status -eq 'Ok' -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation) } |
+                Sort-Object { [version]$_.Version } -Descending)
+        } catch { }
     }
-    if ($packages.Count -eq 0) { throw 'App Installer/WinGet ist für den JEA-Kontext nicht registriert.' }
-    $path = Join-Path ([string]$packages[0].InstallLocation) 'winget.exe'
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'winget.exe fehlt im App-Installer-Paket.' }
-    return $path
+    if ($packages.Count -gt 0) {
+        $path = Join-Path ([string]$packages[0].InstallLocation) 'winget.exe'
+        if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
+    }
+    $portableClient = Get-WinGetPortableClientFromGitHub
+    return [string]$portableClient.Path
 }
 function Invoke-WinGet {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string[]]$Arguments, [ValidateRange(1,300)][int]$TimeoutSeconds=300)
