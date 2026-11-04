@@ -4,7 +4,7 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 ## Aktuell
 
-- [ ] **1. WinGet-Abschlussabfrage:** Reparaturstufen und portabler Start funktionieren im Lauf. Korrigierte Abfrage bestätigen: Server 2019 nicht ausschließen; ungültige AppData-/Temporär-Kurzpfade anhand vorhandenem SID-Profil ersetzen. Bei AppX-Quellenfehler portable CLI-Quellenaktualisierung versuchen; Abbruchtext trotz Exitcode 0 ablehnen. PS5-Regressionstests bestanden, Zielcheck noch offen.
+- [ ] **1. WinGet-Abschlussabfrage:** Vier von sechs Zielabfragen erfolgreich. Verbleibende Quellenpaket-Bereinigung verwendet direkte Dateizugriffe; Fehler darf Erfolg oder ursprüngliche Ursache nicht mehr überdecken. Portable CLI fragt online zuerst mit kurzem Limit ab und verwendet bei API-Fehler nur Microsoft-signierten, startgeprüften Benutzer-/Wartungscache. PS5-Regression zu API403, ungültiger Signatur und maskierter Ursache bestanden; Zielcheck noch bestätigen.
 - [ ] **2. Native AppX-Reparatur:** Provisionierung und Registrierung im echten Benutzerprofil bestätigen; ohne angemeldeten Benutzer als ausstehend melden. Portable WinGet-Nutzung ist bereits bestätigt.
 - [ ] **3. Wartungsworker und Offlinefallback:** Automatische Workeraktualisierung ohne Verteilung sowie Rückgriff auf geprüften Cache bei GitHub-/Downloadfehlern bestätigen. Keine beschädigten Dateien ausführen.
 - [ ] **4. Konsolenbereinigung:** Neue Ausgabe praktisch bestätigen: ein Hinweis pro Ziel, offene Paketnamen einmal am Ende, Verteilungsaufruf sichtbar. Tatsächliche Fehler bleiben im Log und Bericht.

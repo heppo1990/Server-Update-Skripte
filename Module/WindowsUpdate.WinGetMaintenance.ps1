@@ -22,7 +22,7 @@ function Get-WinGetPath {
     return $path
 }
 function Invoke-WinGet {
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string[]]$Arguments)
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string[]]$Arguments, [ValidateRange(1,300)][int]$TimeoutSeconds=300)
     $quoted = foreach ($item in $Arguments) { if ($item -match '[\s"]') { '"' + $item.Replace('"','\"') + '"' } else { $item } }
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Path; $start.Arguments = $quoted -join ' '; $start.UseShellExecute = $false
@@ -35,7 +35,7 @@ function Invoke-WinGet {
         $process.StartInfo = $start
         if (-not $process.Start()) { throw 'winget.exe konnte nicht gestartet werden.' }
         $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(300000)) { try { $process.Kill() } catch {}; throw 'WinGet-Aktion überschritt fünf Minuten.' }
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { try { $process.Kill() } catch {}; throw "WinGet-Aktion überschritt $TimeoutSeconds Sekunden." }
         $process.WaitForExit()
         $text = @($stdout.GetAwaiter().GetResult(), $stderr.GetAwaiter().GetResult()) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
         [pscustomobject]@{ ExitCode = [int]$process.ExitCode; Output = ($text -join [Environment]::NewLine).Trim() }
@@ -46,9 +46,27 @@ function Invoke-WinGet {
             # GitHub-MSIX-Bundle ausgeführt werden. Die Releaseversion und ein
             # optionaler SHA-256-Wert kommen dynamisch aus GitHub-Metadaten.
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' `
-                -Headers @{ 'User-Agent' = 'Server-Update-Skripte'; Accept = 'application/vnd.github+json' } `
-                -TimeoutSec 30 -ErrorAction Stop
+            try {
+                $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' `
+                    -Headers @{ 'User-Agent' = 'Server-Update-Skripte'; Accept = 'application/vnd.github+json' } `
+                    -TimeoutSec 8 -ErrorAction Stop
+            } catch {
+                $onlineError = $_.Exception.Message
+                foreach ($fallbackRoot in @((Join-Path $PSScriptRoot 'WinGetPortable'))) {
+                    if (-not [IO.Directory]::Exists($fallbackRoot)) { continue }
+                    foreach ($candidate in [IO.Directory]::EnumerateFiles($fallbackRoot, 'winget.exe', [IO.SearchOption]::AllDirectories)) {
+                        try {
+                            $signature = Get-AuthenticodeSignature -FilePath $candidate -ErrorAction Stop
+                            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') { continue }
+                            $probe = Invoke-WinGet -Path $candidate -Arguments @('--version') -TimeoutSeconds 10
+                            if ($probe.ExitCode -eq 0 -and $probe.Output -match '(?m)^\s*v?(\d+\.\d+[.\d]*)\s*$') {
+                                return [pscustomobject]@{Path=$candidate;Version=$Matches[1];ReleaseTag=$Matches[1];Cached=$true;OfflineCache=$true;OnlineDiagnostic=$onlineError}
+                            }
+                        } catch { }
+                    }
+                }
+                throw "GitHub-Releaseabfrage fehlgeschlagen und keine signaturgeprüfte startfähige CLI im Cache gefunden: $onlineError"
+            }
             $releaseTag = [string]$release.tag_name
             if ([string]::IsNullOrWhiteSpace($releaseTag)) { throw 'GitHub lieferte keinen Tag für das aktuelle WinGet-Release.' }
             $asset = @($release.assets | Where-Object {

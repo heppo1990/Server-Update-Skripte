@@ -745,9 +745,27 @@ if (-not $response.Success) { exit 1 }
             # GitHub-MSIX-Bundle ausgeführt werden. Die Releaseversion und ein
             # optionaler SHA-256-Wert kommen dynamisch aus GitHub-Metadaten.
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' `
-                -Headers @{ 'User-Agent' = 'Server-Update-Skripte'; Accept = 'application/vnd.github+json' } `
-                -TimeoutSec 30 -ErrorAction Stop
+            try {
+                $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' `
+                    -Headers @{ 'User-Agent' = 'Server-Update-Skripte'; Accept = 'application/vnd.github+json' } `
+                    -TimeoutSec 8 -ErrorAction Stop
+            } catch {
+                $onlineError = $_.Exception.Message
+                foreach ($fallbackRoot in @((Join-Path $env:LOCALAPPDATA 'WindowsUpdateAdm\WinGetPortable'), (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\WinGetPortable'))) {
+                    if (-not [IO.Directory]::Exists($fallbackRoot)) { continue }
+                    foreach ($candidate in [IO.Directory]::EnumerateFiles($fallbackRoot, 'winget.exe', [IO.SearchOption]::AllDirectories)) {
+                        try {
+                            $signature = Get-AuthenticodeSignature -FilePath $candidate -ErrorAction Stop
+                            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') { continue }
+                            $probe = Invoke-WindowsUpdateHiddenProcess -Path $candidate -Arguments @('--version') -TimeoutSeconds 10
+                            if ($probe.ExitCode -eq 0 -and $probe.Output -match '(?m)^\s*v?(\d+\.\d+[.\d]*)\s*$') {
+                                return [pscustomobject]@{Path=$candidate;Version=$Matches[1];ReleaseTag=$Matches[1];Cached=$true;OfflineCache=$true;OnlineDiagnostic=$onlineError}
+                            }
+                        } catch { }
+                    }
+                }
+                throw "GitHub-Releaseabfrage fehlgeschlagen und keine signaturgeprüfte startfähige CLI im Cache gefunden: $onlineError"
+            }
             $releaseTag = [string]$release.tag_name
             if ([string]::IsNullOrWhiteSpace($releaseTag)) { throw 'GitHub lieferte keinen Tag für das aktuelle WinGet-Release.' }
             $asset = @($release.assets | Where-Object {
@@ -761,8 +779,16 @@ if (-not $response.Success) { exit 1 }
             $cacheRoot = Join-Path $env:LOCALAPPDATA 'WindowsUpdateAdm\WinGetPortable'
             $packageRoot = Join-Path $cacheRoot $safeTag
             $cachedExecutable = @(Get-ChildItem -LiteralPath $packageRoot -Filter winget.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($cachedExecutable.Count -eq 0) {
+                $protectedRoot = [IO.Path]::Combine($env:ProgramFiles, 'WindowsPowerShell', 'Modules', 'JEA_Updates', 'WinGetPortable', $safeTag)
+                if ([IO.Directory]::Exists($protectedRoot)) {
+                    $cachedExecutable = @([IO.Directory]::EnumerateFiles($protectedRoot, 'winget.exe', [IO.SearchOption]::AllDirectories) | ForEach-Object { [IO.FileInfo]::new($_) } | Select-Object -First 1)
+                }
+            }
             if ($cachedExecutable.Count -gt 0) {
                 try {
+                    $cachedSignature = Get-AuthenticodeSignature -FilePath $cachedExecutable[0].FullName -ErrorAction Stop
+                    if ($cachedSignature.Status -ne 'Valid' -or $cachedSignature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') { throw 'Portable CLI im Cache hat keine gültige Microsoft-Signatur.' }
                     $cachedProbe = Invoke-WindowsUpdateHiddenProcess -Path $cachedExecutable[0].FullName -Arguments @('--version') -TimeoutSeconds 30
                     if ([int]$cachedProbe.ExitCode -eq 0 -and [string]$cachedProbe.Output -match '(?m)^\s*v?\d+\.\d+') {
                         return [pscustomobject]@{ Path = $cachedExecutable[0].FullName; Version = $releaseTag; ReleaseTag = $releaseTag; Cached = $true }
@@ -856,6 +882,7 @@ if (-not $response.Success) { exit 1 }
             $registered = @(Get-AppxPackage -Name Microsoft.Winget.Source -ErrorAction Stop |
                 Where-Object { $_.Status -eq 'Ok' } | Sort-Object { [version]$_.Version } -Descending)
             $sourcePath = $null
+            $cleanupDiagnostic = ''
             $sourceChanged = $false
             $sourceRefreshed = $false
             $sourceRepaired = $false
@@ -925,11 +952,15 @@ Add-AppxPackage -Path $quotedSourcePath -ErrorAction Stop
                 $marker = '__WINGETSOURCE__SUCCESS|{0}|{1}|{2}' -f [string]$registered[0].Version, $sourceChanged, $sourceRefreshed
             }
             finally {
-                if ($sourcePath -and (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-                    Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+                # FileSystemProvider kann trotz absolutem Pfad am ungültigen
+                # Kurzprofil scheitern. Nur die eigene Download-Datei per .NET entfernen.
+                if ($sourcePath) {
+                    try { [IO.File]::Delete($sourcePath) }
+                    catch { $cleanupDiagnostic = $_.Exception.ToString() }
                 }
             }
             return [pscustomobject]@{
+                CleanupDiagnostic = $cleanupDiagnostic
                 Changed = $sourceChanged
                 Repaired = $sourceRepaired
                 Version = [string]$registered[0].Version
@@ -2459,6 +2490,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     }
                     $refreshSourcePackage = $SourceResetPerformed -or $SourcePackageRefreshPerformed -or $sourceNeedsRecovery
                     $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser -Refresh:$refreshSourcePackage -RepairStaleSource:$sourceNeedsRecovery
+                    if ($sourcePackageRegistration.CleanupDiagnostic) { $wingetDiagnosticOutput += "Quellenpaket-Bereinigung: $($sourcePackageRegistration.CleanupDiagnostic)`r`n" }
                     if ($sourcePackageRegistration.Output -match '__WINGETSOURCE__SUCCESS') {
                         if ($sourcePackageRegistration.Refreshed) {
                             $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer nach leerer Abfrage erneuert (Version $($sourcePackageRegistration.Version))."
