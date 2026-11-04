@@ -4,9 +4,9 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 ## Aktuell
 
-- [ ] **1. WinGet-Abschlussabfrage und Quellenreset:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. Startverweigerung und nicht verfügbare AppX-Abfrage fallen auf die signaturgeprüfte portable CLI zurück; Resetzeit ist dynamisch bis 120 Sekunden im Check-Zeitbudget. Echter Zielcheck nach Resetfehler noch bestätigen.
+- [ ] **1. WinGet-Abschlussabfrage und Quellenreset:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. Startverweigerung und nicht verfügbare AppX-Abfrage fallen auf die signaturgeprüfte portable CLI zurück. Monatswartung erhält ein separates 8-Minuten-Budget; Quellenreset maximal 180 Sekunden. Echten Zielcheck nach Reset-/Timeout-Fällen bestätigen.
 - [ ] **2. Native AppX-Reparatur:** Provisionierung und Registrierung im echten Benutzerprofil bestätigen; ohne angemeldeten Benutzer als ausstehend melden. Portable WinGet-Nutzung ist bereits bestätigt.
-- [ ] **3. Wartungsworker und Offlinefallback:** Automatische Workeraktualisierung ohne Verteilung sowie Rückgriff auf geprüften Cache bei GitHub-/Downloadfehlern bestätigen. Keine beschädigten Dateien ausführen.
+- [ ] **3. Wartungsworker und Offlinefallback:** Fester Raw-GitHub-Fallback bei Contents-API-Rate-Limit, automatische Workeraktualisierung ohne Verteilung und Rückgriff auf geprüften Cache bei Downloadfehlern auf echten Zielen bestätigen. Keine beschädigten Dateien ausführen.
 - [ ] **4. Konsolenbereinigung:** Bei verwertbaren WinGet-Treffern Teilfehler nur im Log/Bericht ausweisen, nicht als zusätzliche Konsolen-Fehlermeldung. Ausgabe auf einem echten Lauf bestätigen; echte Fehler ohne Treffer weiter anzeigen.
 
 ## Verbleibende Funktions- und Sicherheitsprüfungen
@@ -35,4 +35,3 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 Baseline nur ergänzen, bestehende Einstellungen nicht verschärfen oder entfernen. Fachmodule importieren einander nicht; Common bindet sie ein. Updater bleibt eigenständig. Neue Funktionen passend modularisieren. Skriptversion und erforderliche Bereitstellungsversion getrennt pflegen; Neuverteilung nur bei technisch nötiger Zieländerung.
 
 - [ ] **20. Updater bei API-Sperre:** GitHub-Dateiliste bei API-Fehler aus dem Archiv derselben festen Commit-ID ermitteln; Git-Blob-Prüfsummen weiter prüfen. Simulierter HTTP403 und echter Codeload-Download mit Git-Objektvergleich unter PS5 bestätigt. Automatische Aktualisierung auf betroffenem Ziel nach einmaligem Nachladen des Updaters bestätigen.
-
