@@ -3355,6 +3355,12 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $connectionProperty = $firstWingetResult.PSObject.Properties['RetryFreshConnection']
             $firstPackageCount = @($firstWingetResult.Packages).Count
             $isMonthlyResetOnly = $monthlyResetProperty -and [bool]$monthlyResetProperty.Value
+            if ($isMonthlyResetOnly -and $hasCheckTimeout) {
+                # Monatliche Wartung erhält ein eigenes Budget, damit die
+                # Reparatur nicht das eigentliche Quellenreset verdrängt.
+                $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(8)
+                Write-CommonLog $WriteLog "Monatliche WinGet-Wartung auf $ComputerName fällig; erweitertes Zeitbudget: 8 Minuten einschließlich Abschlussabfrage."
+            }
             # Jeder fehlgeschlagene WinGet-Aufruf läuft durch denselben
             # Reparaturpfad, unabhängig davon, ob CLI, Modul, RPC, Quelle oder
             # ein einzelnes Paket den Fehler gemeldet hat. Der monatliche
@@ -3507,9 +3513,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     try {
                     $sourceResetResult = $null
                     if ($isLocalTarget) {
-                        $sourceResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 120) -WriteLog $WriteLog
+                        $sourceResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 180) -WriteLog $WriteLog
                     } else {
-                        $sourceResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 120) -WriteLog $WriteLog
+                        $sourceResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 180) -WriteLog $WriteLog
                     }
                     $sourceResetPerformed = if ($sourceResetResult -and $sourceResetResult.PSObject.Properties['ResetPerformed']) {
                         [bool]$sourceResetResult.ResetPerformed
@@ -3569,9 +3575,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         try {
                         $followupResetResult = $null
                         if ($isLocalTarget) {
-                            $followupResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 120) -WriteLog $WriteLog
+                            $followupResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 180) -WriteLog $WriteLog
                         } else {
-                            $followupResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 120) -WriteLog $WriteLog
+                            $followupResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 180) -WriteLog $WriteLog
                         }
                         $followupResetPerformed = if ($followupResetResult -and $followupResetResult.PSObject.Properties['ResetPerformed']) {
                             [bool]$followupResetResult.ResetPerformed
@@ -3587,7 +3593,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $retryRequiresSourcePackageRefresh = $true
                     }
 
-                    $sourcePackageRefreshPerformed = $true
+                    $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $followupResetPerformed
                     $followupParameters = @{
                         ComputerName = $ComputerName
                         AuthInfo = $AuthInfo
@@ -3633,6 +3639,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $retryDetail = ([string]$retryResult.ActionOutput -replace '\s+', ' ').Trim()
                     if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet meldete einen Abfragefehler.' }
                     throw "Wiederholungsprüfung fehlgeschlagen: $retryDetail"
+                }
+                if (@($retryResult.Packages).Count -eq 0 -and -not $sourcePackageRefreshPerformed -and -not $retryPreferPortableWinGet) {
+                    throw 'Leere WinGet-Suche nicht bestätigt: Quellenreset oder Quellenpaket-Erneuerung wurde nicht erfolgreich abgeschlossen.'
                 }
                 if ($retryPreferPortableWinGet) {
                     try {
