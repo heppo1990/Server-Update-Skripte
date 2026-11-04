@@ -3524,7 +3524,13 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $sourceResetPerformed = $false
                     }
                 }
-                $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $retryRequiresSourceReset -or $wingetInstallScriptRan
+                # Nur tatsächlich bestätigte Quellenpflege darf eine leere
+                # Wiederholungsabfrage als gültig freigeben. Ein angeforderter,
+                # aber fehlgeschlagener JEA-Reset (z. B. Zugriff verweigert)
+                # und ein bloß gestarteter Reparaturversuch zählen nicht.
+                # Eine explizit angeforderte Quellenpaket-Erneuerung wird im
+                # folgenden Worker ausgeführt und dort bei Fehlschlag gemeldet.
+                $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $sourceResetPerformed
 
                 $retryParameters = @{
                     ComputerName = $ComputerName
