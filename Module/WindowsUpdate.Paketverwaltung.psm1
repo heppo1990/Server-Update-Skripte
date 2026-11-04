@@ -751,6 +751,17 @@ if (-not $response.Success) { exit 1 }
                     -TimeoutSec 8 -ErrorAction Stop
             } catch {
                 $onlineError = $_.Exception.Message
+                try {
+                    $latest = Invoke-WebRequest -Uri 'https://github.com/microsoft/winget-cli/releases/latest' -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                    $releaseUri = if ($latest.BaseResponse.PSObject.Properties['ResponseUri']) { [uri]$latest.BaseResponse.ResponseUri } else { [uri]$latest.BaseResponse.RequestMessage.RequestUri }
+                    if ($releaseUri.Host -ne 'github.com' -or $releaseUri.AbsolutePath -notmatch '^/microsoft/winget-cli/releases/tag/(v[0-9][A-Za-z0-9._-]*)$') { throw 'Unerwartete Release-Weiterleitung.' }
+                    $tag = $Matches[1]
+                    $release = [pscustomobject]@{ tag_name=$tag; assets=@(
+                        foreach ($name in @('Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle','DesktopAppInstaller_Dependencies.zip')) {
+                            [pscustomobject]@{name=$name; browser_download_url="https://github.com/microsoft/winget-cli/releases/download/$tag/$name"; digest=''}
+                        }
+                    ) }
+                } catch {
                 foreach ($fallbackRoot in @((Join-Path $env:LOCALAPPDATA 'WindowsUpdateAdm\WinGetPortable'), (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\WinGetPortable'))) {
                     if (-not [IO.Directory]::Exists($fallbackRoot)) { continue }
                     foreach ($candidate in [IO.Directory]::EnumerateFiles($fallbackRoot, 'winget.exe', [IO.SearchOption]::AllDirectories)) {
@@ -765,6 +776,7 @@ if (-not $response.Success) { exit 1 }
                     }
                 }
                 throw "GitHub-Releaseabfrage fehlgeschlagen und keine signaturgeprüfte startfähige CLI im Cache gefunden: $onlineError"
+                }
             }
             $releaseTag = [string]$release.tag_name
             if ([string]::IsNullOrWhiteSpace($releaseTag)) { throw 'GitHub lieferte keinen Tag für das aktuelle WinGet-Release.' }
@@ -834,19 +846,22 @@ if (-not $response.Success) { exit 1 }
                 if ($extractedExecutable.Count -eq 0) { throw 'Das entpackte GitHub-App-Installer-Paket enthält keine winget.exe.' }
 
                 $dependencyAsset = @($release.assets | Where-Object name -eq 'DesktopAppInstaller_Dependencies.zip')
-                if ($dependencyAsset.Count -ne 1 -or [string]$dependencyAsset[0].digest -notmatch '^sha256:([a-fA-F0-9]{64})$') { throw 'Microsoft-Abhängigkeiten oder ihr Release-Digest fehlen.' }
-                $dependencyHash = $Matches[1]
+                if ($dependencyAsset.Count -ne 1) { throw 'Microsoft-Abhängigkeiten fehlen.' }
+                $dependencyHash = ''
+                if ([string]$dependencyAsset[0].digest -match '^sha256:([a-fA-F0-9]{64})$') { $dependencyHash = $Matches[1] }
                 $dependencyUri = [uri]$dependencyAsset[0].browser_download_url
                 if ($dependencyUri.Scheme -ne 'https' -or $dependencyUri.Host -ne 'github.com' -or $dependencyUri.AbsolutePath -notlike '/microsoft/winget-cli/releases/download/*') { throw 'Ungültige Abhängigkeitsquelle.' }
                 $dependencyZip = Join-Path $workingRoot 'Dependencies.zip'
                 Invoke-WebRequest -Uri $dependencyUri.AbsoluteUri -OutFile $dependencyZip -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
-                if ((Get-FileHash -LiteralPath $dependencyZip -Algorithm SHA256).Hash -ine $dependencyHash) { throw 'Abhängigkeitsprüfsumme stimmt nicht.' }
+                if ($dependencyHash -and (Get-FileHash -LiteralPath $dependencyZip -Algorithm SHA256).Hash -ine $dependencyHash) { throw 'Abhängigkeitsprüfsumme stimmt nicht.' }
                 $dependencyRoot = Join-Path $workingRoot 'Dependencies'
                 Expand-Archive -LiteralPath $dependencyZip -DestinationPath $dependencyRoot -ErrorAction Stop
                 foreach ($dependencyPackage in @(Get-ChildItem -LiteralPath $dependencyRoot -Recurse -File | Where-Object { $_.Extension -in '.appx','.msix' -and $_.FullName -match '[\\/]x64[\\/]' })) {
                     $dllRoot = Join-Path $workingRoot ([guid]::NewGuid().ToString('N'))
                     [IO.Compression.ZipFile]::ExtractToDirectory($dependencyPackage.FullName, $dllRoot)
                     foreach ($dll in @(Get-ChildItem -LiteralPath $dllRoot -Recurse -Filter '*.dll' -File)) {
+                        $dllSignature = Get-AuthenticodeSignature -FilePath $dll.FullName -ErrorAction Stop
+                        if ($dllSignature.Status -ne 'Valid' -or $dllSignature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') { throw "Ungültige Microsoft-Signatur: $($dll.Name)" }
                         $destination = Join-Path (Split-Path -Parent $extractedExecutable[0].FullName) $dll.Name
                         if (-not (Test-Path -LiteralPath $destination)) { Copy-Item -LiteralPath $dll.FullName -Destination $destination -ErrorAction Stop }
                     }
@@ -2910,7 +2925,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     }
                     $packageLines = @($eligiblePackageLines)
                 }
-                if ($sourceFailureLines.Count -gt 0 -and ($ExecutionMode -eq 'Check' -or $packageLines.Count -eq 0)) {
+                if ($sourceFailureLines.Count -gt 0 -and $packageLines.Count -eq 0) {
                     $sourceFailureText = @($sourceFailureLines | ForEach-Object { Get-WingetCompactOutput -Text ([string]$_) }) -join ' '
                     $result += [PSCustomObject]@{
                         Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=1
@@ -3131,7 +3146,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         }
                         $actionOutput = $wingetFailureDetails -join ' '
                     }
-                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($sourceFailureLines.Count -eq 0); Skipped=$false; SkipReason=''; ExitCode=$(if ($sourceFailureLines.Count -gt 0) { 1 } else { 0 }); Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
+                    $result += [PSCustomObject]@{ Manager='Winget'; Available=$true; Success=($sourceFailureLines.Count -eq 0 -or $packageLines.Count -gt 0); Skipped=$false; SkipReason=''; ExitCode=$(if ($sourceFailureLines.Count -gt 0) { 1 } else { 0 }); Packages=$packageLines; AvailableOutput=$availableOutput; ActionOutput=$actionOutput }
                 }
                 if ($ExecutionMode -eq 'Install') {
                     $interactiveQuery = Get-WingetInteractiveUserUpgradeLines -InstallUpdates

@@ -1,4 +1,4 @@
-# Offene Arbeiten und Prüfungen
+﻿# Offene Arbeiten und Prüfungen
 
 Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennamen, Kundennummern oder konkrete Servernamen aufnehmen. Ein erfolgreicher Kundenlauf reicht je Prüfung. Erledigtes wird gelöscht. Checklistenänderungen nur zusammen mit Skriptänderungen committen/pushen.
 
@@ -6,7 +6,7 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 - [ ] **1. WinGet-Abschlussabfrage und Quellenreset:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. Startverweigerung und nicht verfügbare AppX-Abfrage fallen auf die signaturgeprüfte portable CLI zurück. Monatswartung erhält ein separates 8-Minuten-Budget; Quellenreset maximal 180 Sekunden. Echten Zielcheck nach Reset-/Timeout-Fällen bestätigen.
 - [ ] **2. Native AppX-Reparatur:** Provisionierung und Registrierung im echten Benutzerprofil bestätigen; ohne angemeldeten Benutzer als ausstehend melden. Portable WinGet-Nutzung ist bereits bestätigt.
-- [ ] **3. Wartungsworker und Offlinefallback:** Fester Raw-GitHub-Fallback bei Contents-API-Rate-Limit, automatische Workeraktualisierung ohne Verteilung und Rückgriff auf geprüften Cache bei Downloadfehlern auf echten Zielen bestätigen. Keine beschädigten Dateien ausführen.
+- [ ] **3. Wartungsworker und Offlinefallback:** Dynamischen Release-Web-Fallback für CLI und signaturgeprüfte Abhängigkeiten bei API-Limit bestätigen. Fester Raw-GitHub-Fallback bei Contents-API-Rate-Limit, automatische Workeraktualisierung ohne Verteilung und Rückgriff auf geprüften Cache bei Downloadfehlern auf echten Zielen bestätigen. Keine beschädigten Dateien ausführen.
 - [ ] **4. Konsolenbereinigung:** Bei verwertbaren WinGet-Treffern Teilfehler nur im Log/Bericht ausweisen, nicht als zusätzliche Konsolen-Fehlermeldung. Ausgabe auf einem echten Lauf bestätigen; echte Fehler ohne Treffer weiter anzeigen.
 
 ## Verbleibende Funktions- und Sicherheitsprüfungen

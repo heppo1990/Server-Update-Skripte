@@ -1,9 +1,9 @@
-function Get-WindowsUpdateAdmDeploymentVersion {
+﻿function Get-WindowsUpdateAdmDeploymentVersion {
     '5.1.0'
 }
 
 function Get-WindowsUpdateScriptsVersion {
-    '5.1.18'
+    '5.1.19'
 }
 
 function Test-WindowsUpdateAdmVersion {
