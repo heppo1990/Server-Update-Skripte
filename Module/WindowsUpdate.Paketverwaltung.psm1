@@ -1091,7 +1091,7 @@ catch {
         function Test-WingetNonPackageOutputLine {
             param([AllowNull()][string]$Line)
             if ([string]::IsNullOrWhiteSpace($Line)) { return $true }
-            return $Line -match '(?i)([\u2580-\u259F]|\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)|\b\d{1,3}%\b|Terms of Transaction|terms of use|Nutzungsbedingungen|Vereinbarungen der Quelle|Vereinbarungen vor der Verwendung|geographic region|geografische Region|two-letter region|zwei Buchstaben.*Region|accept.*agreement|source.{0,80}(?:requires?|agreements?|terms)|(?:requires?|agreements?).{0,80}(?:source|using)|Zustimmung.*Vereinbarung|no installed package found|es wurde kein installiertes Paket gefunden|no available upgrade|no upgrades available|keine Paketupdates verfügbar|keine Aktualisierungen verfügbar|failed when searching|Fehler beim Durchsuchen der Quelle|Ergebnisse werden nicht einbezogen|results? (?:are )?not included|(?:packages?|pakete)\s+(?:have|verfügen über)\s+pins?|^\s*\d+\s+pakete?\s+verf.{1,2}gen\s+.{0,10}pins?\b.*(?:ergebnisse|results?)|pins?\s+(?:prevent|verhindern)\s+(?:an?\s+)?upgrade|Store terms|Store-Bedingungen)'
+            return $Line -match '(?i)([\u2580-\u259F]|\d+(?:\.\d+)?\s*(?:KB|MB|GB)\s*/\s*\d+(?:\.\d+)?\s*(?:KB|MB|GB)|\b\d{1,3}%\b|Terms of Transaction|terms of use|Nutzungsbedingungen|Vereinbarungen der Quelle|Vereinbarungen vor der Verwendung|geographic region|geografische Region|two-letter region|zwei Buchstaben.*Region|accept.*agreement|source.{0,80}(?:requires?|agreements?|terms)|(?:requires?|agreements?).{0,80}(?:source|using)|Zustimmung.*Vereinbarung|no installed package found|es wurde kein installiertes Paket gefunden|no available upgrade|no upgrades available|kein.{0,30}upgrade gefunden|in den konfigurierten quellen|keine Paketupdates verfügbar|keine Aktualisierungen verfügbar|failed when searching|Fehler beim Durchsuchen der Quelle|Ergebnisse werden nicht einbezogen|results? (?:are )?not included|(?:packages?|pakete)\s+(?:have|verfügen über)\s+pins?|^\s*\d+\s+pakete?\s+verf.{1,2}gen\s+.{0,10}pins?\b.*(?:ergebnisse|results?)|pins?\s+(?:prevent|verhindern)\s+(?:an?\s+)?upgrade|Store terms|Store-Bedingungen)'
         }
 
         function Get-WingetCompactOutput {
@@ -1129,6 +1129,10 @@ catch {
                 if ($match.Groups['Id'].Value -in @('Id', 'SearchId') -or
                     $match.Groups['InstalledVersion'].Value -in @('Version', 'SearchVersion') -or
                     $match.Groups['AvailableVersion'].Value -in @('Available', 'AvailableHeader')) { continue }
+                # Keine Prosa als Paket interpretieren: eine Zielversion enthält
+                # Ziffern oder einen ausdrücklich benannten Versionsplatzhalter.
+                $availableVersion = $match.Groups['AvailableVersion'].Value
+                if ($availableVersion -notmatch '\d' -and $availableVersion -notin @('latest','unknown','unbekannt')) { continue }
                 $source = if ($match.Groups['Source'].Success) { $match.Groups['Source'].Value } else { $DefaultSource }
                 [string]::Format('{0}  {1}  {2}  {3}  {4}',
                     $match.Groups['Name'].Value.Trim(), $match.Groups['Id'].Value,
@@ -1234,9 +1238,8 @@ catch {
                                 $skippedSources += $sourceName
                                 continue
                             }
-                            # Alle nicht expliziten Quellen werden gemeinsam abgefragt.
-                            # Kundeneigene explizite Quellen brauchen einen eigenen Aufruf.
-                            if ($Matches.Explicit -ieq 'true') { $explicitSourceNames += $sourceName }
+                            # Jede App-Quelle einzeln wie bei der direkten manuellen Abfrage prüfen.
+                            $explicitSourceNames += $sourceName
                         }
                     }
                     $explicitSourceNames = @($explicitSourceNames | Select-Object -Unique)
@@ -1252,14 +1255,15 @@ catch {
                 }
 
                 $sourceResults = @()
-                $queryDefinitions = @([pscustomobject]@{ Source = '(Standardquellen)'; Explicit = $false })
+                $queryDefinitions = @()
                 foreach ($sourceName in $explicitSourceNames) {
                     $queryDefinitions += [pscustomobject]@{ Source = $sourceName; Explicit = $true }
                 }
+                if ($queryDefinitions.Count -eq 0) { throw 'Keine auswertbare App-Quelle in der WinGet-Quellenliste.' }
                 foreach ($queryDefinition in $queryDefinitions) {
                     $sourceName = [string]$queryDefinition.Source
                     $arguments = @(
-                        'list', '--upgrade-available',
+                        'upgrade',
                         '--accept-source-agreements', '--disable-interactivity'
                     )
                     if (-not [string]::IsNullOrWhiteSpace($QueryScope)) { $arguments += @('--scope', $QueryScope) }
@@ -1308,6 +1312,7 @@ catch {
             $seenPackages = @{}
             foreach ($sourceResult in @($cliResult.Results)) {
                 $sourceName = [string]$sourceResult.Source
+                $diagnostics += "Abfragebefehl: winget upgrade --source $sourceName --accept-source-agreements --disable-interactivity$(if ($Scope) { ' --scope ' + $Scope })"
                 $sourceOutput = [string]$sourceResult.Output
                 $sourceExitCode = [int]$sourceResult.ExitCode
                 $sourceErrorProperty = $sourceResult.PSObject.Properties['Error']
@@ -1316,14 +1321,17 @@ catch {
                 } else {
                     $diagnostics += "Quelle '$sourceName' (Exitcode $sourceExitCode):`r`n$sourceOutput"
                 }
-                # list --upgrade-available verwendet bei erfolgreicher Leerabfrage
+                # upgrade verwendet bei erfolgreicher Leerabfrage
                 # je nach WinGet-Version/Quelle einen Nicht-Null-Exitcode.
                 $reportedSourceFailure = @($sourceOutput -split "`r?`n" | Where-Object {
                     Test-WingetSourceFailureLine -Line ([string]$_)
                 }).Count -gt 0
                 $successfulEmptyResult = -not $reportedSourceFailure -and
-                    $sourceOutput -match '(?i)(no installed package found matching input criteria|es wurde kein installiertes paket gefunden, das den eingabekriterien entspricht|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar|0 upgrades? available|0 paketupdates? verfügbar)'
-                if (($sourceExitCode -ne 0 -and -not $successfulEmptyResult) -or $reportedSourceFailure) {
+                    $sourceOutput -match '(?i)(no installed package found matching input criteria|es wurde kein installiertes paket gefunden, das den eingabekriterien entspricht|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar|kein verf.{1,2}gbares upgrade gefunden|keine neueren paketversionen verf.{1,2}gbar|0 upgrades? available|0 paketupdates? verfügbar)'
+                $defaultSource = $sourceName
+                $parsedSourceRows = @(Get-WingetUpgradeLines -Output $sourceOutput -DefaultSource $defaultSource)
+                $unconfirmedEmpty = $parsedSourceRows.Count -eq 0 -and -not $successfulEmptyResult
+                if (($sourceExitCode -ne 0 -and -not $successfulEmptyResult) -or $reportedSourceFailure -or $unconfirmedEmpty) {
                     $detail = if ($sourceErrorProperty -and -not [string]::IsNullOrWhiteSpace([string]$sourceErrorProperty.Value)) {
                         Get-WingetCompactOutput -Text ([string]$sourceErrorProperty.Value) -MaximumLength 500
                     } else {
@@ -1333,13 +1341,12 @@ catch {
                         if ($failureLine.Count -gt 0) { Get-WingetCompactOutput -Text ([string]$failureLine[0]) -MaximumLength 500 }
                         else { Get-WingetCompactOutput -Text $sourceOutput -MaximumLength 500 }
                     }
-                    if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe list --upgrade-available endete mit Exitcode $sourceExitCode." }
+                    if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "winget.exe upgrade lieferte keine bestätigte Paketliste oder Leermeldung (Exitcode $sourceExitCode)." }
                     $sourceFailures += "Fehler bei der WinGet-Abfrage für Quelle '$sourceName' - $detail"
                     continue
                 }
 
-                $defaultSource = if ($sourceName -eq '(Standardquellen)') { 'winget' } else { $sourceName }
-                foreach ($row in @(Get-WingetUpgradeLines -Output $sourceOutput -DefaultSource $defaultSource)) {
+                foreach ($row in $parsedSourceRows) {
                     $match = [regex]::Match($row, '^\s*(?<Name>.+?)\s+(?<Id>(?=[A-Za-z0-9._+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._+-]*)\s+(?<Installed>\S+)\s+(?<Available>\S+)\s+(?<Source>\S+)\s*$')
                     if (-not $match.Success) { continue }
                     $packageKey = '{0}|{1}' -f $match.Groups['Id'].Value.ToLowerInvariant(), $match.Groups['Source'].Value.ToLowerInvariant()
