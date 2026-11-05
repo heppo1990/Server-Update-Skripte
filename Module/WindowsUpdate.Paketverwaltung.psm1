@@ -3498,7 +3498,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $wingetInstallScriptRan = $true
                     Write-CommonLog $WriteLog "WinGet-Clientreparatur auf $ComputerName über JEA erfolgreich."
                     if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
-                        Write-CommonLog $WriteLog ("WinGet-Clientwartung auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
+                        Write-CommonLog $WriteLog ("WinGet-Clientwartung auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' ')) -LogOnly $true
                     }
                 }
                 catch {
@@ -3510,7 +3510,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $retryRequired = $true
                         $retryPreferPortableWinGet = $true
                         $retryReason = 'Portabler WinGet-Fallback aus GitHub als nächster Reparaturschritt'
-                        Write-CommonLog $WriteLog "winget-install.ps1-Reparaturversuch auf $ComputerName abgeschlossen; wechsle zur portablen WinGet-CLI aus GitHub und wiederhole die Prüfung in einer neuen Verbindung. Details des Reparaturversuchs: $failureDiagnostic"
+                        Write-CommonLog $WriteLog "winget-install.ps1-Reparaturversuch auf $ComputerName abgeschlossen; wechsle zur portablen WinGet-CLI aus GitHub und wiederhole die Prüfung in einer neuen Verbindung. Details des Reparaturversuchs: $failureDiagnostic" -LogOnly $true
                     }
                     else {
                         $failure = "WinGet-Installation/Reparatur auf $ComputerName fehlgeschlagen; Details im Log."
@@ -3518,7 +3518,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                             Manager='Winget'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$null
                             Packages=@(); AvailableOutput=''; ActionOutput=$failure; DiagnosticOutput=$firstDiagnostic
                         }
-                        Write-CommonLog $WriteLog $failure 'WARN'
+                        Write-CommonLog $WriteLog $failure -LogOnly $true
                     }
                 }
             }
@@ -3607,7 +3607,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         Write-CommonLog $WriteLog "WinGet-Client auf $ComputerName über JEA geprüft und einsatzbereit."
                     }
                     if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
-                        Write-CommonLog $WriteLog ("WinGet-Clientwartung auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
+                        Write-CommonLog $WriteLog ("WinGet-Clientwartung auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' ')) -LogOnly $true
                     }
                     } catch {
                         $clientAcquisitionFailed = $true
@@ -3867,7 +3867,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
         $bootstrapMessageProperty = $packageResult.PSObject.Properties['BootstrapMessage']
         if ($packageResult.Manager -eq 'Winget' -and $bootstrapMessageProperty -and -not [string]::IsNullOrWhiteSpace([string]$bootstrapMessageProperty.Value)) {
             $bootstrapMessage = [string]$bootstrapMessageProperty.Value
-            $logOnly = $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des monatlichen Limits übersprungen\.|WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar\.|WinGet-Abfrage nach Prüfung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar\.'
+            $logOnly = ($Mode -eq 'Check' -and [bool]$packageResult.Success) -or $bootstrapMessage -match '(?i)WinGet-Abfrage war erfolgreich; keine Paketupdates verfügbar\. Quellenreset wegen des monatlichen Limits übersprungen\.|WinGet-Abfrage nach Quellenreset in neuer Sitzung erfolgreich; keine Paketupdates verfügbar\.|WinGet-Abfrage nach Prüfung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar\.'
             if ($WriteLog) { & $WriteLog $bootstrapMessage ([bool]$logOnly) }
         }
     }
