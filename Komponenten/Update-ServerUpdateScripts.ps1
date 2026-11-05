@@ -1267,14 +1267,27 @@ function Invoke-ServerUpdateGitHubRequest {
             return & $Request
         }
         catch {
-            $shortCause = Get-ServerUpdateShortError -Exception $_.Exception
-            Write-ServerUpdateUpdaterDiagnostic -Operation "GitHub-$Description" -ErrorRecord $_ -Context "Versuch $attempt/3"
-            $transient = $_.Exception.Message -match '(?i)(übertragungsverbindung|remotehost|connection|verbindung|timeout|zeitüberschreitung|temporar|429|\b5\d\d\b|unable to read data)'
+            $errorRecord = $_
+            $shortCause = Get-ServerUpdateShortError -Exception $errorRecord.Exception
+            $connectionReset = $false
+            for ($exception = $errorRecord.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+                if ($exception -is [System.Net.Sockets.SocketException] -and
+                    $exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionReset) {
+                    $connectionReset = $true
+                    $shortCause = 'HTTPS-Verbindung wurde zurückgesetzt'
+                    break
+                }
+            }
+            $retryDelay = if (-not $connectionReset) { 30 } elseif ($attempt -eq 1) { 2 } else { 5 }
+            $transient = $connectionReset -or $errorRecord.Exception.Message -match '(?i)(übertragungsverbindung|remotehost|connection|verbindung|timeout|zeitüberschreitung|temporar|429|\b5\d\d\b|unable to read data)'
+            $context = "Versuch $attempt/3"
+            if ($transient -and $attempt -lt 3) { $context += ", Wiederholung in $retryDelay Sekunden" }
+            Write-ServerUpdateUpdaterDiagnostic -Operation "GitHub-$Description" -ErrorRecord $errorRecord -Context $context
             if (-not $transient -or $attempt -ge 3) {
                 throw "GitHub-$Description nach $attempt Versuch(en) fehlgeschlagen: $shortCause"
             }
-            Write-Warning "GitHub-${Description}: Versuch $attempt/3 fehlgeschlagen ($shortCause); nächster Versuch in 30 Sekunden."
-            Start-Sleep -Seconds 30
+            Write-Warning "GitHub-${Description}: Versuch $attempt/3 fehlgeschlagen ($shortCause); nächster Versuch in $retryDelay Sekunden."
+            Start-Sleep -Seconds $retryDelay
         }
     }
 }
