@@ -77,7 +77,8 @@ function Test-WindowsUpdateDeploymentConfiguration {
 
     try {
         $rawStatus = Invoke-Command @endpointParameters
-        if ($rawStatus.PSObject.Properties['TargetBuild'] -and [int]$rawStatus.TargetBuild -lt 17763) {
+        if (($rawStatus.PSObject.Properties['TargetBuild'] -and [int]$rawStatus.TargetBuild -lt 17763) -or
+            ($rawStatus.PSObject.Properties['ServerCore'] -and [bool]$rawStatus.ServerCore)) {
             $ExpectedWinGetUpdateOnly = $false
             $ExpectedWinGetMaintenanceOnly = $false
         }
@@ -106,6 +107,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
                     [PSCustomObject]@{
                         MaintenanceCurrent = $moduleText -match "MaintenanceRevision\s*=\s*'6'"
                         Build = $build
+                        ServerCore = ((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType -eq 'Server Core')
                         HasStatusFunction = $versionMatch.Success
                         DeploymentVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['Version'].Value } else { '' }
                         WinGetUpdateOnly = $moduleText -match '(?i)WinGetUpdateOnly\s*=\s*\$true'
@@ -114,6 +116,10 @@ function Test-WindowsUpdateDeploymentConfiguration {
                         ChocolateyMaintenanceOnly = $moduleText -match '(?i)ChocolateyMaintenanceOnly\s*=\s*\$true'
                     }
                 }
+            if ($legacyStatus.ServerCore) {
+                $ExpectedWinGetUpdateOnly = $false
+                $ExpectedWinGetMaintenanceOnly = $false
+            }
             if ([int]$legacyStatus.Build -le 17763) {
                 if ($legacyStatus.MaintenanceCurrent -and $legacyStatus.HasStatusFunction -and (Test-WindowsUpdateAdmVersion -Actual $legacyStatus.DeploymentVersion -Expected $ExpectedDeploymentVersion) -and
                     $legacyStatus.ChocolateyUpdateOnly -eq $ExpectedChocolateyUpdateOnly -and
@@ -460,13 +466,15 @@ function Invoke-WindowsUpdateWinRMDeployment {
         }
 
         $targetOsForWinGet = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
-            Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object BuildNumber, ProductType
+            Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object BuildNumber, ProductType, @{ Name = 'InstallationType'; Expression = { (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType } }
         }
-        if ([int]$targetOsForWinGet.ProductType -gt 1 -and [int]$targetOsForWinGet.BuildNumber -lt 17763) {
+        if ($targetOsForWinGet.InstallationType -eq 'Server Core' -or
+            ([int]$targetOsForWinGet.ProductType -gt 1 -and [int]$targetOsForWinGet.BuildNumber -lt 17763)) {
             $EnableWingetUpdates = $false
             $ExpectedWinGetUpdateOnly = $false
             $ExpectedWinGetMaintenanceOnly = $false
-            Write-DeployLog "[$Servername] WinGet-Bereitstellung ausgelassen: Windows Server älter als 2019."
+            $skipReason = if ($targetOsForWinGet.InstallationType -eq 'Server Core') { 'Server Core' } else { 'Windows Server älter als 2019' }
+            Write-DeployLog "[$Servername] WinGet-Bereitstellung ausgelassen: $skipReason."
         }
 
         # Nur veraltete oder fehlende Komponenten werden als Offlinepaket erstellt.

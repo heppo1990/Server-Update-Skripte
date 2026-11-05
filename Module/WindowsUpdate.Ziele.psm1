@@ -202,7 +202,7 @@ function Get-WindowsUpdateTargetOperatingSystem {
     if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
     $probe = {
         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-        [pscustomobject]@{ Caption = [string]$os.Caption; Version = [string]$os.Version; BuildNumber = [int]$os.BuildNumber; ProductType = [int]$os.ProductType }
+        [pscustomobject]@{ Caption = [string]$os.Caption; Version = [string]$os.Version; BuildNumber = [int]$os.BuildNumber; ProductType = [int]$os.ProductType; InstallationType = [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType }
     }
 
     if ($localNames -contains $ComputerName) {

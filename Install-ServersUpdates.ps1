@@ -167,7 +167,10 @@ function Invoke-PackageManagerUpdates {
         $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $AuthInfo -TimeoutSeconds 60 `
           -WriteLog { param($message) Write-ScriptLog $message -LogOnly }
         Write-ScriptLog "Betriebssystem auf $Servername erkannt: $($targetOsInfo.Caption); Version $($targetOsInfo.Version); Build $($targetOsInfo.BuildNumber); ProductType $($targetOsInfo.ProductType)." -LogOnly
-        if ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
+        if ($targetOsInfo.InstallationType -eq 'Server Core') {
+          $enableWinget = $false
+          $wingetSkipReason = 'auf Server Core nicht unterstützt'
+        } elseif ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
           $enableWinget = $false
           $wingetSkipReason = "Windows-Server-Build $($targetOsInfo.BuildNumber) liegt vor Server 2019"
           Write-ScriptLog "WinGet auf $Servername übersprungen: $wingetSkipReason; Chocolatey und Windows Update laufen weiter."
@@ -198,7 +201,7 @@ function Invoke-PackageManagerUpdates {
     foreach ($result in $results) {
       if ($result.Skipped) {
         $skipReason = if ([string]::IsNullOrWhiteSpace([string]$result.SkipReason)) { 'ohne Angabe eines Grundes' } else { [string]$result.SkipReason }
-        Write-ScriptLog "$($result.Manager)-Update auf ${Servername} übersprungen: $skipReason."
+        Write-ScriptLog "$($result.Manager)-Update auf ${Servername} übersprungen: $skipReason." -LogOnly:($result.Manager -eq 'Chocolatey' -and $result.ExitCode -eq 9009)
         continue
       }
       if (-not $result.Available) {
@@ -635,9 +638,12 @@ $wingetEnabledForManagement = -not $UpdateSettings.PSObject.Properties['EnableWi
 $chocolateyEnabledForManagement = -not $UpdateSettings.PSObject.Properties['EnableChocolateyUpdates'] -or [bool]$UpdateSettings.EnableChocolateyUpdates
 if ($wingetEnabledForManagement) {
   try {
-    $localOsInfo = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    $localOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $env:COMPUTERNAME
     Write-ScriptLog "Betriebssystem des Verwaltungsservers erkannt: $($localOsInfo.Caption); Version $($localOsInfo.Version); Build $($localOsInfo.BuildNumber); ProductType $($localOsInfo.ProductType)." -LogOnly
-    if ([int]$localOsInfo.ProductType -in @(2, 3) -and [int]$localOsInfo.BuildNumber -lt 17763) {
+    if ($localOsInfo.InstallationType -eq 'Server Core') {
+      $wingetEnabledForManagement = $false
+      Write-ScriptLog "WinGet auf Verwaltungsserver $env:COMPUTERNAME übersprungen: auf Server Core nicht unterstützt."
+    } elseif ([int]$localOsInfo.ProductType -in @(2, 3) -and [int]$localOsInfo.BuildNumber -lt 17763) {
       $wingetEnabledForManagement = $false
       Write-ScriptLog "WinGet auf Verwaltungsserver $env:COMPUTERNAME übersprungen: Windows-Server-Build $($localOsInfo.BuildNumber) liegt vor Server 2019."
     }

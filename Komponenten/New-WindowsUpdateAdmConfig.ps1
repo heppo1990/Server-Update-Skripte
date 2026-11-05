@@ -195,9 +195,12 @@ try {
     $offlineModulesPresent = Test-Path -LiteralPath $offlinePSWU -PathType Container
     # Gilt auch für direkte Aufrufe und die lokale SYSTEM-Finalisierung.
     $setupOsForWinGet = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-    if ([int]$setupOsForWinGet.ProductType -gt 1 -and [int]$setupOsForWinGet.BuildNumber -lt 17763) {
+    $serverCore = ((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType -eq 'Server Core')
+    $winGetMaintenanceSupported = -not $serverCore -and [int]$setupOsForWinGet.BuildNumber -ge 17763
+    if (-not $winGetMaintenanceSupported) {
         $InstallWinGetClientModule = $false
-        Write-SetupLog 'WinGet-Modul und Paketupdatefreigabe auf Windows Server vor 2019 ausgelassen.' 'INFO'
+        $skipReason = if ($serverCore) { 'Server Core' } else { 'Windows-Build älter als 17763' }
+        Write-SetupLog "WinGet-Bereitstellung ausgelassen: $skipReason." 'INFO'
     }
     if ($ModulesVerifiedCurrent) {
         $nugetReady = $true
@@ -892,7 +895,7 @@ try {
     $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
     $JeaModuleSource = New-WindowsUpdateAdmDeploymentStatusModuleSource -Version $deploymentVersion `
         -WinGetUpdateOnly ([bool]($InstallWinGetClientModule -and $winGetClientAvailable)) -ChocolateyUpdateOnly $true `
-        -WinGetMaintenanceOnly ([bool]([int]$setupOsForWinGet.BuildNumber -ge 17763)) -ChocolateyMaintenanceOnly $true
+        -WinGetMaintenanceOnly $winGetMaintenanceSupported -ChocolateyMaintenanceOnly $true -ServerCore $serverCore
     if (-not (Test-Path -LiteralPath $JeaBaseDir)) { New-Item -Path $JeaBaseDir -ItemType Directory -Force | Out-Null }
     [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
     Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"
@@ -923,32 +926,35 @@ try {
     [System.IO.File]::WriteAllText($chocolateyQueryWrapper, $chocolateyQueryContent, [System.Text.Encoding]::ASCII)
     Write-SetupLog 'JEA-Chocolatey-Rolle verwendet nur den festen Befehl "choco upgrade all -y"; Installieren und Deinstallieren werden nicht freigegeben.' 'INFO'
 
-    $wingetMaintenanceScript = Join-Path $JeaBaseDir 'WinGetMaintenance.ps1'
-    $maintenanceSourceRoot = $PSScriptRoot
-    if (-not (Test-Path -LiteralPath (Join-Path $maintenanceSourceRoot 'WindowsUpdate.WinGetMaintenance.ps1'))) {
-        $maintenanceSourceRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'Module'
-    }
-    $wingetMaintenanceSource = [IO.File]::ReadAllText((Join-Path $maintenanceSourceRoot 'WindowsUpdate.WinGetMaintenance.ps1'))
-    $maintenanceBridge = Join-Path $JeaBaseDir 'WinGetMaintenanceBridge.ps1'
-    Copy-Item -LiteralPath (Join-Path $maintenanceSourceRoot 'WindowsUpdate.WinGetMaintenanceBridge.ps1') -Destination $maintenanceBridge -Force -ErrorAction Stop
-    [System.IO.File]::WriteAllText($wingetMaintenanceScript, $wingetMaintenanceSource, [System.Text.UTF8Encoding]::new($true))
-    $powershell51Path = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $wingetActions = @{
-        'SourceList'='SourceList'; 'SourceUpdate'='SourceUpdate'; 'SourceReset'='SourceReset'; 'ClientRepair'='ClientRepair'
-    }
-    foreach ($entry in $wingetActions.GetEnumerator()) {
-        $wrapperName = switch ($entry.Key) {
-            'SourceList' { 'WindowsUpdateAdm-WinGet-SourceList.cmd' }
-            'SourceUpdate' { 'WindowsUpdateAdm-WinGet-SourceUpdate.cmd' }
-            'SourceReset' { 'WindowsUpdateAdm-WinGet-SourceReset.cmd' }
-            'ClientRepair' { 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
+    $wingetActions = @{}
+    if ($winGetMaintenanceSupported) {
+        $wingetMaintenanceScript = Join-Path $JeaBaseDir 'WinGetMaintenance.ps1'
+        $maintenanceSourceRoot = $PSScriptRoot
+        if (-not (Test-Path -LiteralPath (Join-Path $maintenanceSourceRoot 'WindowsUpdate.WinGetMaintenance.ps1'))) {
+            $maintenanceSourceRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'Module'
         }
-        $wrapperPath = Join-Path $JeaBaseDir $wrapperName
-        $wrapperText = "@echo off`r`n`"$powershell51Path`" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$maintenanceBridge`" -Action $($entry.Value)`r`nexit /b %ERRORLEVEL%`r`n"
-        [System.IO.File]::WriteAllText($wrapperPath, $wrapperText, [System.Text.Encoding]::ASCII)
+        $wingetMaintenanceSource = [IO.File]::ReadAllText((Join-Path $maintenanceSourceRoot 'WindowsUpdate.WinGetMaintenance.ps1'))
+        $maintenanceBridge = Join-Path $JeaBaseDir 'WinGetMaintenanceBridge.ps1'
+        Copy-Item -LiteralPath (Join-Path $maintenanceSourceRoot 'WindowsUpdate.WinGetMaintenanceBridge.ps1') -Destination $maintenanceBridge -Force -ErrorAction Stop
+        [System.IO.File]::WriteAllText($wingetMaintenanceScript, $wingetMaintenanceSource, [System.Text.UTF8Encoding]::new($true))
+        $powershell51Path = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $wingetActions = @{
+            'SourceList'='SourceList'; 'SourceUpdate'='SourceUpdate'; 'SourceReset'='SourceReset'; 'ClientRepair'='ClientRepair'
+        }
+        foreach ($entry in $wingetActions.GetEnumerator()) {
+            $wrapperName = switch ($entry.Key) {
+                'SourceList' { 'WindowsUpdateAdm-WinGet-SourceList.cmd' }
+                'SourceUpdate' { 'WindowsUpdateAdm-WinGet-SourceUpdate.cmd' }
+                'SourceReset' { 'WindowsUpdateAdm-WinGet-SourceReset.cmd' }
+                'ClientRepair' { 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
+            }
+            $wrapperPath = Join-Path $JeaBaseDir $wrapperName
+            $wrapperText = "@echo off`r`n`"$powershell51Path`" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$maintenanceBridge`" -Action $($entry.Value)`r`nexit /b %ERRORLEVEL%`r`n"
+            [System.IO.File]::WriteAllText($wrapperPath, $wrapperText, [System.Text.Encoding]::ASCII)
+        }
+        Write-SetupLog 'JEA-WinGet stellt Quellenliste, Quellenupdate, geschützten Quellenreset und signaturgeprüfte Client-Reparatur bereit; Paket-Install/Uninstall sind nicht enthalten.' 'INFO'
     }
-    Write-SetupLog 'JEA-WinGet stellt Quellenliste, Quellenupdate, geschützten Quellenreset und signaturgeprüfte Client-Reparatur bereit; Paket-Install/Uninstall sind nicht enthalten.' 'INFO'
-    
+
     if (!(Test-Path $RoleCapDir)) { New-Item -Path $RoleCapDir -ItemType Directory -Force | Out-Null }
     
     $JeaManifest = Join-Path $JeaBaseDir "$JeaModuleName.psd1"
@@ -1065,7 +1071,7 @@ try {
             'ClientRepair' { Join-Path $JeaBaseDir 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
         }
     })
-    if ([int]$setupOsForWinGet.ProductType -gt 1 -and [int]$setupOsForWinGet.BuildNumber -lt 17763) {
+    if (-not $winGetMaintenanceSupported) {
         $jeaVisibleFunctions = @($jeaVisibleFunctions | Where-Object { $_ -ne 'Invoke-WindowsUpdateAdmWinGetMaintenance' })
         $jeaVisibleExternalCommands = @($chocolateyWrapper, $chocolateyQueryWrapper)
     }

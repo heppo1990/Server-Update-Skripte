@@ -540,7 +540,10 @@ if ($ServerADList -ne $null) {
             $targetOsInfo = Get-WindowsUpdateTargetOperatingSystem -ComputerName $Servername -AuthInfo $svcCredential -TimeoutSeconds 60 `
               -WriteLog { param($message) Write-ScriptLog $message $true }
             Write-ScriptLog "Betriebssystem auf $Servername erkannt: $($targetOsInfo.Caption); Version $($targetOsInfo.Version); Build $($targetOsInfo.BuildNumber); ProductType $($targetOsInfo.ProductType)." $true
-            if ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
+            if ($targetOsInfo.InstallationType -eq 'Server Core') {
+              $targetEnableWinget = $false
+              $skipWingetReason = 'Auf Server Core nicht unterstützt; Chocolatey und Windows Update laufen weiter.'
+            } elseif ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
               $targetEnableWinget = $false
               $skipWingetReason = "WinGet wird auf diesem Windows-Server (Build $($targetOsInfo.BuildNumber), älter als Server 2019) nicht geprüft; Chocolatey und Windows Update laufen weiter."
             }
@@ -888,7 +891,7 @@ if ($ServerADList -ne $null) {
           if ($packageResult.Skipped) {
             if ($packageOutputWritten) { Write-ScriptLog '' }
             $skipReason = if ([string]::IsNullOrWhiteSpace([string]$packageResult.SkipReason)) { 'ohne Angabe eines Grundes' } else { [string]$packageResult.SkipReason }
-            Write-ScriptLog "$($packageResult.Manager)-Prüfung auf ${Servername} übersprungen: $skipReason."
+            Write-ScriptLog "$($packageResult.Manager)-Prüfung auf ${Servername} übersprungen: $skipReason." ($packageResult.Manager -eq 'Chocolatey' -and $packageResult.ExitCode -eq 9009)
             $packageOutputWritten = $true
             continue
           }
@@ -916,6 +919,10 @@ if ($ServerADList -ne $null) {
               Write-ScriptLog "WARNUNG: WinGet-Prüfung auf ${Servername} hatte einen Teilfehler; verwertbare Paketupdates werden angezeigt. Details: $($packageResult.ActionOutput)" $true
             } elseif ($packageResult.Manager -eq 'Winget') {
               Write-ScriptLog "WARNUNG: WinGet-Prüfung auf ${Servername} fehlgeschlagen; Details im Log."
+            } elseif ($packageResult.PSObject.Properties['JeaConnectionFailed'] -and $packageResult.JeaConnectionFailed) {
+              $warning = "WARNUNG: Chocolatey-Prüfung auf ${Servername} nicht möglich – JEA-Verbindung fehlgeschlagen."
+              Write-ScriptLog $warning $true
+              Write-WindowsUpdateConsoleLine -Message $warning -AlreadyFiltered
             } else {
               Write-ScriptLog "WARNUNG: $($packageResult.Manager)-Prüfung auf ${Servername} fehlgeschlagen: $($packageResult.ActionOutput)"
             }

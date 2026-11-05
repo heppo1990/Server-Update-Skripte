@@ -280,6 +280,7 @@ function Resolve-WindowsUpdateJeaChocolateyResults {
                     Manager='Chocolatey'; Available=$true; Success=$false; Skipped=$false; SkipReason=''; ExitCode=$queryExitCode
                     Packages=@(); AvailableOutput=$availableOutput; ActionOutput='Chocolatey-Abfrage über JEA fehlgeschlagen.'
                     DiagnosticOutput=$_.Exception.ToString()
+                    JeaConnectionFailed=($_.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException])
                 }
                 continue
             }
@@ -2425,6 +2426,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
 
         if (-not $UseWinget) {
             $result += [PSCustomObject]@{ Manager='Winget'; Available=$false; Success=$true; Skipped=$true; SkipReason='per Konfiguration deaktiviert'; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }
+        }
+        elseif ((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType -eq 'Server Core') {
+            $result += [PSCustomObject]@{ Manager='Winget'; Available=$false; Success=$true; Skipped=$true; SkipReason='Auf Server Core nicht unterstützt'; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }
         }
         elseif ($isSystemContext) {
             $result += [PSCustomObject]@{ Manager='Winget'; Available=$false; Success=$true; Skipped=$true; SkipReason='SYSTEM-Kontext (Winget ist benutzerbezogen)'; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }

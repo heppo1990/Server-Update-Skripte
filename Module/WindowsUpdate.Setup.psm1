@@ -7,12 +7,13 @@
         [bool]$WinGetUpdateOnly = $false,
         [bool]$ChocolateyUpdateOnly = $true,
         [bool]$WinGetMaintenanceOnly = $false,
-        [bool]$ChocolateyMaintenanceOnly = $true
+        [bool]$ChocolateyMaintenanceOnly = $true,
+        [bool]$ServerCore = $false
     )
 
     $moduleSource = @'
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '__VERSION__'; TargetBuild = [Environment]::OSVersion.Version.Build; MaintenanceRevision = '6'; MaintenanceFunctionsPresent = [bool]((Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated -CommandType Function -ErrorAction SilentlyContinue) -and (Get-Command -Name Invoke-WindowsUpdateAdmWinGetMaintenance -CommandType Function -ErrorAction SilentlyContinue)); WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
+    [PSCustomObject]@{ Version = '__VERSION__'; TargetBuild = [Environment]::OSVersion.Version.Build; ServerCore = __SERVER_CORE__; MaintenanceRevision = '6'; MaintenanceFunctionsPresent = [bool]((Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated -CommandType Function -ErrorAction SilentlyContinue) -and (Get-Command -Name Invoke-WindowsUpdateAdmWinGetMaintenance -CommandType Function -ErrorAction SilentlyContinue)); WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
 }
 function Update-WindowsUpdateAdmWinGetPackage {
     [CmdletBinding()]
@@ -91,7 +92,7 @@ function Invoke-WindowsUpdateAdmWinGetMaintenance {
 }
 Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage, Get-WindowsUpdateAdmChocolateyOutdated, Update-WindowsUpdateAdmChocolateyPackages, Invoke-WindowsUpdateAdmWinGetMaintenance
 '@
-    $moduleSource = $moduleSource.Replace('__VERSION__', $Version).
+    $moduleSource = $moduleSource.Replace('__VERSION__', $Version).Replace('__SERVER_CORE__', ('$' + $ServerCore.ToString().ToLowerInvariant())).
         Replace('__WINGET_UPDATE_ONLY__', ('$' + $WinGetUpdateOnly.ToString().ToLowerInvariant())).
         Replace('__CHOCO_UPDATE_ONLY__', ('$' + $ChocolateyUpdateOnly.ToString().ToLowerInvariant())).
         Replace('__WINGET_MAINTENANCE_ONLY__', ('$' + $WinGetMaintenanceOnly.ToString().ToLowerInvariant())).
