@@ -1,6 +1,11 @@
 # Fachmodul: WindowsUpdate.ModulPakete
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
+function Test-WindowsUpdateGalleryNuGetProvider {
+    $providers = @(Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)
+    return @($providers | Where-Object { [version]$_.Version -ge [version]'2.8.5.201' }).Count -gt 0
+}
+
 function New-WindowsUpdateModulePayload {
     <# Beschafft aktuelle PowerShell-Module zentral und bereitet sie zur Offline-Übertragung vor. #>
     [CmdletBinding()]
@@ -17,6 +22,7 @@ function New-WindowsUpdateModulePayload {
     $ProgressPreference = 'SilentlyContinue'
     $fallbackNames = @()
     $downloadedPackages = @{}
+    $nugetAvailable = Test-WindowsUpdateGalleryNuGetProvider
 
     function Save-DirectGalleryModulePackage {
         param([Parameter(Mandatory)][string]$PackageName, [string]$RequiredVersion)
@@ -82,6 +88,7 @@ function New-WindowsUpdateModulePayload {
         foreach ($name in $ModuleName) {
             $modulePayload = Join-Path $payloadRoot $name
             try {
+                if (-not $nugetAvailable) { throw 'NuGet-Provider fehlt; direkter PSGallery-Abruf wird verwendet.' }
                 # Save-Module holt aktuelle Gallery-Pakete samt deklarierter Abhängigkeiten.
                 # Das läuft auf dem Verwaltungsrechner; Zielserver benötigen keinen NuGet-Zugang.
                 Save-Module -Name $name -Repository PSGallery -Path $payloadRoot -Force `
@@ -190,6 +197,8 @@ function New-WindowsUpdateModulePayload {
 
 function Get-WindowsUpdateGalleryModuleVersion {
     param([Parameter(Mandatory)][string]$Name)
+
+    if (-not (Test-WindowsUpdateGalleryNuGetProvider)) { return $null }
 
     try {
         $module = Find-Module -Name $Name -Repository PSGallery -ErrorAction Stop -WarningAction SilentlyContinue |

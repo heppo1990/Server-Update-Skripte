@@ -543,9 +543,9 @@ if ($ServerADList -ne $null) {
             if ($targetOsInfo.InstallationType -eq 'Server Core') {
               $targetEnableWinget = $false
               $skipWingetReason = 'Auf Server Core nicht unterstützt; Chocolatey und Windows Update laufen weiter.'
-            } elseif ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
+            } elseif ([int]$targetOsInfo.BuildNumber -lt 17763) {
               $targetEnableWinget = $false
-              $skipWingetReason = "WinGet wird auf diesem Windows-Server (Build $($targetOsInfo.BuildNumber), älter als Server 2019) nicht geprüft; Chocolatey und Windows Update laufen weiter."
+              $skipWingetReason = "Windows-Build $($targetOsInfo.BuildNumber) liegt unter 17763; Chocolatey und Windows Update laufen weiter."
             }
           }
           catch {

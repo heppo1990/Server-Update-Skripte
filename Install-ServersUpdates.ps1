@@ -170,9 +170,9 @@ function Invoke-PackageManagerUpdates {
         if ($targetOsInfo.InstallationType -eq 'Server Core') {
           $enableWinget = $false
           $wingetSkipReason = 'auf Server Core nicht unterstützt'
-        } elseif ([int]$targetOsInfo.ProductType -in @(2, 3) -and [int]$targetOsInfo.BuildNumber -lt 17763) {
+        } elseif ([int]$targetOsInfo.BuildNumber -lt 17763) {
           $enableWinget = $false
-          $wingetSkipReason = "Windows-Server-Build $($targetOsInfo.BuildNumber) liegt vor Server 2019"
+          $wingetSkipReason = "Windows-Build $($targetOsInfo.BuildNumber) liegt unter 17763"
           Write-ScriptLog "WinGet auf $Servername übersprungen: $wingetSkipReason; Chocolatey und Windows Update laufen weiter."
         }
       }
@@ -643,9 +643,9 @@ if ($wingetEnabledForManagement) {
     if ($localOsInfo.InstallationType -eq 'Server Core') {
       $wingetEnabledForManagement = $false
       Write-ScriptLog "WinGet auf Verwaltungsserver $env:COMPUTERNAME übersprungen: auf Server Core nicht unterstützt."
-    } elseif ([int]$localOsInfo.ProductType -in @(2, 3) -and [int]$localOsInfo.BuildNumber -lt 17763) {
+    } elseif ([int]$localOsInfo.BuildNumber -lt 17763) {
       $wingetEnabledForManagement = $false
-      Write-ScriptLog "WinGet auf Verwaltungsserver $env:COMPUTERNAME übersprungen: Windows-Server-Build $($localOsInfo.BuildNumber) liegt vor Server 2019."
+      Write-ScriptLog "WinGet auf Verwaltungsserver $env:COMPUTERNAME übersprungen: Windows-Build $($localOsInfo.BuildNumber) liegt unter 17763."
     }
   }
   catch {

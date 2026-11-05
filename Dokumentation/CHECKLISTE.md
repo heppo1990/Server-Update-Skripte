@@ -4,6 +4,8 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 ## Aktuell
 
+- [ ] **Ältere Windows-Ziele:** Auf einem Build unter 17763 die Verteilung ohne WinGet-Transfer und NuGet-Rückfrage sowie die kurze JEA-Finalisierung über schtasks.exe bestätigen.
+
 - [ ] **Server Core:** Überspringen von WinGet in Check, Install und Verteilung bestätigen. Chocolatey und Windows Update separat prüfen. Auf Nicht-AD-Hyper-V Server 2019 Core die Endpunkt-Neueinrichtung und Chocolatey-Abfrage per Clientzertifikat bestätigen.
 
 - [ ] **1. WinGet-Abschlussabfrage und Quellenreset:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. Startverweigerung und nicht verfügbare AppX-Abfrage fallen auf die signaturgeprüfte portable CLI zurück. Archivdownloads erhalten ein größeres Budget mit Fortschritts-, Größen- und Stillstandsüberwachung; Quellenreset maximal 180 Sekunden. Erstlauf nach Clientbereitstellung, Quellenaktualisierung im Suchkonto und frischer Abschlussabfrage prüfen. Nachlauf innerhalb von 24 Stunden und Monatswartung nach 30 Tagen bestätigen. Vorhandene CLI vor Reparatur starten; portable Beschaffung verwendet den dauerhaften Archivcache und überwachte Downloads innerhalb des Reparaturbudgets. Fehlgeschlagene Beschaffung beendet die WinGet-Prüfung ohne erneuten Download beim Reset.

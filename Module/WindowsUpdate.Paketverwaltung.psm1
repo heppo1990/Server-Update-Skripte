@@ -2439,17 +2439,21 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $isWindowsServer2019 = $false
             $portableFallbackSupported = $false
             $wingetInstallScriptSupported = $true
-            $wingetServerUnsupported = $false
+            $wingetBuildUnsupported = $false
             try {
                 $osInformation = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
                 $isWindowsServer2019 = ([int]$osInformation.ProductType -gt 1) -and ([int]$osInformation.BuildNumber -eq 17763)
                 $portableFallbackSupported = ([int]$osInformation.BuildNumber -ge 17763)
-                if ([int]$osInformation.ProductType -gt 1 -and [int]$osInformation.BuildNumber -lt 17763) {
+                if ([int]$osInformation.BuildNumber -lt 17763) {
                     $wingetInstallScriptSupported = $false
-                    $wingetServerUnsupported = $true
+                    $wingetBuildUnsupported = $true
                 }
             }
             catch { }
+            if ($wingetBuildUnsupported) {
+                $result += [PSCustomObject]@{ Manager='Winget'; Available=$false; Success=$true; Skipped=$true; SkipReason='Windows-Build älter als 17763'; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }
+                return @($result)
+            }
             $wingetPath = if ($PreferPortableWinGet) { $null } else { Resolve-WingetExecutable }
             $wingetBootstrapMessage = ''
             $wingetDiagnosticOutput = ''
@@ -2518,10 +2522,6 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $wingetDiagnosticOutput += "Lokale WinGet-CLI:`r`n$($installedWingetHealth.DiagnosticOutput)`r`nWinGet-GitHub-Extraktion:`r`n$githubFailure`r`n"
                     }
                 }
-            }
-            if ($wingetServerUnsupported) {
-                $result += [PSCustomObject]@{ Manager='Winget'; Available=$false; Success=$true; Skipped=$true; SkipReason='Windows Server vor Server 2019'; ExitCode=$null; Packages=@(); AvailableOutput=''; ActionOutput='' }
-                return @($result)
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetInstallScriptSupported) {
                 $wingetPreflightHealth = Test-WingetExecutable -Path $wingetPath

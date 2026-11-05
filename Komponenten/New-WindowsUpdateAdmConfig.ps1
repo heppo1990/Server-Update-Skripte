@@ -238,6 +238,8 @@ try {
     
     if ($ModulesVerifiedCurrent -or $offlineModulesPresent) {
         Write-SetupLog 'PSGallery-Konfiguration übersprungen; PSWindowsUpdate wird aus dem bereitgestellten Offline-Paket gepflegt.' 'INFO'
+    } elseif (-not $nugetReady) {
+        Write-SetupLog 'PSGallery-Abfrage über PowerShellGet ausgelassen; Module werden bei Bedarf direkt bezogen.' 'INFO'
     } else {
     try {
         $PSGallery = Get-PSRepository -Name PSGallery -ErrorAction Stop
@@ -853,7 +855,15 @@ try {
             $startAt = (Get-Date).AddMinutes(1)
             $startDate = $startAt.ToString('MM/dd/yyyy', [Globalization.CultureInfo]::InvariantCulture)
             $startTime = $startAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
-            $taskCommand = '"{0}" {1}' -f $localPowerShell, $arguments
+            $launcherPath = Join-Path $PSScriptRoot 'Finalize-JEA.ps1'
+            $launcherSource = @"
+`$ErrorActionPreference = 'Stop'
+`$process = Start-Process -FilePath '$($localPowerShell.Replace("'", "''"))' -ArgumentList '$($arguments.Replace("'", "''"))' -Wait -PassThru -WindowStyle Hidden
+exit `$process.ExitCode
+"@
+            $taskCommand = '"{0}" -NoProfile -ExecutionPolicy Bypass -File "{1}"' -f $localPowerShell, $launcherPath
+            if ($taskCommand.Length -gt 261) { throw 'Der kurze Aufruf der JEA-Finalisierung überschreitet das schtasks.exe-Limit.' }
+            [IO.File]::WriteAllText($launcherPath, $launcherSource, [Text.UTF8Encoding]::new($true))
             $createOutput = & $schtasks /Create /TN $taskName /SC ONCE /SD $startDate /ST $startTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
             if ($LASTEXITCODE -ne 0) {
                 throw "Die JEA-Finalisierungsaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())"

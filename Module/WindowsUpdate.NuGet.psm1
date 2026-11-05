@@ -61,6 +61,9 @@ $updaterDefinition
     $installedModule = Get-Module -ListAvailable -Name PackageManagement -ErrorAction SilentlyContinue |
         Sort-Object Version -Descending | Select-Object -First 1
     try {
+        $nugetProviders = @(Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue |
+            Where-Object { [version]$_.Version -ge [version]'2.8.5.201' })
+        if ($nugetProviders.Count -eq 0) { return $true }
         $galleryModule = Find-Module -Name PackageManagement -Repository PSGallery -ErrorAction Stop
         $latestVersion = [version]$galleryModule.Version
     }

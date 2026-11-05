@@ -491,11 +491,11 @@ function Invoke-WindowsUpdateWinRMDeployment {
             $targetOsForWinGet.InstallationType -eq 'Server Core' -and [int]$targetOsForWinGet.BuildNumber -eq 17763 -and
             $targetOsForWinGet.Caption -like 'Microsoft Hyper-V Server*'
         if ($targetOsForWinGet.InstallationType -eq 'Server Core' -or
-            ([int]$targetOsForWinGet.ProductType -gt 1 -and [int]$targetOsForWinGet.BuildNumber -lt 17763)) {
+            [int]$targetOsForWinGet.BuildNumber -lt 17763) {
             $EnableWingetUpdates = $false
             $ExpectedWinGetUpdateOnly = $false
             $ExpectedWinGetMaintenanceOnly = $false
-            $skipReason = if ($targetOsForWinGet.InstallationType -eq 'Server Core') { 'Server Core' } else { 'Windows Server älter als 2019' }
+            $skipReason = if ($targetOsForWinGet.InstallationType -eq 'Server Core') { 'Server Core' } else { 'Windows-Build älter als 17763' }
             Write-DeployLog "[$Servername] WinGet-Bereitstellung ausgelassen: $skipReason."
         }
 
