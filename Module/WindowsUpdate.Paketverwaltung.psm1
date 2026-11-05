@@ -476,7 +476,7 @@ function Invoke-WindowsUpdatePackageManagers {
     # bleiben bei den aufrufenden Skripten.
     $packageScript = {
 
-        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$SourceResetPerformed = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true, [bool]$PreferPortableWinGet = $false, [bool]$UseJeaForMachineWingetUpdates = $false, [bool]$UseJeaForChocolateyUpdates = $false)
+        param([string]$ExecutionMode, [bool]$UseWinget, [bool]$UseChocolatey, [bool]$RequestWinGetSourceReset = $false, [string]$ExcludedWinGetIds = '', [string]$ExcludedChocolateyIds = '', [bool]$SourcePackageRefreshPerformed = $false, [bool]$IncludeInteractiveUserUpdates = $true, [bool]$PreferPortableWinGet = $false, [bool]$UseJeaForMachineWingetUpdates = $false, [bool]$UseJeaForChocolateyUpdates = $false, [bool]$ConfirmWinGetSource = $false)
 
 # BEGIN GENERATED DOWNLOAD CACHE
 function Invoke-WindowsUpdateCachedDownload {
@@ -2455,7 +2455,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             $monthlySourceResetPerformed = $false
             $appInstallerRegistrationChanged = $false
             $wingetQuerySources = @()
-            $wingetModuleUseAllowed = $true
+            $wingetModuleUseAllowed = -not $ConfirmWinGetSource
             if ($PreferPortableWinGet) {
                 if (-not $portableFallbackSupported) {
                     $result += [PSCustomObject]@{
@@ -2583,102 +2583,60 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             }
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
                 try {
-                    # Eine Quelle mit "Updated: Never" ist kein gültiger
-                    # Ausgangspunkt für eine Upgrade-Suche. Insbesondere darf
-                    # ein Teilergebnis (z. B. Notepad++) nicht darüber
-                    # hinwegtäuschen, dass weitere Pakete im alten Katalog
-                    # fehlen. In diesem Fall das aktuelle offizielle
-                    # Quellenpaket online vergleichen und bei Bedarf im
-                    # Benutzerkontext registrieren; der zentrale Resetpfad
-                    # prüft weiterhin den 24-Stunden-Schutz.
-                    $sourceNeedsRecovery = $false
-                    try {
-                        $sourceArgumentList = @('source', 'list', '--name', 'winget', '--disable-interactivity')
-                        $quotedSourceArguments = foreach ($sourceArgument in $sourceArgumentList) {
-                            $sourceArgument = [string]$sourceArgument
-                            if ($sourceArgument -match '[\s"]') { '"' + $sourceArgument.Replace('"', '\"') + '"' } else { $sourceArgument }
-                        }
-                        $sourceStartInfo = [Diagnostics.ProcessStartInfo]::new()
-                        $sourceStartInfo.FileName = $wingetPath
-                        $sourceStartInfo.Arguments = $quotedSourceArguments -join ' '
-                        $sourceStartInfo.WorkingDirectory = Split-Path -Parent $wingetPath
-                        $sourceStartInfo.UseShellExecute = $false
-                        $sourceStartInfo.CreateNoWindow = $true
-                        $sourceStartInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
-                        $sourceStartInfo.RedirectStandardOutput = $true
-                        $sourceStartInfo.RedirectStandardError = $true
-                        $sourceProcess = [Diagnostics.Process]::new()
-                        try {
-                            $sourceProcess.StartInfo = $sourceStartInfo
-                            if (-not $sourceProcess.Start()) { throw 'WinGet-Quellendetails konnten nicht gestartet werden.' }
-                            $sourceStdoutTask = $sourceProcess.StandardOutput.ReadToEndAsync()
-                            $sourceStderrTask = $sourceProcess.StandardError.ReadToEndAsync()
-                            if (-not $sourceProcess.WaitForExit(180000)) {
-                                try { $sourceProcess.Kill() } catch { }
-                                throw 'WinGet-Quellendetails überschritten das Zeitlimit von 180 Sekunden.'
-                            }
-                            $sourceProcess.WaitForExit()
-                            $sourceDetailsOutput = @($sourceStdoutTask.GetAwaiter().GetResult(), $sourceStderrTask.GetAwaiter().GetResult()) |
-                                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
-                            $sourceDetailsOutput = [regex]::Replace(($sourceDetailsOutput -join [Environment]::NewLine), '\x1B\[[0-?]*[ -/]*[@-~]', '')
-                            if ([int]$sourceProcess.ExitCode -eq 0) {
-                            $updatedMatch = [regex]::Match($sourceDetailsOutput, '(?im)^\s*(?:Updated|Aktualisiert)\s*:?\s+(?<Value>.+?)\s*$')
-                            if ($updatedMatch.Success -and $updatedMatch.Groups['Value'].Value.Trim() -match '^(?i:Never|Nie)$') {
-                                $sourceNeedsRecovery = $true
-                                $wingetBootstrapMessage += " WinGet-Quelle 'winget' meldet Aktualisiert=Nie; prüfe das aktuelle offizielle Quellenpaket und initialisiere die Quelle vor der Suche neu."
-                            }
+                    $sourceStatus = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source','list','--name','winget','--disable-interactivity') -TimeoutSeconds 45
+                    $updatedMatch = [regex]::Match([string]$sourceStatus.Output, '(?im)^\s*(?:Updated|Aktualisiert)\s*:?\s+(?<Value>.+?)\s*$')
+                    $sourceNeedsRecovery = $updatedMatch.Success -and $updatedMatch.Groups['Value'].Value.Trim() -match '^(?i:Never|Nie)$'
+                    if ($ConfirmWinGetSource -and ([int]$sourceStatus.ExitCode -ne 0 -or -not $updatedMatch.Success -or $sourceNeedsRecovery)) {
+                        throw "WinGet-Quelle winget in frischer Verbindung nicht als aktualisiert bestätigt: $($sourceStatus.Output)"
+                    }
+                    if ($sourceNeedsRecovery) {
+                        $wingetBootstrapMessage += " WinGet-Quelle 'winget' meldet Aktualisiert=Nie; prüfe das offizielle Quellenpaket."
+                    }
+                    if (-not $ConfirmWinGetSource) {
+                        $refreshSourcePackage = $RequestWinGetSourceReset -or $SourcePackageRefreshPerformed -or $sourceNeedsRecovery
+                        $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser -Refresh:$refreshSourcePackage -RepairStaleSource:$sourceNeedsRecovery
+                        if ($sourcePackageRegistration.CleanupDiagnostic) { $wingetDiagnosticOutput += "Quellenpaket-Bereinigung: $($sourcePackageRegistration.CleanupDiagnostic)`r`n" }
+                        if ($sourcePackageRegistration.Output -match '__WINGETSOURCE__SUCCESS') {
+                            if ($sourcePackageRegistration.Refreshed) {
+                                $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer nach leerer Abfrage erneuert (Version $($sourcePackageRegistration.Version))."
+                            } else {
+                                $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer verfügbar (Version $($sourcePackageRegistration.Version))."
                             }
                         }
-                        finally { $sourceProcess.Dispose() }
-                    }
-                    catch {
-                        # Diagnose der Quellenzeit ist ein zusätzlicher
-                        # Integritätscheck. Ein nicht auswertbarer Detailsaufruf
-                        # darf den regulären Check nicht selbst abbrechen.
-                        $wingetDiagnosticOutput += "WinGet-Quellenstatus konnte vorab nicht ausgewertet werden:`r`n$($_.Exception.ToString())`r`n"
-                    }
-                    $refreshSourcePackage = $SourceResetPerformed -or $SourcePackageRefreshPerformed -or $sourceNeedsRecovery
-                    $sourcePackageRegistration = Ensure-WinGetSourcePackageForCurrentUser -Refresh:$refreshSourcePackage -RepairStaleSource:$sourceNeedsRecovery
-                    if ($sourcePackageRegistration.CleanupDiagnostic) { $wingetDiagnosticOutput += "Quellenpaket-Bereinigung: $($sourcePackageRegistration.CleanupDiagnostic)`r`n" }
-                    if ($sourcePackageRegistration.Output -match '__WINGETSOURCE__SUCCESS') {
-                        if ($sourcePackageRegistration.Refreshed) {
-                            $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer nach leerer Abfrage erneuert (Version $($sourcePackageRegistration.Version))."
-                        } else {
-                            $wingetBootstrapMessage += " WinGet-Quellenpaket für den aktuellen Benutzer verfügbar (Version $($sourcePackageRegistration.Version))."
+                        if ($sourcePackageRegistration.Repaired -and -not $RequestWinGetSourceReset) {
+                            $sourceVersionText = [string]$sourcePackageRegistration.Version
+                            $reasonText = "WinGet-Quellenpaket V2 wurde gezielt neu registriert und die Quelle aktualisiert (Version $sourceVersionText)"
+                            $result += [PSCustomObject]@{
+                                Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                                Packages=@(); AvailableOutput=''; ActionOutput="$reasonText; Prüfung in frischer Verbindung erforderlich."
+                                BootstrapMessage=$wingetBootstrapMessage; RetryAfterSourceRepair=$true; RetryReason=$reasonText
+                            }
+                            return @($result)
                         }
-                    }
-                    if ($sourcePackageRegistration.Repaired) {
-                        $sourceVersionText = [string]$sourcePackageRegistration.Version
-                        $reasonText = "WinGet-Quellenpaket V2 wurde gezielt neu registriert und die Quelle aktualisiert (Version $sourceVersionText)"
-                        $result += [PSCustomObject]@{
-                            Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
-                            Packages=@(); AvailableOutput=''; ActionOutput="$reasonText; Prüfung in frischer Verbindung erforderlich."
-                            BootstrapMessage=$wingetBootstrapMessage; RetryAfterSourceRepair=$true; RetryReason=$reasonText
+                        if (-not $RequestWinGetSourceReset -and ($sourcePackageRegistration.Changed -or $appInstallerRegistrationChanged -or $sourceNeedsRecovery)) {
+                            # Registrierung und Quellenpflege zentral außerhalb der
+                            # ersten Abfrage abschließen. Der zentrale Ablauf führt
+                            # den vollständigen Quellenreset aus und startet danach
+                            # eine frische Verbindung.
+                            $sourceVersionText = [string]$sourcePackageRegistration.Version
+                            $reasonText = if ($appInstallerRegistrationChanged) {
+                                'App-Installer-Registrierung geändert'
+                            } elseif ($sourceNeedsRecovery) {
+                                "WinGet-Quelle meldet Aktualisiert=Nie; Quellenpaket $sourceVersionText geprüft/erneuert"
+                            } else {
+                                "Quellenpaket $sourceVersionText registriert/erneuert"
+                            }
+                            $result += [PSCustomObject]@{
+                                Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                                Packages=@(); AvailableOutput=''; ActionOutput="$reasonText; zentrale Quelleninitialisierung und Prüfung in frischer Verbindung erforderlich."
+                                BootstrapMessage=$wingetBootstrapMessage; RetryAfterSourceReset=$true; RetryReason=$reasonText
+                            }
+                            return @($result)
                         }
-                        return @($result)
-                    }
-                    if ($sourcePackageRegistration.Changed -or $appInstallerRegistrationChanged -or $sourceNeedsRecovery) {
-                        # Registrierung und Quellenpflege zentral außerhalb der
-                        # ersten Abfrage abschließen. Der zentrale Ablauf führt
-                        # den vollständigen Quellenreset aus und startet danach
-                        # eine frische Verbindung.
-                        $sourceVersionText = [string]$sourcePackageRegistration.Version
-                        $reasonText = if ($appInstallerRegistrationChanged) {
-                            'App-Installer-Registrierung geändert'
-                        } elseif ($sourceNeedsRecovery) {
-                            "WinGet-Quelle meldet Aktualisiert=Nie; Quellenpaket $sourceVersionText geprüft/erneuert"
-                        } else {
-                            "Quellenpaket $sourceVersionText registriert/erneuert"
-                        }
-                        $result += [PSCustomObject]@{
-                            Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
-                            Packages=@(); AvailableOutput=''; ActionOutput="$reasonText; zentrale Quelleninitialisierung und Prüfung in frischer Verbindung erforderlich."
-                            BootstrapMessage=$wingetBootstrapMessage; RetryAfterSourceReset=$true; RetryReason=$reasonText
-                        }
-                        return @($result)
                     }
                 }
                 catch {
+                    if ($ConfirmWinGetSource) { throw }
                     $wingetPreparationSucceeded = $false
                     $wingetBootstrapMessage += ' WinGet-Quellenpaket konnte für den aktuellen Benutzer nicht registriert werden; Details im Log.'
                     $wingetDiagnosticOutput += "WinGet-Quellenpaket:`r`n$($_.Exception.ToString())`r`n$($_.InvocationInfo.PositionMessage)`r`n$($_.ScriptStackTrace)`r`n"
@@ -2697,24 +2655,32 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
                 $sourceResetState = Get-WingetSourceResetState
                 $monthlySourceResetState = Get-WingetMonthlySourceResetState
-                if ($SourceResetPerformed) {
-                    # Der vorgeschaltete JEA-Reset betrifft dessen eigenes Profil.
-                    # Reset und Suche müssen zusätzlich unter derselben Identität laufen.
-                    $contextReset = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source','reset','--name','winget','--force','--disable-interactivity') -TimeoutSeconds 180
-                    if ([int]$contextReset.ExitCode -ne 0) { throw "WinGet-Quellenreset im Suchkontext fehlgeschlagen: Exitcode=$($contextReset.ExitCode); $($contextReset.Output)" }
+                if ($RequestWinGetSourceReset) {
+                    if ($sourceResetState.Allowed) {
+                        $contextReset = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source','reset','--name','winget','--force','--disable-interactivity') -TimeoutSeconds 180
+                        if ([int]$contextReset.ExitCode -ne 0) { throw "WinGet-Quellenreset im Suchkontext fehlgeschlagen: Exitcode=$($contextReset.ExitCode); $($contextReset.Output)" }
+                    }
                     $contextUpdate = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source','update','--name','winget','--disable-interactivity') -TimeoutSeconds 180
                     if ([int]$contextUpdate.ExitCode -ne 0 -or [string]$contextUpdate.Output -match '(?im)^\s*(Abgebrochen|Cancelled|Canceled|Fehler beim Versuch|Failed)') { throw "WinGet-Quellenupdate im Suchkontext nicht bestätigt: $($contextUpdate.Output)" }
                     $contextUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-                    $wingetBootstrapMessage += " WinGet-Quelle winget im tatsächlichen Suchkontext '$contextUser' zurückgesetzt und aktualisiert; kundeneigene Quellen bleiben erhalten."
-                    # Ein Quellenreset im vorgeschalteten Wiederherstellungspfad
-                    # zählt ebenfalls für beide Schutzintervalle.
-                    try {
-                        Save-WingetSourceResetState -State $sourceResetState
-                        Save-WingetSourceResetState -State $monthlySourceResetState
+                    if ($sourceResetState.Allowed) {
+                        $wingetBootstrapMessage += " WinGet-Quelle winget im Suchkonto '$contextUser' zurückgesetzt und aktualisiert."
+                        try {
+                            Save-WingetSourceResetState -State $sourceResetState
+                            Save-WingetSourceResetState -State $monthlySourceResetState
+                        }
+                        catch { $wingetBootstrapMessage += " WinGet-Resetzeit konnte nicht gespeichert werden: $($_.Exception.Message)" }
+                    } else {
+                        $wingetBootstrapMessage += " WinGet-Quelle winget im Suchkonto '$contextUser' aktualisiert. Der letzte Reset liegt weniger als 24 Stunden zurück."
                     }
-                    catch { $wingetDiagnosticOutput += "Zeitpunkt des WinGet-Quellenresets konnte nicht gespeichert werden:`r`n$($_.Exception.ToString())`r`n" }
+                    $result += [PSCustomObject]@{
+                        Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
+                        Packages=@(); AvailableOutput=''; ActionOutput=''; BootstrapMessage=$wingetBootstrapMessage
+                        DiagnosticOutput=$wingetDiagnosticOutput; ConfirmWinGetSource=$true
+                    }
+                    return @($result)
                 }
-                elseif ($monthlySourceResetState.Allowed -and $sourceResetState.Allowed) {
+                elseif (-not $ConfirmWinGetSource -and $monthlySourceResetState.Allowed -and $sourceResetState.Allowed) {
                     $result += [PSCustomObject]@{
                         Manager='Winget'; Available=$true; Success=$true; Skipped=$false; SkipReason=''; ExitCode=0
                         Packages=@(); AvailableOutput=''; ActionOutput='Monatlicher Quellenreset ist fällig; zentrale Quelleninitialisierung und Prüfung in frischer Verbindung erforderlich.'
@@ -2727,7 +2693,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 }
             }
             if ($ExecutionMode -eq 'Check' -and $wingetPreparationSucceeded) {
-                if (-not $wingetPortableMode) {
+                if (-not $wingetPortableMode -and -not $ConfirmWinGetSource) {
                 # Microsoft.WinGet.Client 1.29.380+ benötigt für Aufrufe in
                 # erhöhten Sitzungen auch einen App-Installer derselben
                 # Mindestgeneration. Bei einem älteren DesktopAppInstaller
@@ -2865,7 +2831,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $availableOutput = [string]$cliQueryResult.Output
                     $wingetQuerySources = @($cliQueryResult.Sources)
                     $wingetCliFallback = $true
-                    $cliCompatibilitySummary = "WinGet-CLI-Abfrage statt PowerShell-Modul wegen Versionskonflikt; Quellen $(@($cliQueryResult.Sources) -join ', ')."
+                    $cliCompatibilitySummary = "WinGet-CLI-Abfrage; Quellen $(@($cliQueryResult.Sources) -join ', ')."
                     if (@($cliQueryResult.FailedSources).Count -gt 0) {
                         $cliCompatibilitySummary += " Quellenfehler: $(@($cliQueryResult.FailedSources).Count)."
                     }
@@ -3067,7 +3033,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 # Lizenztexte tun dies nicht. Quellenfehler können ebenfalls
                 # mit "winget" enden und dürfen daher nicht als Paket gelten.
                 if ($ExecutionMode -eq 'Check' -and $packageLines.Count -eq 0 -and $sourceFailureLines.Count -eq 0) {
-                    if ($SourceResetPerformed -or $SourcePackageRefreshPerformed) {
+                    if ($RequestWinGetSourceReset -or $SourcePackageRefreshPerformed) {
                         # Die äußere Wiederholungslogik hat Quellenreset oder
                         # Quellenpaketprüfung bereits ausgeführt. Eine weiterhin
                         # leere, fehlerfreie Suche ist jetzt ein gültiges Ergebnis;
@@ -3528,11 +3494,11 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
                     }
                     $firstDiagnostic += [Environment]::NewLine + "JEA-Clientreparatur-Ausgabe:" + [Environment]::NewLine + [string]$installResult.Output
-                    $firstWingetResult | Add-Member -NotePropertyName BootstrapMessage -NotePropertyValue "WinGet-Clientreparatur über die signaturgeprüfte winget-install.ps1 in JEA erfolgreich; die Prüfung wird in einer neuen Verbindung wiederholt." -Force
+                    $firstWingetResult | Add-Member -NotePropertyName BootstrapMessage -NotePropertyValue "WinGet-Client über JEA bereitgestellt; die Prüfung wird in einer neuen Verbindung wiederholt." -Force
                     $wingetInstallScriptRan = $true
                     Write-CommonLog $WriteLog "WinGet-Clientreparatur auf $ComputerName über JEA erfolgreich."
                     if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
-                        Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
+                        Write-CommonLog $WriteLog ("WinGet-Clientwartung auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
                     }
                 }
                 catch {
@@ -3621,12 +3587,12 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             } elseif ($retryRequiresSourcePackageRefresh) {
                 'Erneuerung des WinGet-Quellenpakets und einmalige Wiederholung'
             } else { 'einmalige Wiederholung' }
-            $sourceResetPerformed = $false
+            $requestWinGetSourceReset = $false
             Write-CommonLog $WriteLog "WinGet auf ${ComputerName}: $retryReason; starte $retryDescription über eine neue Verbindung."
             try {
                 if ($clientAcquisitionFailed) { throw 'CLI-Beschaffung fehlgeschlagen; kein erneuter Download oder Quellenreset im selben Lauf. Details im Reparaturprotokoll.' }
                 if ($retryRuntimeRepairRequired -and -not $wingetInstallScriptRan -and -not $retryPreferPortableWinGet) {
-                    Write-CommonLog $WriteLog "Zentraler WinGet-Reparaturablauf auf ${ComputerName}: signaturgeprüfte winget-install.ps1-Clientreparatur über JEA und Windows PowerShell 5.1; Paket-Installationen und -Deinstallationen sind nicht freigegeben."
+                    Write-CommonLog $WriteLog "WinGet-Wartung auf ${ComputerName}: prüfe den Client über JEA und repariere ihn bei Bedarf."
                     try {
                     if ($hasCheckTimeout) { $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(48) }
                     $installResult = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 60 -MaxSeconds 2820)
@@ -3635,9 +3601,13 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                         $retryReason = 'Portable Microsoft-CLI wurde erfolgreich bereitgestellt'
                     }
                     $wingetInstallScriptRan = $true
-                    Write-CommonLog $WriteLog "Zentrale WinGet-Clientreparatur auf $ComputerName über JEA erfolgreich."
+                    if ([string]$installResult.Output -match 'Vorhandene CLI.*__WINGET_PORTABLE__') {
+                        Write-CommonLog $WriteLog "Vorhandene portable WinGet-CLI auf $ComputerName über JEA geprüft und weiterverwendet."
+                    } else {
+                        Write-CommonLog $WriteLog "WinGet-Client auf $ComputerName über JEA geprüft und einsatzbereit."
+                    }
                     if (-not [string]::IsNullOrWhiteSpace([string]$installResult.Output)) {
-                        Write-CommonLog $WriteLog ("winget-install.ps1-Ausgabe auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
+                        Write-CommonLog $WriteLog ("WinGet-Clientwartung auf " + $ComputerName + ": " + ($installResult.Output -replace '\s+', ' '))
                     }
                     } catch {
                         $clientAcquisitionFailed = $true
@@ -3659,40 +3629,16 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     if ($hasCheckTimeout -and (Get-WinGetRemainingSeconds) -le $appxSettleDelaySeconds) { throw [TimeoutException]::new('WinGet-Gesamtzeitlimit vor AppX-Wiederholung erreicht.') }
                     Start-Sleep -Seconds $appxSettleDelaySeconds
                 }
-                if ($retryRequiresSourceReset) {
-                    try {
-                    $sourceResetResult = $null
-                    if ($isLocalTarget) {
-                        $sourceResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 180) -WriteLog $WriteLog
-                    } else {
-                        $sourceResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 180) -WriteLog $WriteLog
-                    }
-                    $sourceResetPerformed = if ($sourceResetResult -and $sourceResetResult.PSObject.Properties['ResetPerformed']) {
-                        [bool]$sourceResetResult.ResetPerformed
-                    } else { $true }
-                    if ($sourceResetPerformed) {
-                        Write-CommonLog $WriteLog "WinGet-Quellen auf $ComputerName zurückgesetzt; Wiederholungsprüfung startet in einer neuen Sitzung."
-                    } else {
-                        Write-CommonLog $WriteLog "WinGet-Quellenreset auf $ComputerName wegen des 24-Stunden-Schutzes ausgelassen; WinGet-Quellenpaket wird geprüft und die Abfrage in einer neuen Sitzung wiederholt."
-                    }
-                    } catch {
-                        Write-CommonLog $WriteLog "WinGet-Quellenreset auf ${ComputerName} nicht abgeschlossen: $($_.Exception.Message). Abschlussabfrage wird trotzdem versucht." $true
-                        $sourceResetPerformed = $false
-                    }
-                }
-                # Nur tatsächlich bestätigte Quellenpflege darf eine leere
-                # Wiederholungsabfrage als gültig freigeben. Ein angeforderter,
-                # aber fehlgeschlagener JEA-Reset (z. B. Zugriff verweigert)
-                # und ein bloß gestarteter Reparaturversuch zählen nicht.
-                # Eine explizit angeforderte Quellenpaket-Erneuerung wird im
-                # folgenden Worker ausgeführt und dort bei Fehlschlag gemeldet.
-                $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $sourceResetPerformed
+                # Die Quellenpflege und die Reset-Zeitstempel gehören zum
+                # Konto der Paketsuche. JEA prüft und repariert den Client.
+                $requestWinGetSourceReset = $retryRequiresSourceReset
+                $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $requestWinGetSourceReset
 
                 $retryParameters = @{
                     ComputerName = $ComputerName
                     AuthInfo = $AuthInfo
                     ScriptBlock = $packageScript
-                    ArgumentList = @($Mode, $true, $false, $sourceResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet, ($Mode -eq 'Install' -and -not $isLocalTarget))
+                    ArgumentList = @($Mode, $true, $false, $requestWinGetSourceReset, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet, ($Mode -eq 'Install' -and -not $isLocalTarget))
                     IsLocalTarget = $isLocalTarget
                     OperationName = "WinGet-Wiederholungsprüfung auf $ComputerName"
                     WriteLog = $WriteLog
@@ -3719,36 +3665,13 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 # weiteren neuen Verbindung.
                 if (($retryResetProperty -and [bool]$retryResetProperty.Value) -or
                     ($retryRefreshProperty -and [bool]$retryRefreshProperty.Value)) {
-                    $followupResetPerformed = $false
-                    if ($retryResetProperty -and [bool]$retryResetProperty.Value) {
-                        Write-CommonLog $WriteLog "WinGet auf $ComputerName blieb nach der ersten Wiederholung leer; Quellenreset wird jetzt ausgeführt, danach folgt eine weitere neue Verbindung."
-                        try {
-                        $followupResetResult = $null
-                        if ($isLocalTarget) {
-                            $followupResetResult = Reset-WindowsUpdateLocalWinGetSources -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 180) -WriteLog $WriteLog
-                        } else {
-                            $followupResetResult = Reset-WindowsUpdateRemoteWinGetSources -ComputerName $ComputerName -AuthInfo $AuthInfo -TimeoutSeconds (Get-WinGetRemainingSeconds -ReserveSeconds 45 -MaxSeconds 180) -WriteLog $WriteLog
-                        }
-                        $followupResetPerformed = if ($followupResetResult -and $followupResetResult.PSObject.Properties['ResetPerformed']) {
-                            [bool]$followupResetResult.ResetPerformed
-                        } else { $true }
-                        } catch {
-                            Write-CommonLog $WriteLog "WinGet-Folgequellenreset auf ${ComputerName} nicht abgeschlossen; Abschlussabfrage wird mit verbleibendem Budget versucht: $($_.Exception.Message)" $true
-                            $followupResetPerformed = $false
-                        }
-                        $retryRequiresSourceReset = $followupResetPerformed
-                    }
-                    else {
-                        Write-CommonLog $WriteLog "WinGet auf $ComputerName verlangt nach der ersten Wiederholung eine Quellenpaket-Erneuerung; starte sie vor einer weiteren neuen Verbindung."
-                        $retryRequiresSourcePackageRefresh = $true
-                    }
-
-                    $sourcePackageRefreshPerformed = $retryRequiresSourcePackageRefresh -or $followupResetPerformed
+                    Write-CommonLog $WriteLog "WinGet auf $ComputerName benötigt nach der Wiederholung Quellenpflege im Suchkonto."
+                    $sourcePackageRefreshPerformed = $true
                     $followupParameters = @{
                         ComputerName = $ComputerName
                         AuthInfo = $AuthInfo
                         ScriptBlock = $packageScript
-                        ArgumentList = @($Mode, $true, $false, $followupResetPerformed, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet, ($Mode -eq 'Install' -and -not $isLocalTarget))
+                        ArgumentList = @($Mode, $true, $false, $true, ($ExcludeWinGetIds -join ','), ($ExcludeChocolateyIds -join ','), $sourcePackageRefreshPerformed, $IncludeInteractiveUserUpdates, $retryPreferPortableWinGet, ($Mode -eq 'Install' -and -not $isLocalTarget))
                         IsLocalTarget = $isLocalTarget
                         OperationName = "WinGet-Folgeprüfung auf $ComputerName"
                         WriteLog = $WriteLog
@@ -3776,6 +3699,30 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     $retryResetProperty = $retryResult.PSObject.Properties['RetryAfterSourceReset']
                     $retryRefreshProperty = $retryResult.PSObject.Properties['RetryAfterSourcePackageRefresh']
                     $retryConnectionProperty = $retryResult.PSObject.Properties['RetryFreshConnection']
+                }
+
+                $sourcePreparationMessage = ''
+                if ($retryResult.PSObject.Properties['ConfirmWinGetSource'] -and $retryResult.ConfirmWinGetSource) {
+                    Write-CommonLog $WriteLog "WinGet-Quelle auf $ComputerName im Suchkonto aktualisiert; prüfe in einer frischen Verbindung."
+                    $sourcePreparationResult = $retryResult
+                    $sourcePreparationMessage = [string]$sourcePreparationResult.BootstrapMessage
+                    $retryParameters.ArgumentList[3] = $false
+                    $retryParameters.ArgumentList[6] = $true
+                    $retryParameters.ArgumentList += @($false, $true)
+                    if ($hasCheckTimeout) { $retryParameters.TimeoutSeconds = Get-WinGetRemainingSeconds }
+                    $retryResults = @(Invoke-WindowsUpdatePackageWorker @retryParameters | Where-Object { $_.Manager -eq 'Winget' })
+                    if ($Mode -eq 'Install' -and -not $isLocalTarget) {
+                        $retryResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $retryResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+                    }
+                    if ($retryResults.Count -eq 0) { throw 'WinGet lieferte nach Quellenaktualisierung kein Ergebnis.' }
+                    $retryResult = $retryResults[-1]
+                    $retryDiagnostic += [Environment]::NewLine + [string]$sourcePreparationResult.DiagnosticOutput
+                    $diagnosticProperty = $retryResult.PSObject.Properties['DiagnosticOutput']
+                    if ($diagnosticProperty) { $retryDiagnostic += [Environment]::NewLine + [string]$diagnosticProperty.Value }
+                    $retryResetProperty = $retryResult.PSObject.Properties['RetryAfterSourceReset']
+                    $retryRefreshProperty = $retryResult.PSObject.Properties['RetryAfterSourcePackageRefresh']
+                    $retryConnectionProperty = $retryResult.PSObject.Properties['RetryFreshConnection']
+                    $sourcePackageRefreshPerformed = $true
                 }
 
                 if (($retryResetProperty -and [bool]$retryResetProperty.Value) -or
@@ -3817,7 +3764,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 foreach ($wingetResult in $retryResults) {
                     $bootstrapProperty = $wingetResult.PSObject.Properties['BootstrapMessage']
                     $existingMessage = if ($bootstrapProperty) { [string]$bootstrapProperty.Value } else { '' }
-                    $combinedBootstrapMessage = @($initialBootstrapMessage, $existingMessage, $retryMessage) |
+                    $combinedBootstrapMessage = @($initialBootstrapMessage, $sourcePreparationMessage, $existingMessage, $retryMessage) |
                         Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
                         Select-Object -Unique
                     Add-Member -InputObject $wingetResult -NotePropertyName BootstrapMessage -NotePropertyValue ($combinedBootstrapMessage -join ' ') -Force
