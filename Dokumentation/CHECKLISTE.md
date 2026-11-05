@@ -17,7 +17,7 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 - [ ] **8. DPAPI und Settings-Rechte:** Geschützte Maildaten sowie dateibezogene ACLs bei Lesen, Bearbeiten, Synchronisieren und SYSTEM-Lauf prüfen; übrigen Skriptordner unverändert lassen.
 - [ ] **9. NuGet-/Modulversionen:** Dynamischen Onlineabgleich und Bereitstellung einer tatsächlich neueren Version prüfen; NuGet-Onlineermittlung meldet derzeit eine Warnung.
 - [ ] **10. PSGallery-Vertrauen:** Modulbereitstellung ohne Änderung der dauerhaften Repository-Vertrauensstellung und ohne unbeabsichtigte Rückfragen bestätigen.
-- [ ] **11. Tatsächlicher Paketversionswechsel:** Nach Installationsversuchen die Version erneut abfragen; Installer-Erfolg allein genügt nicht als Nachweis. Einzelne Paketinstallerfehler bleiben zulässige manuelle Nacharbeit.
+- [ ] **11. Tatsächlicher Paketversionswechsel:** Nach Installationsversuchen die Version erneut abfragen; Installer-Erfolg allein genügt nicht als Nachweis. Einzelne Paketinstallerfehler als manuelle Nacharbeit ausgeben und am Ziel prüfen, dass sie keine Clientreparatur auslösen.
 - [ ] **12. Updater-Bereinigung:** Temporäre Updater-Dateien nach Update mit begrenzten Wiederholungen entfernen und verbleibende Pfade protokollieren.
 - [ ] **13. Cachebereinigung:** Aktivierten Windows-Update-Cache-Reset praktisch prüfen.
 - [ ] **14. Nachinstallations-Logrotation:** Nach mehreren Rotationen höchstens zwei datierte .bak-Dateien je Log bestätigen. Aufgabenanlage und Mail sind bestätigt.

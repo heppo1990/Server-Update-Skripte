@@ -1070,7 +1070,7 @@ if (`$sourceUpdateExitCode -ne 0 -or `$sourceUpdateText -match '(?im)^\s*(?:Abge
 `$sourceDetailsOutput = @(& $quotedWingetPath source list --name winget --disable-interactivity 2>&1)
 `$sourceDetailsExitCode = `$LASTEXITCODE
 `$sourceDetailsText = (`$sourceDetailsOutput | Out-String -Width 300).Trim()
-if (`$sourceDetailsExitCode -ne 0 -or `$sourceDetailsText -match '(?im)^\s*(?:Updated|Aktualisiert)\s*:?\s+(?:Never|Nie)\s*$') {
+if (`$sourceDetailsExitCode -ne 0 -or `$sourceDetailsText -match '(?im)^\s*(?:Updated|Aktualisiert|SourceListUpdated)\s*:?\s+(?:Never|Nie)\s*$') {
     throw "WinGet-Quelle meldet nach Neuinstallation weiterhin 'Aktualisiert: Nie' (Exitcode `$sourceDetailsExitCode): `$sourceDetailsText"
 }
 "Quellenpaket V2 gezielt entfernt und mit Version $downloadVersion neu registriert. Quellenupdate: `$sourceUpdateText`n`$sourceDetailsText"
@@ -1469,7 +1469,7 @@ catch {
                     Test-WingetSourceFailureLine -Line ([string]$_)
                 }).Count -gt 0
                 $successfulEmptyResult = -not $reportedSourceFailure -and
-                    $sourceOutput -match '(?i)(no installed package found matching input criteria|es wurde kein installiertes paket gefunden, das den eingabekriterien entspricht|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar|kein verf.{1,2}gbares upgrade gefunden|keine neueren paketversionen verf.{1,2}gbar|0 upgrades? available|0 paketupdates? verfügbar)'
+                    $sourceOutput -match '(?i)(\bNoInstalledPackageFound\b|no installed package found matching input criteria|es wurde kein installiertes paket gefunden, das den eingabekriterien entspricht|no available upgrade|no upgrades available|keine paketupdates verfügbar|keine aktualisierungen verfügbar|kein verf.{1,2}gbares upgrade gefunden|keine neueren paketversionen verf.{1,2}gbar|0 upgrades? available|0 paketupdates? verfügbar)'
                 $defaultSource = $sourceName
                 $parsedSourceRows = @(Get-WingetUpgradeLines -Output $sourceOutput -DefaultSource $defaultSource)
                 $unconfirmedEmpty = $parsedSourceRows.Count -eq 0 -and -not $successfulEmptyResult
@@ -2584,7 +2584,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             if ($ExecutionMode -in @('Check', 'Install') -and $wingetPath -and $wingetPreparationSucceeded) {
                 try {
                     $sourceStatus = Invoke-WindowsUpdateHiddenProcess -Path $wingetPath -Arguments @('source','list','--name','winget','--disable-interactivity') -TimeoutSeconds 45
-                    $updatedMatch = [regex]::Match([string]$sourceStatus.Output, '(?im)^\s*(?:Updated|Aktualisiert)\s*:?\s+(?<Value>.+?)\s*$')
+                    $updatedMatch = [regex]::Match([string]$sourceStatus.Output, '(?im)^\s*(?:Updated|Aktualisiert|SourceListUpdated)\s*:?\s+(?<Value>.+?)\s*$')
                     $sourceNeedsRecovery = $updatedMatch.Success -and $updatedMatch.Groups['Value'].Value.Trim() -match '^(?i:Never|Nie)$'
                     if ($ConfirmWinGetSource -and ([int]$sourceStatus.ExitCode -ne 0 -or -not $updatedMatch.Success -or $sourceNeedsRecovery)) {
                         throw "WinGet-Quelle winget in frischer Verbindung nicht als aktualisiert bestätigt: $($sourceStatus.Output)"
@@ -3470,11 +3470,11 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(48)
                 Write-CommonLog $WriteLog "Monatliche WinGet-Wartung auf $ComputerName fällig; erweitertes Zeitbudget: 48 Minuten einschließlich Abschlussabfrage; Downloads mit Stillstandsüberwachung."
             }
-            # Jeder fehlgeschlagene WinGet-Aufruf läuft durch denselben
-            # Reparaturpfad, unabhängig davon, ob CLI, Modul, RPC, Quelle oder
-            # ein einzelnes Paket den Fehler gemeldet hat. Der monatliche
-            # Wartungsreset wird unten ebenfalls auf diesen Pfad geleitet.
-            $genericWinGetFailure = -not [bool]$firstWingetResult.Success -and -not $isMonthlyResetOnly
+            # Ein einzelner fehlgeschlagener Installer erfordert keine Clientreparatur.
+            # Explizite Quellen- und Verbindungsfehler behalten ihren Reparaturpfad.
+            $manualActionProperty = $firstWingetResult.PSObject.Properties['RequiresManualAction']
+            $packageFailure = $Mode -eq 'Install' -and $manualActionProperty -and [bool]$manualActionProperty.Value
+            $genericWinGetFailure = -not [bool]$firstWingetResult.Success -and -not $isMonthlyResetOnly -and -not $packageFailure
             if ($genericWinGetFailure -and $hasCheckTimeout) { $wingetCheckDeadline = [DateTime]::UtcNow.AddMinutes(48) }
             if ($genericWinGetFailure -and $preferRememberedPortable) {
                 Remove-Item -LiteralPath $portablePreferencePath -Force -ErrorAction SilentlyContinue
@@ -3732,7 +3732,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet lieferte erneut kein auswertbares Ergebnis.' }
                     throw "Wiederholungsprüfung blieb fehlerhaft: $retryDetail"
                 }
-                if (-not [bool]$retryResult.Success) {
+                $retryManualAction = $retryResult.PSObject.Properties['RequiresManualAction']
+                $retryPackageFailure = $Mode -eq 'Install' -and $retryManualAction -and [bool]$retryManualAction.Value
+                if (-not [bool]$retryResult.Success -and -not $retryPackageFailure) {
                     $retryDetail = ([string]$retryResult.ActionOutput -replace '\s+', ' ').Trim()
                     if ([string]::IsNullOrWhiteSpace($retryDetail)) { $retryDetail = 'WinGet meldete einen Abfragefehler.' }
                     throw "Wiederholungsprüfung fehlgeschlagen: $retryDetail"
@@ -3749,7 +3751,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     }
                 }
                 $retryMessage = if ($retryPreferPortableWinGet) {
-                    'WinGet-Wiederholungsprüfung mit portabler GitHub-CLI in neuer Sitzung erfolgreich.'
+                    'WinGet-Abfrage mit portabler GitHub-CLI in neuer Sitzung abgeschlossen.'
                 } elseif ($sourcePackageRefreshPerformed -and @($retryResult.Packages).Count -eq 0) {
                     'WinGet-Abfrage nach Prüfung des Quellenpakets in neuer Verbindung erfolgreich; keine Paketupdates verfügbar.'
                 } elseif ($retryRequiresSourceReset) {
