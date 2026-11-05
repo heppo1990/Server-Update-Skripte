@@ -692,7 +692,7 @@ if ($ManagementPowerShellResume) {
     }
     $PackageUpdateCount++
     if ($resumedPowerShellManager -eq 'Chocolatey') { $ChocolateyUpdateCount++ } else { $WingetUpdateCount++ }
-    $PackageUpdateDetails += [PSCustomObject]@{ Server=$env:COMPUTERNAME; Manager=$resumedPowerShellManager; Packages=@($managementPowerShellPackage); Success=$true }
+    $PackageUpdateDetails += [PSCustomObject]@{ Server=$env:COMPUTERNAME; Manager=$resumedPowerShellManager; Packages=@($managementPowerShellPackage) }
     Write-ScriptLog "Verwaltungsserver-Update in PowerShell $($PSVersionTable.PSVersion) fortgesetzt; PowerShell $($managementPowerShellPackage.InstalledVersion) → $($managementPowerShellPackage.AvailableVersion) wird als $resumedPowerShellManager-Update gezählt."
     $managementPowerShellTable = Format-WindowsUpdatePackageConsoleTable -ComputerName $env:COMPUTERNAME -Manager $resumedPowerShellManager -Packages @($managementPowerShellPackage)
     foreach ($tableLine in ($managementPowerShellTable -split "`r?`n")) {
@@ -705,17 +705,6 @@ if ($ManagementPowerShellResume) {
     $script:ManagementPowerShellPreflightFailure = [string]$script:ManagementPowerShellUpdateState.Error
     if ([string]::IsNullOrWhiteSpace($script:ManagementPowerShellPreflightFailure)) { $script:ManagementPowerShellPreflightFailure = 'Der Paketmanager konnte PowerShell 7 auf dem Verwaltungsserver nicht aktualisieren.' }
     Write-ScriptLog "WARNUNG: $script:ManagementPowerShellPreflightFailure"
-    if (-not [string]::IsNullOrWhiteSpace([string]$script:ManagementPowerShellUpdateState.Id)) {
-      $failedManagementPackage = [PSCustomObject]@{
-        Name = [string]$script:ManagementPowerShellUpdateState.Name
-        Id = [string]$script:ManagementPowerShellUpdateState.Id
-        InstalledVersion = [string]$script:ManagementPowerShellUpdateState.InstalledVersion
-        AvailableVersion = [string]$script:ManagementPowerShellUpdateState.AvailableVersion
-        Source = [string]$script:ManagementPowerShellUpdateState.Source
-      }
-      $failedManager = if ($script:ManagementPowerShellUpdateState.PSObject.Properties['Manager'] -and $script:ManagementPowerShellUpdateState.Manager) { [string]$script:ManagementPowerShellUpdateState.Manager } else { 'Winget' }
-      $PackageUpdateDetails += [PSCustomObject]@{ Server=$env:COMPUTERNAME; Manager=$failedManager; Packages=@($failedManagementPackage); Success=$false }
-    }
   }
 }
 elseif ($shouldPreflightManagementPowerShell -and ($wingetEnabledForManagement -or $chocolateyEnabledForManagement)) {
@@ -1329,7 +1318,7 @@ foreach ($linuxHost in @($LinuxUpdateDetails | Where-Object { $_.Status -eq 'Upd
 
 if ($ServerADList -ne $null) {
   Write-ScriptLog ''
-  Write-ScriptLog "Verarbeite AD-Serverliste..."
+  Write-ScriptLog "Verarbeite Windows-Zielliste..."
   Write-ScriptLog ''
   
   $RepBody += "<div class='section-title'>🖥️ Windows-Server Updates</div>"
@@ -1350,14 +1339,15 @@ if ($ServerADList -ne $null) {
 
     if (!([String]::IsNullOrWhiteSpace($Servername))) {
       if ($Anzahl -ne 0) { $PercCompl = $index * 100 / $Anzahl } else { $PercCompl = 100 }
-      Write-Progress -Activity "Verarbeite AD-Serverliste" -Status "Verarbeite Server [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
+      Write-Progress -Activity "Verarbeite Windows-Zielliste" -Status "Verarbeite Server [$Servername] (Nr. $index von $Anzahl)" -PercentComplete $PercCompl
 
       Try {
         if ($index -gt 1) {
           Write-ScriptLog ''
           Write-ScriptLog ''
         }
-        Write-ScriptLog "Starte Update-Installation auf AD-Server $Servername..."
+        $targetLabel = if ($Server.IsHypervisor) { 'Hypervisor' } elseif ($Server.IsAdditional) { 'Nicht-AD-Ziel' } else { 'AD-Server' }
+        Write-ScriptLog "Starte Update-Installation auf $targetLabel $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
         $winRmProbe = Test-WindowsUpdateWinRmPorts -ComputerName $Servername -Ports @(5985, 5986) -TimeoutMilliseconds 1500
@@ -1405,20 +1395,15 @@ if ($ServerADList -ne $null) {
             continue
           }
           $packages = @($packageResult.Packages)
-          # Auch gefundene Pakete aus fehlgeschlagenen Installationen in den
-          # Mailbericht aufnehmen. Bisher landeten hier nur erfolgreiche Updates;
-          # dadurch fehlten erkannte WinGet-Pakete in der Paketübersicht.
-          if ($packageResult.Available -and $packages.Count -gt 0) {
+          if ($packageResult.Available -and $packageResult.Success -and -not $packageResult.Skipped -and $packages.Count -gt 0) {
             $existingPackageInfo = @($PackageUpdateDetails | Where-Object { $_.Server -ieq $Servername -and $_.Manager -ieq [string]$packageResult.Manager } | Select-Object -First 1)
             if ($existingPackageInfo.Count -gt 0) {
               $existingPackageInfo[0].Packages = @($existingPackageInfo[0].Packages) + $packages
-              if (-not $packageResult.Success) { $existingPackageInfo[0].Success = $false }
             } else {
               $PackageUpdateDetails += [PSCustomObject]@{
                 Server = $Servername
                 Manager = [string]$packageResult.Manager
                 Packages = @($packages)
-                Success = [bool]$packageResult.Success
               }
             }
           }
@@ -1700,13 +1685,12 @@ foreach ($pendingReboot in $script:PendingPhysicalReboots) {
 
 # Anwendungsupdates in Report einfügen
 if ($PackageUpdateDetails.Count -gt 0) {
-  $RepBody += "<div class='section-title'>📦 Anwendungsupdates</div>"
+  $RepBody += "<div class='section-title'>📦 Installierte Anwendungsupdates</div>"
   foreach ($packageInfo in $PackageUpdateDetails) {
     $packageServerHtml = [System.Net.WebUtility]::HtmlEncode([string]$packageInfo.Server)
     $packageManagerHtml = [System.Net.WebUtility]::HtmlEncode([string]$packageInfo.Manager)
     $RepBody += "<div class='server-title'>Server: $packageServerHtml – $packageManagerHtml</div>"
-    $packageLabel = if ($packageInfo.Success) { 'Aktualisierte Pakete' } else { 'Gefundene Pakete (nicht vollständig aktualisiert)' }
-    $RepBody += "<div class='linux-package-list'><strong>${packageLabel} ($(@($packageInfo.Packages).Count)):</strong>"
+    $RepBody += "<div class='linux-package-list'><strong>Aktualisierte Pakete ($(@($packageInfo.Packages).Count)):</strong>"
     $RepBody += ConvertTo-WindowsUpdatePackageHtmlTable -ComputerName $packageInfo.Server -Manager $packageInfo.Manager -Packages $packageInfo.Packages
     $RepBody += '</div>'
   }

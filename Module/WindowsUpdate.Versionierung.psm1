@@ -3,7 +3,7 @@
 }
 
 function Get-WindowsUpdateScriptsVersion {
-    '5.1.27'
+    '5.1.28'
 }
 
 function Test-WindowsUpdateAdmVersion {
