@@ -74,6 +74,7 @@ function Format-WindowsUpdateConsoleError {
     # Ein Fehlerzähler von null ist ein erfolgreicher Status, keine Meldung.
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*0(?:\D|$)') { return $Message }
     if (Test-WindowsUpdateZeroFailureSummary -Message $Message) { return $Message }
+    if ($Message -match '^WARNUNG: Chocolatey-Prüfung auf [A-Za-z0-9_.-]+ nicht möglich – JEA-Verbindung fehlgeschlagen\.$') { return $Message }
     if ($Message -notmatch '(?i)^\s*(WARNUNG|WARNING|FEHLER\b|ERROR\b|\[WARN\]|\[ERROR\])|^\s*Fehler bei\b|fehlgeschlagen|konnte nicht|UnableToDownload|Access is denied|Zugriff verweigert|Exception|Fehler beim') { return $Message }
 
     $target = $null
@@ -202,6 +203,7 @@ function Test-WindowsUpdateConsoleMessage {
     }
     if ($Message -match '(?i)^\s*(WARNUNG|WARNING|\[WARN\]|\[ERROR\]|FEHLER\b|ERROR\b)|\bfehlgeschlagen\b|\bkonnte nicht\b|aufgetreten!|manuelle Prüfung|manuelle Aktion erforderlich') { return $true }
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:') { return $true }
+    if ($Message -match '^WinGet auf [A-Za-z0-9_.-]+ übersprungen: Auf Server Core nicht unterstützt;') { return $true }
     if ($Message -match '(?i)^\s*(Starte (Update-(Check|Download|Installation)|Windows-Updates) auf|Verarbeite (Windows|AD|Hypervisor)|Gesamtliste nach Zusammenführung|Check abgeschlossen\.|Download abgeschlossen\.|Installation abgeschlossen\.|E-Mail erfolgreich versendet|Mailkonfigurationstest erfolgreich)') { return $true }
     if ($Message -match '(?i)^\s*(Zurückgestellte Kategorien:|Zurückgestellte KBs:|Nachinstallation aktiviert$)') { return $true }
     if ($Message -match '(?i)^\s*(Neue WindowsUpdateAdm-Verteilung nötig für:|Paketupdates auf .+: \d+ Pakete? offen;)' ) { return $true }
