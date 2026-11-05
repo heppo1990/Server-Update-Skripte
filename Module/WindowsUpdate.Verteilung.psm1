@@ -52,7 +52,8 @@ function Test-WindowsUpdateDeploymentConfiguration {
         [bool]$ExpectedWinGetMaintenanceOnly = $true,
         [bool]$ExpectedChocolateyMaintenanceOnly = $true,
         [Parameter(Mandatory)][object]$UpdateSettings,
-        [string]$ManagementComputerName = $env:COMPUTERNAME
+        [string]$ManagementComputerName = $env:COMPUTERNAME,
+        [switch]$RequireCertificateRunAsCompatibility
     )
 
     $certificate = $null
@@ -88,25 +89,39 @@ function Test-WindowsUpdateDeploymentConfiguration {
             $status.WinGetMaintenanceOnly -eq $ExpectedWinGetMaintenanceOnly -and
             $status.ChocolateyMaintenanceOnly -eq $ExpectedChocolateyMaintenanceOnly -and
             ($status.WinGetUpdateOnly -eq $ExpectedWinGetUpdateOnly)) {
+            $compatibility = $rawStatus.PSObject.Properties['CertificateRunAsCompatibility']
+            if ($RequireCertificateRunAsCompatibility -and (-not $compatibility -or -not $compatibility.Value)) {
+                throw 'Der Zertifikat-Kompatibilitätsmodus wurde am JEA-Endpunkt nicht bestätigt.'
+            }
+            if ($certificate -and $compatibility -and $compatibility.Value) {
+                $endpointParameters.ScriptBlock = { Get-WindowsUpdateAdmChocolateyOutdated -ErrorAction Stop }
+                $query = @(Invoke-Command @endpointParameters)
+                if ($query.Count -ne 1 -or -not $query[0].PSObject.Properties['ExitCode'] -or
+                    ($query[0].ExitCode -ne 9009 -and ($query[0].ExitCode -ne 0 -or -not $query[0].Success))) {
+                    throw 'Chocolatey-Abfrage über den JEA-Zertifikatszugang lieferte kein bestätigtes Ergebnis.'
+                }
+            }
             return [PSCustomObject]@{ IsCurrent = $true; Reason = ''; Version = [string]$status.DeploymentVersion }
         }
         $reason = "Konfigurationsversion $($status.DeploymentVersion) oder eingeschränkte Paketmanager-Funktionen weichen vom Sollstand ab (WinGet-Update-only=$($status.WinGetUpdateOnly), WinGet-Wartung=$($status.WinGetMaintenanceOnly), Chocolatey-Update-only=$($status.ChocolateyUpdateOnly), Chocolatey-Wartung=$($status.ChocolateyMaintenanceOnly))."
     }
     catch { $reason = $_.Exception.Message }
 
-    if ($certificate -and $reason -and $DeployType -ne 'AD') {
+    if ($certificate -and $reason -and -not $RequireCertificateRunAsCompatibility -and $DeployType -ne 'AD') {
         try {
             $legacyStatus = Invoke-Command -ComputerName $Servername -UseSSL `
                 -CertificateThumbprint $certificate.Thumbprint `
                 -SessionOption (New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 30000) `
                 -ErrorAction Stop -ScriptBlock {
-                    $build = [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber
+                    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+                    $build = [int]$os.BuildNumber
                     $modulePath = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\JEA_Updates.psm1'
                     $moduleText = if (Test-Path -LiteralPath $modulePath -PathType Leaf) { Get-Content -LiteralPath $modulePath -Raw -ErrorAction Stop } else { '' }
                     $versionMatch = [regex]::Match($moduleText, "function\s+Get-WindowsUpdateAdmDeploymentStatus[\s\S]*?Version\s*=\s*'(?<Version>[^']+)'", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
                     [PSCustomObject]@{
                         MaintenanceCurrent = $moduleText -match "MaintenanceRevision\s*=\s*'6'"
                         Build = $build
+                        Caption = [string]$os.Caption
                         ServerCore = ((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType -eq 'Server Core')
                         HasStatusFunction = $versionMatch.Success
                         DeploymentVersion = if ($versionMatch.Success) { [string]$versionMatch.Groups['Version'].Value } else { '' }
@@ -119,6 +134,10 @@ function Test-WindowsUpdateDeploymentConfiguration {
             if ($legacyStatus.ServerCore) {
                 $ExpectedWinGetUpdateOnly = $false
                 $ExpectedWinGetMaintenanceOnly = $false
+            }
+            if ($legacyStatus.ServerCore -and [int]$legacyStatus.Build -eq 17763 -and
+                $legacyStatus.Caption -like 'Microsoft Hyper-V Server*') {
+                return [PSCustomObject]@{ IsCurrent = $false; Reason = $reason; Version = '' }
             }
             if ([int]$legacyStatus.Build -le 17763) {
                 if ($legacyStatus.MaintenanceCurrent -and $legacyStatus.HasStatusFunction -and (Test-WindowsUpdateAdmVersion -Actual $legacyStatus.DeploymentVersion -Expected $ExpectedDeploymentVersion) -and
@@ -466,8 +485,11 @@ function Invoke-WindowsUpdateWinRMDeployment {
         }
 
         $targetOsForWinGet = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
-            Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object BuildNumber, ProductType, @{ Name = 'InstallationType'; Expression = { (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType } }
+            Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object Caption, BuildNumber, ProductType, @{ Name = 'InstallationType'; Expression = { (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType } }
         }
+        $requireCertificateCompatibility = $DeployType -ne 'AD' -and
+            $targetOsForWinGet.InstallationType -eq 'Server Core' -and [int]$targetOsForWinGet.BuildNumber -eq 17763 -and
+            $targetOsForWinGet.Caption -like 'Microsoft Hyper-V Server*'
         if ($targetOsForWinGet.InstallationType -eq 'Server Core' -or
             ([int]$targetOsForWinGet.ProductType -gt 1 -and [int]$targetOsForWinGet.BuildNumber -lt 17763)) {
             $EnableWingetUpdates = $false
@@ -779,7 +801,7 @@ function Invoke-WindowsUpdateWinRMDeployment {
                 -ExpectedWinGetMaintenanceOnly $ExpectedWinGetMaintenanceOnly `
                 -ExpectedChocolateyMaintenanceOnly $ExpectedChocolateyMaintenanceOnly `
                 -UpdateSettings $UpdateSettings `
-                -ManagementComputerName $env:COMPUTERNAME
+                -ManagementComputerName $env:COMPUTERNAME -RequireCertificateRunAsCompatibility:$requireCertificateCompatibility
             if (-not $certificateStatus.IsCurrent) {
                 throw "WindowsUpdateAdm-Statusfunktion konnte per Clientzertifikat nicht bestätigt werden. $($certificateStatus.Reason)"
             }

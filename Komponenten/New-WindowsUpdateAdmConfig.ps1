@@ -396,6 +396,8 @@ try {
     # mehr erforderlich.
     # =========================================================
     $IsInDomain = (Get-CimInstance -ClassName Win32_ComputerSystem).PartOfDomain
+    $certificateRunAsCompatibility = -not $IsInDomain -and $serverCore -and
+        [int]$setupOsForWinGet.BuildNumber -eq 17763 -and $setupOsForWinGet.Caption -like 'Microsoft Hyper-V Server*'
 
     if (-not $IsInDomain) {
         Write-SetupLog "" "INFO"
@@ -895,7 +897,7 @@ try {
     $winGetClientAvailable = @(Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue).Count -gt 0
     $JeaModuleSource = New-WindowsUpdateAdmDeploymentStatusModuleSource -Version $deploymentVersion `
         -WinGetUpdateOnly ([bool]($InstallWinGetClientModule -and $winGetClientAvailable)) -ChocolateyUpdateOnly $true `
-        -WinGetMaintenanceOnly $winGetMaintenanceSupported -ChocolateyMaintenanceOnly $true -ServerCore $serverCore
+        -WinGetMaintenanceOnly $winGetMaintenanceSupported -ChocolateyMaintenanceOnly $true -ServerCore $serverCore -CertificateRunAsCompatibility $certificateRunAsCompatibility
     if (-not (Test-Path -LiteralPath $JeaBaseDir)) { New-Item -Path $JeaBaseDir -ItemType Directory -Force | Out-Null }
     [System.IO.File]::WriteAllText($JeaModuleFile, $JeaModuleSource, [System.Text.UTF8Encoding]::new($true))
     Write-SetupLog "JEA-Statusabfrage erstellt (Version $deploymentVersion): $JeaModuleFile" "SUCCESS"
@@ -1151,7 +1153,7 @@ try {
     # Das betrifft ausschließlich Nicht-AD-Systeme. AD-Systeme behalten auch
     # auf Server 2016 den virtuellen SYSTEM-Kontext, den Windows Update für
     # Download und Installation benötigt.
-    $osBuild = [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).BuildNumber
+    $osBuild = [int]$setupOsForWinGet.BuildNumber
     $sessionConfigurationParameters = @{
         Path              = $PermanentPSSC
         SessionType       = 'Default'
@@ -1159,7 +1161,9 @@ try {
         ModulesToImport   = $jeaModulesToImport
         ExecutionPolicy   = 'RemoteSigned'
     }
-    if (-not $IsInDomain -and $osBuild -le 14393) {
+    if ($certificateRunAsCompatibility) {
+        Write-SetupLog 'Hyper-V Server 2019 Core: JEA verwendet den zertifikatsgemappten Administrator-Kontext.' 'INFO'
+    } elseif (-not $IsInDomain -and $osBuild -le 14393) {
         Write-SetupLog "Windows Server 2016-Kompatibilitätsmodus: JEA verwendet den zertifikatsgemappten Administrator-Kontext." "WARN"
     } else {
         $sessionConfigurationParameters['RunAsVirtualAccount'] = $true
@@ -1362,12 +1366,32 @@ $checkRoleDefinition}
         throw
     }
     
+    function Restart-WindowsUpdateAdmWinRM {
+        $runningGatewayServices = @()
+        if ($certificateRunAsCompatibility) {
+            foreach ($serviceName in @('WindowsAdminCenterAccountManagement', 'WindowsAdminCenter', 'ServerManagementGateway')) {
+                $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                if ($service -and $service.Status -eq 'Running') { $runningGatewayServices += $serviceName }
+            }
+        }
+
+        Restart-Service WinRM -Force -ErrorAction Stop
+        foreach ($serviceName in $runningGatewayServices) {
+            try {
+                Start-Service -Name $serviceName -ErrorAction Stop
+            }
+            catch {
+                Write-SetupLog "Windows-Admin-Center-Dienst '$serviceName' konnte nach dem WinRM-Neustart nicht wieder gestartet werden: $($_.Exception.Message)" 'WARN'
+            }
+        }
+    }
+
     if ($NeedWinRMRestart) {
         if ($IsRemoteSetup) {
             Write-SetupLog "WinRM-Neustart wird bis zum Abschluss des Remote-Setups verschoben." "INFO"
         } else {
             Write-SetupLog "Starte WinRM neu..." "INFO"
-            Restart-Service WinRM -Force -ErrorAction Stop
+            Restart-WindowsUpdateAdmWinRM
             Start-Sleep -Seconds 5
             if ((Get-Service WinRM).Status -ne 'Running') {
                 Start-Service WinRM -ErrorAction Stop
@@ -1439,7 +1463,7 @@ Register-PSSessionConfiguration -Name 'WindowsUpdateAdm' -Path '$($PermanentPSSC
         Write-SetupLog "Configuration wird nach dem verzögerten WinRM-Neustart aktiviert." "SUCCESS"
     } else {
         Write-SetupLog "Aktiviere Configuration durch WinRM Neustart..." "INFO"
-        Restart-Service WinRM -Force -ErrorAction Stop
+        Restart-WindowsUpdateAdmWinRM
         Start-Sleep -Seconds 3
         Write-SetupLog "Configuration aktiviert" "SUCCESS"
     }
