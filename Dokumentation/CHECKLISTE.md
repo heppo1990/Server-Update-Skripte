@@ -4,6 +4,8 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 ## Aktuell
 
+- [ ] **Linux-sudo:** Nach Ergänzung der verwalteten Regeln APT-/DNF-/YUM-Prüfung ohne Passwortcache bestätigen. Fehlende Rechte müssen im Check eine Linux-Neuverteilung verlangen.
+
 - [ ] **Ältere Windows-Ziele:** Auf einem Build unter 17763 die Verteilung ohne WinGet-Transfer und NuGet-Rückfrage sowie die kurze JEA-Finalisierung über schtasks.exe bestätigen.
 
 - [ ] **Server Core:** Überspringen von WinGet in Check, Install und Verteilung bestätigen. Chocolatey und Windows Update separat prüfen. Auf Nicht-AD-Hyper-V Server 2019 Core die Endpunkt-Neueinrichtung und Chocolatey-Abfrage per Clientzertifikat bestätigen.

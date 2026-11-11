@@ -233,7 +233,26 @@ function Install-LinuxPublicKey {
 function Test-LinuxUpdateSudo {
     param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath, [AllowEmptyString()][string]$LogFile = '')
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
-    $remoteCommand = 'version=$(sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --version) || { echo "SUDO_VERSION_CHECK_FAILED"; exit 41; }; [ "$version" = "' + $script:LinuxSudoSetupVersion + '" ] || { echo "SUDO_VERSION_MISMATCH:$version"; exit 42; }; sudo -n /usr/local/sbin/windowsupdateadm-schedule-reboot --check'
+    $remoteCommand = @'
+version=$(sudo -n -k /usr/local/sbin/windowsupdateadm-schedule-reboot --version) || { echo "SUDO_VERSION_CHECK_FAILED"; exit 41; }
+[ "$version" = "__SETUP_VERSION__" ] || { echo "SUDO_VERSION_MISMATCH:$version"; exit 42; }
+sudo -n -k /usr/local/sbin/windowsupdateadm-schedule-reboot --check || exit 43
+if command -v apt-get >/dev/null 2>&1; then
+    sudo -n -k /usr/bin/apt-get -s upgrade >/dev/null || { echo "SUDO_APT_CHECK_FAILED"; exit 44; }
+elif command -v dnf >/dev/null 2>&1; then
+    sudo -n -k /usr/bin/dnf -q check-update >/dev/null
+    result=$?
+    [ "$result" -eq 0 ] || [ "$result" -eq 100 ] || { echo "SUDO_DNF_CHECK_FAILED"; exit 45; }
+elif command -v yum >/dev/null 2>&1; then
+    sudo -n -k /usr/bin/yum -q check-update >/dev/null
+    result=$?
+    [ "$result" -eq 0 ] || [ "$result" -eq 100 ] || { echo "SUDO_YUM_CHECK_FAILED"; exit 46; }
+else
+    echo "PACKAGE_MANAGER_UNSUPPORTED"
+    exit 47
+fi
+'@
+    $remoteCommand = $remoteCommand.Replace('__SETUP_VERSION__', $script:LinuxSudoSetupVersion) -replace "`r`n", "`n"
     $arguments += "${RemoteUser}@${RemoteHost}", $remoteCommand
     $result = @(& $script:SSHPath @arguments 2>&1)
     $exitCode = $LASTEXITCODE
@@ -250,8 +269,8 @@ function Set-LinuxUpdateSudo {
         Write-LinuxLog -Message "NOPASSWD für Updates ist auf $RemoteHost bereits eingerichtet." -LogFile $LogFile -Level Success
         return
     }
-    $safeUser = $RemoteUser -replace '[^a-zA-Z0-9_-]', ''
-    if ([string]::IsNullOrWhiteSpace($safeUser)) { throw "Ungültiger Linux-Benutzername: $RemoteUser" }
+    if ($RemoteUser -notmatch '^[a-zA-Z0-9_-]+$') { throw "Ungültiger Linux-Benutzername: $RemoteUser" }
+    $safeUser = $RemoteUser
     $remoteSudoers = "/etc/sudoers.d/${safeUser}_update_nopasswd"
     $sudoersContent = @"
 # Verwaltet durch Install-Linux Updates.ps1; nur Update- und Reboot-Befehle.
@@ -263,7 +282,9 @@ $RemoteUser ALL=(ALL) NOPASSWD: /usr/bin/apt-get autoremove -y
 $RemoteUser ALL=(ALL) NOPASSWD: /usr/bin/apt-get clean -y
 $RemoteUser ALL=(ALL) NOPASSWD: /usr/bin/apt-get autoclean -y
 $RemoteUser ALL=(ALL) NOPASSWD: /usr/bin/dnf -y upgrade --refresh
+$RemoteUser ALL=(ALL) NOPASSWD: /usr/bin/dnf -q check-update
 $RemoteUser ALL=(ALL) NOPASSWD: /usr/bin/yum -y update
+$RemoteUser ALL=(ALL) NOPASSWD: /usr/bin/yum -q check-update
 $RemoteUser ALL=(ALL) NOPASSWD: /usr/bin/fuser
 $RemoteUser ALL=(ALL) NOPASSWD: /bin/fuser
 $RemoteUser ALL=(ALL) NOPASSWD: /usr/sbin/reboot
@@ -310,7 +331,20 @@ trap 'rm -f "$0"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-sudo -S -p '' /bin/sh -c 'printf %s "$1" | base64 -d > "$2" && printf %s "$3" | base64 -d > "$4" && chmod 755 "$4" && chown root:root "$4" && chmod 440 "$2" && chown root:root "$2" && visudo -c -f "$2" >/dev/null' -- '__SUDOERS_B64__' '__SUDOERS_PATH__' '__REBOOT_HELPER_B64__' '/usr/local/sbin/windowsupdateadm-schedule-reboot'
+sudo -S -p '' /bin/sh -c '
+set -eu
+sudoers_tmp=$(mktemp "$2.XXXXXX")
+helper_tmp=$(mktemp "$4.XXXXXX")
+trap "rm -f \"$sudoers_tmp\" \"$helper_tmp\"" EXIT
+printf %s "$1" | base64 -d > "$sudoers_tmp"
+printf %s "$3" | base64 -d > "$helper_tmp"
+chmod 440 "$sudoers_tmp"
+chown root:root "$sudoers_tmp" "$helper_tmp"
+chmod 755 "$helper_tmp"
+visudo -c -f "$sudoers_tmp" >/dev/null
+mv -f "$helper_tmp" "$4"
+mv -f "$sudoers_tmp" "$2"
+' -- '__SUDOERS_B64__' '__SUDOERS_PATH__' '__REBOOT_HELPER_B64__' '/usr/local/sbin/windowsupdateadm-schedule-reboot'
 echo SUDOERS_CONFIGURED
 '@.Replace('__SUDOERS_B64__',$encodedSudoers).Replace('__SUDOERS_PATH__',$remoteSudoers).Replace('__REBOOT_HELPER_B64__',$encodedRebootHelper)
     $localScript = Join-Path ([IO.Path]::GetTempPath()) ("configure_update_sudo_{0}_{1}.sh" -f $safeUser,[guid]::NewGuid().ToString('N'))
@@ -533,7 +567,7 @@ foreach ($entry in $hostEntries) {
             Write-LinuxLog -Message "Prüfe Updateberechtigung auf Linux-Server $remoteHost ..." -LogFile $logFile -ConsoleWhenQuiet
             if (-not (Test-LinuxUpdateSudo -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile)) {
                 $setupIssue = "Linux-Updateeinrichtung fehlt oder ist veraltet (erwartete Version $script:LinuxSudoSetupVersion); Verteilung erforderlich."
-                Write-LinuxLog -Message "$setupIssue Die lesende Update-Suche wird trotzdem versucht." -LogFile $logFile -Level Warning
+                throw $setupIssue
             }
         } elseif (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile)) {
             Install-LinuxPublicKey -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile
