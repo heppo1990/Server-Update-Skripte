@@ -1,4 +1,4 @@
-function Set-WindowsUpdateScheduledCheckTask {
+﻿function Set-WindowsUpdateScheduledCheckTask {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ScriptRoot,
@@ -14,6 +14,7 @@ function Set-WindowsUpdateScheduledCheckTask {
         throw "Check-Skript für die Aufgabenplanung fehlt: $checkScript"
     }
 
+    $launcherScript = Join-Path $ScriptRoot 'Komponenten\Start-ScheduledUpdateCheck.ps1'
     $existingTask = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
     if (-not [bool]$Configuration.Enabled) {
         if ($existingTask -and [string]$existingTask.Description -like "$ownershipMarker*") {
@@ -28,6 +29,8 @@ function Set-WindowsUpdateScheduledCheckTask {
         if ($WriteLog) { & $WriteLog 'Geplanter Check ist deaktiviert; es wurde keine Aufgabe angelegt.' }
         return [pscustomobject]@{ State = 'Disabled'; TaskName = $taskName }
     }
+
+    if (-not (Test-Path -LiteralPath $launcherScript -PathType Leaf)) { throw "Starthelfer für die Check-Aufgabe fehlt: $launcherScript" }
 
     $frequency = [string]$Configuration.Frequency
     if ($frequency -notin @('Daily', 'Weekly')) {
@@ -70,7 +73,7 @@ function Set-WindowsUpdateScheduledCheckTask {
         $taskAction = @($existingTask.Actions | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskExecAction' }) | Select-Object -First 1
         $actionPath = if ($taskAction) { ([string]$taskAction.Execute).Trim('"') } else { '' }
         $actionArguments = if ($taskAction) { [string]$taskAction.Arguments } else { '' }
-        $actionMatches = $actionArguments.IndexOf($checkScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        $actionMatches = ($actionArguments.IndexOf($checkScript, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($actionArguments.IndexOf($launcherScript, [StringComparison]::OrdinalIgnoreCase) -ge 0)
         $runsAsSystem = ([string]$existingTask.Principal.UserId -match '^(?:SYSTEM|NT AUTHORITY\\SYSTEM|S-1-5-18)$') -and
             [string]$existingTask.Principal.LogonType -eq 'ServiceAccount'
         if (-not $actionMatches -or -not $runsAsSystem) {
@@ -78,25 +81,12 @@ function Set-WindowsUpdateScheduledCheckTask {
         }
     }
 
-    $powerShellExecutable = $null
-    $candidatePaths = @(
-        (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
-        (Join-Path $env:ProgramFiles 'PowerShell\7-preview\pwsh.exe')
-    )
-    foreach ($candidatePath in $candidatePaths) {
-        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
-            $powerShellExecutable = $candidatePath
-            break
-        }
-    }
-    if (-not $powerShellExecutable) {
-        $powerShellExecutable = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    }
+    # Stabiler Einstieg auch nach Entfernung oder Austausch von PowerShell 7.
+    $powerShellExecutable = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
-        throw 'Weder PowerShell 7 noch Windows PowerShell 5.1 wurde für die Check-Aufgabe gefunden.'
+        throw 'Windows PowerShell 5.1 fehlt für den Starthelfer der Check-Aufgabe.'
     }
-
-    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $checkScript
+    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $launcherScript
     $action = New-ScheduledTaskAction -Execute $powerShellExecutable -Argument $arguments -WorkingDirectory $ScriptRoot
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $startWhenAvailable = [bool]$Configuration.StartWhenAvailable
