@@ -293,6 +293,7 @@ $RemoteUser ALL=(ALL) NOPASSWD: /usr/sbin/shutdown
 $RemoteUser ALL=(ALL) NOPASSWD: /sbin/shutdown
 $RemoteUser ALL=(ALL) NOPASSWD: /usr/local/sbin/windowsupdateadm-schedule-reboot
 "@
+    $sudoersContent = ($sudoersContent -replace "`r`n", "`n").TrimEnd("`r", "`n") + "`n"
     $encodedSudoers = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sudoersContent))
     $rebootHelperContent = @'
 #!/bin/sh
@@ -321,6 +322,7 @@ fi
 exec /sbin/shutdown -r "+$1"
 '@
     $rebootHelperContent = $rebootHelperContent.Replace('__SETUP_VERSION__', $script:LinuxSudoSetupVersion)
+    $rebootHelperContent = ($rebootHelperContent -replace "`r`n", "`n").TrimEnd("`r", "`n") + "`n"
     $encodedRebootHelper = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($rebootHelperContent))
     $remoteScript = "/tmp/configure_update_sudo_${safeUser}.sh"
     $bootstrapScript = @'
