@@ -4,7 +4,7 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 ## Aktuell
 
-- [ ] **PowerShell-Vorabupdate:** Übergabe derselben WinGet-CLI aus der Suche an den PS5.1-Worker und Paketzuordnung ohne feste Installerfilter am Ziel bestätigen.
+- [ ] **PowerShell-Vorabupdate:** Übergabe derselben WinGet-CLI aus der Suche an den PS5.1-Worker und Paketzuordnung ohne feste Installerfilter am Ziel bestätigen. Bei Installer-Technikkonflikt die Fortsetzung mit vorhandener PowerShell und den manuellen Prüfhinweis im Bericht prüfen.
 
 - [ ] **Linux-sudo:** Nach Ergänzung der verwalteten Regeln APT-/DNF-/YUM-Prüfung ohne Passwortcache bestätigen. Fehlende Rechte müssen im Check eine Linux-Neuverteilung verlangen.
 

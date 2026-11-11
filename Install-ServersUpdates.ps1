@@ -891,7 +891,12 @@ try {
         $text = ([string]$line).TrimEnd()
         if ($text) { Write-HandoffLog $text }
     }
-    if ($exitCode -ne 0) { $errorMessage = "$($configuration.Manager) konnte PowerShell $($configuration.TargetVersion) nicht installieren (Exitcode $exitCode)." }
+    if ($exitCode -ne 0) {
+        $errorMessage = "$($configuration.Manager) konnte PowerShell $($configuration.TargetVersion) nicht installieren (Exitcode $exitCode)."
+        $details = ($updateOutput -join ' ' -replace '\s+', ' ').Trim()
+        if ($details.Length -gt 1200) { $details = $details.Substring(0, 1197) + '...' }
+        if ($details) { $errorMessage += " $details" }
+    }
 } catch {
     $errorMessage = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
     $exitCode = 1
@@ -910,7 +915,9 @@ $state = [ordered]@{
 }
 [IO.File]::WriteAllText([string]$configuration.StatePath, (ConvertTo-Json -InputObject $state -Depth 5), [Text.UTF8Encoding]::new($false))
 if ($exitCode -eq 0) { Write-HandoffLog "$($configuration.Manager) meldet PowerShell-Update erfolgreich; starte den Installationslauf in PowerShell 7 neu." 'SUCCESS' }
-else { Write-HandoffLog 'PowerShell-Vorabupdate fehlgeschlagen; keine Fortsetzung mit ausgeschlossenem PowerShell-Paket.' 'ERROR'; exit 30 }
+else {
+    Write-HandoffLog 'PowerShell-Vorabupdate fehlgeschlagen; setze den Installationslauf mit der vorhandenen PowerShell fort. Das Paket wird zur manuellen Prüfung gemeldet.' 'WARN'
+}
 try {
     Write-HandoffLog "Starte die Installationsfortsetzung sichtbar in PowerShell 7: $($configuration.PwshPath)"
     $resumeProcess = Start-Process -FilePath ([string]$configuration.PwshPath) -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',[string]$configuration.ContinuationEncoded) -PassThru -Wait -WindowStyle Normal
