@@ -3358,6 +3358,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     }
                 }
             }
+            foreach ($wingetResult in @($result | Where-Object { $_.Manager -eq 'Winget' })) {
+                Add-Member -InputObject $wingetResult -NotePropertyName WingetPath -NotePropertyValue ([string]$wingetPath) -Force
+            }
             if (-not [string]::IsNullOrWhiteSpace($wingetDiagnosticOutput)) {
                 foreach ($wingetResult in @($result | Where-Object { $_.Manager -eq 'Winget' })) {
                     if (-not $wingetResult.PSObject.Properties['DiagnosticOutput']) {

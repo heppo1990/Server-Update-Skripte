@@ -737,6 +737,9 @@ elseif ($shouldPreflightManagementPowerShell -and ($wingetEnabledForManagement -
       }
       if ($candidate.Count -gt 0) {
         $candidate[0] | Add-Member -NotePropertyName Manager -NotePropertyValue $managerName -Force
+        if ($managerName -eq 'Winget' -and $managerCheck[0].PSObject.Properties['WingetPath']) {
+          $candidate[0] | Add-Member -NotePropertyName WingetPath -NotePropertyValue ([string]$managerCheck[0].WingetPath) -Force
+        }
         $managementPowerShellCandidates += $candidate[0]
       }
     }
@@ -762,7 +765,12 @@ elseif ($shouldPreflightManagementPowerShell -and ($wingetEnabledForManagement -
         $wingetExecutable = $null
         $chocolateyExecutable = $null
         if ($managementPowerShellManager -eq 'Winget') {
-          if ($localOsInfo -and [int]$localOsInfo.ProductType -gt 1 -and [int]$localOsInfo.BuildNumber -eq 17763 -and -not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+          if ($managementPowerShellUpdate.PSObject.Properties['WingetPath'] -and
+              -not [string]::IsNullOrWhiteSpace([string]$managementPowerShellUpdate.WingetPath)) {
+            $wingetExecutable = [string]$managementPowerShellUpdate.WingetPath
+            Write-ScriptLog "PowerShell-Vorabupdate verwendet dieselbe WinGet-CLI wie die erfolgreiche Suche: $wingetExecutable" -LogOnly
+          }
+          if ([string]::IsNullOrWhiteSpace($wingetExecutable) -and $localOsInfo -and [int]$localOsInfo.ProductType -gt 1 -and [int]$localOsInfo.BuildNumber -eq 17763 -and -not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
             $portableCacheRoot = Join-Path $env:LOCALAPPDATA 'WindowsUpdateAdm\WinGetPortable'
             if (Test-Path -LiteralPath $portableCacheRoot -PathType Container) {
               $portableCandidates = @(Get-ChildItem -LiteralPath $portableCacheRoot -Filter winget.exe -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
@@ -874,7 +882,8 @@ try {
         $chocolateyArguments = @('upgrade','powershell-core','--version',[string]$configuration.TargetVersion,'--yes','--limit-output')
         $updateOutput = @(& ([string]$configuration.ChocolateyPath) @chocolateyArguments 2>&1)
     } else {
-        $wingetArguments = @('upgrade','--id','Microsoft.PowerShell','--exact','--source','winget','--installer-type','wix','--scope','machine','--version',[string]$configuration.TargetVersion,'--silent','--accept-package-agreements','--accept-source-agreements','--disable-interactivity')
+        $wingetArguments = @('upgrade','--id',[string]$configuration.Package.Id,'--exact','--source',[string]$configuration.Package.Source,'--version',[string]$configuration.TargetVersion,'--silent','--accept-package-agreements','--accept-source-agreements','--disable-interactivity')
+        Write-HandoffLog "WinGet-Aufruf: $($configuration.WingetPath) $($wingetArguments -join ' ')"
         $updateOutput = @(& ([string]$configuration.WingetPath) @wingetArguments 2>&1)
     }
     $exitCode = $LASTEXITCODE

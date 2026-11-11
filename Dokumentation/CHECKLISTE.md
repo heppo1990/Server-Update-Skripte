@@ -4,6 +4,8 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 ## Aktuell
 
+- [ ] **PowerShell-Vorabupdate:** Übergabe derselben WinGet-CLI aus der Suche an den PS5.1-Worker und Paketzuordnung ohne feste Installerfilter am Ziel bestätigen.
+
 - [ ] **Linux-sudo:** Nach Ergänzung der verwalteten Regeln APT-/DNF-/YUM-Prüfung ohne Passwortcache bestätigen. Fehlende Rechte müssen im Check eine Linux-Neuverteilung verlangen.
 
 - [ ] **Ältere Windows-Ziele:** Auf einem Build unter 17763 die Verteilung ohne WinGet-Transfer und NuGet-Rückfrage sowie die kurze JEA-Finalisierung über schtasks.exe bestätigen.
