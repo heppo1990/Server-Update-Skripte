@@ -4,6 +4,8 @@ Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennam
 
 ## Aktuell
 
+- [ ] **Reduziertes Setup-Paket:** Zieltransfer mit neun eigenen Modulen statt vollständigem Verwaltungsmodulsatz prüfen; normale Einrichtung und SYSTEM-Finalisierung bestätigen. WinGet-Wartungsdateien nur auf unterstützten Nicht-Core-Zielen übertragen. Isolierter PS5.1-Import, Setup-Abhängigkeiten, JEA-Quellgenerierung und vollständiger Verwaltungsimport lokal geprüft.
+
 - [ ] **Geplanter Check:** Verteilung aktualisiert bestehende Check-Aufgaben auf den PS5.1-Starthelfer. Aufgabenstart mit vorhandener, entfernter und defekter PS7 prüfen; bei fehlender PS7 muss PS5.1 übernehmen. Fehlgeschlagene Check-Läufe dürfen nicht doppelt starten. Startprotokoll unter Logs/ScheduledCheck-Launcher.log prüfen.
 
 - [ ] **PowerShell-Vorabupdate:** Übergabe derselben WinGet-CLI aus der Suche an den PS5.1-Worker und Paketzuordnung ohne feste Installerfilter am Ziel bestätigen. Bei Installer-Technikkonflikt die Fortsetzung mit vorhandener PowerShell und den manuellen Prüfhinweis im Bericht prüfen.

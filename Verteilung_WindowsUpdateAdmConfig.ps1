@@ -69,8 +69,7 @@ $PSSCfgSkriptFile = "New-WindowsUpdateAdmConfig.ps1"
 $CommonModuleFile = 'WindowsUpdate.Common.psm1'
 $PSSCfgSkriptPath = Join-Path $PSScriptRoot 'Komponenten'
 $CommonModulePath = Join-Path $PSScriptRoot 'Module'
-$CommonModuleComponents = @(Get-ChildItem -LiteralPath $CommonModulePath -Filter 'WindowsUpdate.*.psm1' -File -ErrorAction SilentlyContinue |
-    Where-Object Name -ne $CommonModuleFile)
+$CommonModuleComponents = @(Get-WindowsUpdateSetupModuleFiles | ForEach-Object { Join-Path $CommonModulePath $_ })
 $ScriptName = [IO.Path]::GetFileNameWithoutExtension($PSCommandPath)
 $script:DeployLogEnabled = $true
 $script:DeployLogFile = $null
@@ -131,7 +130,7 @@ if ([string]::IsNullOrWhiteSpace($TargetComputers)) {
 Write-DeployLog 'WindowsUpdateAdm-Verteilung'
 
 # Voraussetzungen pruefen
-foreach ($requiredSetupFile in @((Join-Path $PSSCfgSkriptPath $PSSCfgSkriptFile), (Join-Path $CommonModulePath $CommonModuleFile)) + @($CommonModuleComponents.FullName)) {
+foreach ($requiredSetupFile in @((Join-Path $PSSCfgSkriptPath $PSSCfgSkriptFile), (Join-Path $CommonModulePath $CommonModuleFile)) + @($CommonModuleComponents)) {
     if (-not (Test-Path -LiteralPath $requiredSetupFile -PathType Leaf)) {
         Write-DeployLog "FEHLER: Für das Setup benötigte Datei nicht gefunden: $requiredSetupFile" -Level Error
         exit 1

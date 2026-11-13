@@ -113,7 +113,8 @@ $commonModulePath = Join-Path $PSScriptRoot 'WindowsUpdate.Common.psm1'
 if (-not (Test-Path -LiteralPath $commonModulePath -PathType Leaf)) {
     $commonModulePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'Module\WindowsUpdate.Common.psm1'
 }
-Import-Module $commonModulePath -Force -ErrorAction Stop
+# Auf dem Verwaltungsserver einen bereits geladenen Vollimport erhalten.
+Import-Module $commonModulePath -ArgumentList $true -ErrorAction Stop
 
 # === TLS-KONFIGURATION GANZ AM ANFANG ===
 try {

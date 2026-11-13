@@ -1,4 +1,20 @@
-﻿Set-StrictMode -Version Latest
+﻿param([bool]$SetupOnly = $false)
+
+# Gemeinsame Dateiliste für Zieltransfer und reduzierten Setup-Import.
+function Get-WindowsUpdateSetupModuleFiles {
+    @(
+        'WindowsUpdate.Console.psm1',
+        'WindowsUpdate.NuGet.psm1',
+        'WindowsUpdate.ModulPakete.psm1',
+        'WindowsUpdate.PSWindowsUpdate.psm1',
+        'WindowsUpdate.WinGetClient.psm1',
+        'WindowsUpdate.Remoting.psm1',
+        'WindowsUpdate.Versionierung.psm1',
+        'WindowsUpdate.Setup.psm1'
+    )
+}
+
+Set-StrictMode -Version Latest
 
 # Konsolenzustand bleibt im gemeinsamen Modulbereich, damit alle Fachmodule
 # dieselben Tabellen- und Zusammenfassungszustände verwenden.
@@ -35,6 +51,7 @@ $componentModules = @(
     'WindowsUpdate.Setup.psm1',
     'WindowsUpdate.Clientzertifikat.psm1'
 )
+if ($SetupOnly) { $componentModules = @(Get-WindowsUpdateSetupModuleFiles) }
 foreach ($componentModule in $componentModules) {
     $componentPath = Join-Path $PSScriptRoot $componentModule
     if (-not (Test-Path -LiteralPath $componentPath -PathType Leaf)) {
@@ -49,4 +66,4 @@ foreach ($componentModule in $componentModules) {
     . $componentScript
 }
 
-Export-ModuleMember -Function New-WindowsUpdateDeploymentNotice, Test-WindowsUpdateDeploymentRequirement, Get-WindowsUpdateScriptsVersion, Test-WindowsUpdateAdmVersion, Get-WindowsUpdateSettings, Set-WindowsUpdateScheduledCheckTask, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, Get-WindowsUpdateTargetOperatingSystem, New-WindowsUpdateInvokeCommandParams, Test-WindowsUpdateWinRmPorts, Initialize-WindowsUpdateRemoting, Invoke-WindowsUpdateRemoteCommandWithTimeout, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Get-WindowsUpdateOnlineNuGetProviderVersion, New-WindowsUpdateNuGetProviderPayload, New-WindowsUpdateModulePayload, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic, Get-WindowsUpdateAdmDeploymentVersion, Get-DeferredWindowsUpdates, Remove-DeferredUpdateTask, Register-OneTimeRemoteTask, Register-StartupRemoteTask, Register-DeferredUpdateTask, Register-DeferredMailTestTask, Add-HistoryEvent, ConvertFrom-HistoryDate, Invoke-HistoryRemoteCommand, Get-LinuxHistoryLines, ConvertTo-HtmlSafe, New-WindowsUpdateHistoryHtml, Write-WindowsUpdateSetupLog, Write-WindowsUpdateSetupDiagnostic, Write-WindowsUpdateClientCertificateDiagnostic, New-WindowsUpdateCheckRedistributionNotice, New-WindowsUpdateCheckExternalSetupNotice, Get-WindowsUpdateCheckClientCertificate, Invoke-WindowsUpdateCheckCacheCleanup, Import-WindowsUpdatePSWindowsUpdateModule, ConvertTo-WindowsUpdateDownloadResult, New-WindowsUpdateDownloadReportHeader, Complete-WindowsUpdateDownloadReport, New-WindowsUpdateDownloadConsoleSummary, Get-NextScheduledTime, Get-NextRebootTimeInWindow, Test-ServerIsVirtual, Test-WindowsUpdateRebootRequired, Register-WindowsUpdateRebootTask, Get-WindowsUpdateDeploymentBootstrapCredential, Get-WindowsUpdateDeploymentClientCertificate, Test-WindowsUpdateDeploymentConfiguration, Add-WindowsUpdateTrustedWinRMServerCertificate, Invoke-WindowsUpdateWinRMDeployment, Invoke-WindowsUpdateServerDeployment, New-WindowsUpdateAdmDeploymentStatusModuleSource, New-WindowsUpdateClientCertificate, Export-WindowsUpdateClientCertificatePublicKey
+Export-ModuleMember -Function Get-WindowsUpdateSetupModuleFiles, New-WindowsUpdateDeploymentNotice, Test-WindowsUpdateDeploymentRequirement, Get-WindowsUpdateScriptsVersion, Test-WindowsUpdateAdmVersion, Get-WindowsUpdateSettings, Set-WindowsUpdateScheduledCheckTask, Protect-WindowsUpdateSettingsFilePassword, Protect-WindowsUpdateSettingsObjectPassword, Get-WindowsUpdateClientCertificateAuthInfo, Get-WindowsUpdateTargets, Get-WindowsUpdateTargetOperatingSystem, New-WindowsUpdateInvokeCommandParams, Test-WindowsUpdateWinRmPorts, Initialize-WindowsUpdateRemoting, Invoke-WindowsUpdateRemoteCommandWithTimeout, Test-WindowsUpdateConsoleMessage, Format-WindowsUpdateConsoleError, Write-WindowsUpdateConsoleLine, Test-WindowsUpdateJeaSupported, Invoke-WindowsUpdateSystemTask, Invoke-WindowsUpdateWithRetry, Get-WindowsUpdateSshArguments, ConvertTo-WindowsUpdatePackageRows, Format-WindowsUpdatePackageConsoleTable, ConvertTo-WindowsUpdatePackageHtmlTable, Invoke-WindowsUpdatePackageManagers, Invoke-WindowsUpdateFileRetention, Write-WindowsUpdateLog, Write-WindowsUpdateConsoleSummary, Invoke-WindowsUpdateRetentionWithLog, ConvertTo-WindowsUpdateMailSafeString, Send-WindowsUpdateHtmlMail, Add-WindowsUpdateTrustedHost, Get-WindowsUpdateOnlineNuGetProviderVersion, New-WindowsUpdateNuGetProviderPayload, New-WindowsUpdateModulePayload, Update-NuGetProvider, Update-PSWindowsUpdateModule, Update-WinGetClientModule, Register-WindowsUpdateWinGetAppInstallerForCurrentUser, Repair-WindowsUpdateWinGetPackageManager, Write-WindowsUpdateDiagnostic, Get-WindowsUpdateAdmDeploymentVersion, Get-DeferredWindowsUpdates, Remove-DeferredUpdateTask, Register-OneTimeRemoteTask, Register-StartupRemoteTask, Register-DeferredUpdateTask, Register-DeferredMailTestTask, Add-HistoryEvent, ConvertFrom-HistoryDate, Invoke-HistoryRemoteCommand, Get-LinuxHistoryLines, ConvertTo-HtmlSafe, New-WindowsUpdateHistoryHtml, Write-WindowsUpdateSetupLog, Write-WindowsUpdateSetupDiagnostic, Write-WindowsUpdateClientCertificateDiagnostic, New-WindowsUpdateCheckRedistributionNotice, New-WindowsUpdateCheckExternalSetupNotice, Get-WindowsUpdateCheckClientCertificate, Invoke-WindowsUpdateCheckCacheCleanup, Import-WindowsUpdatePSWindowsUpdateModule, ConvertTo-WindowsUpdateDownloadResult, New-WindowsUpdateDownloadReportHeader, Complete-WindowsUpdateDownloadReport, New-WindowsUpdateDownloadConsoleSummary, Get-NextScheduledTime, Get-NextRebootTimeInWindow, Test-ServerIsVirtual, Test-WindowsUpdateRebootRequired, Register-WindowsUpdateRebootTask, Get-WindowsUpdateDeploymentBootstrapCredential, Get-WindowsUpdateDeploymentClientCertificate, Test-WindowsUpdateDeploymentConfiguration, Add-WindowsUpdateTrustedWinRMServerCertificate, Invoke-WindowsUpdateWinRMDeployment, Invoke-WindowsUpdateServerDeployment, New-WindowsUpdateAdmDeploymentStatusModuleSource, New-WindowsUpdateClientCertificate, Export-WindowsUpdateClientCertificatePublicKey

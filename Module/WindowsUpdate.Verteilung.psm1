@@ -647,13 +647,16 @@ function Invoke-WindowsUpdateWinRMDeployment {
         Copy-Item -Path (Join-Path (Join-Path $RootDirectory 'Module') $CommonModuleFile) `
                   -Destination (Join-Path $remoteTemp $CommonModuleFile) `
                   -ToSession $session -Force -ErrorAction Stop
-        foreach ($componentModule in @(Get-ChildItem -LiteralPath (Join-Path $RootDirectory 'Module') -Filter 'WindowsUpdate.*.psm1' -File -ErrorAction Stop |
-                Where-Object Name -ne $CommonModuleFile)) {
-            Copy-Item -LiteralPath $componentModule.FullName -Destination (Join-Path $remoteTemp $componentModule.Name) `
+        foreach ($componentFile in @(Get-WindowsUpdateSetupModuleFiles)) {
+            Copy-Item -LiteralPath (Join-Path (Join-Path $RootDirectory 'Module') $componentFile) -Destination (Join-Path $remoteTemp $componentFile) `
                       -ToSession $session -Force -ErrorAction Stop
         }
-        foreach ($maintenanceFile in @('WindowsUpdate.WinGetMaintenance.ps1', 'WindowsUpdate.WinGetMaintenanceBridge.ps1')) {
-            Copy-Item -LiteralPath (Join-Path (Join-Path $RootDirectory 'Module') $maintenanceFile) -Destination (Join-Path $remoteTemp $maintenanceFile) -ToSession $session -Force -ErrorAction Stop
+        # Die JEA-Quellenwartung ist auf unterstützten Desktop-Zielen auch ohne
+        # aktivierte Paketupdates verfügbar; Core und ältere Builds benötigen sie nicht.
+        if ($targetOsForWinGet.InstallationType -ne 'Server Core' -and [int]$targetOsForWinGet.BuildNumber -ge 17763) {
+            foreach ($maintenanceFile in @('WindowsUpdate.WinGetMaintenance.ps1', 'WindowsUpdate.WinGetMaintenanceBridge.ps1')) {
+                Copy-Item -LiteralPath (Join-Path (Join-Path $RootDirectory 'Module') $maintenanceFile) -Destination (Join-Path $remoteTemp $maintenanceFile) -ToSession $session -Force -ErrorAction Stop
+            }
         }
         if ($targetModulePayloadRoot -and (Test-Path -LiteralPath $targetModulePayloadRoot -PathType Container)) {
             foreach ($moduleDirectory in @(Get-ChildItem -LiteralPath $targetModulePayloadRoot -Directory -ErrorAction Stop)) {
