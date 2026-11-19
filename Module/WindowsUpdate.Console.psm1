@@ -130,12 +130,14 @@ function Write-WindowsUpdateConsoleLine {
     $wasTableActive = $script:WindowsUpdateConsoleTableActive
     $wasTableHasRows = $script:WindowsUpdateConsoleTableHasRows
     $wasPackageRowsActive = $script:WindowsUpdateConsolePackageRowsActive
+    $wasPackageTableActive = $script:WindowsUpdateConsolePackageTableActive
     $show = $AlreadyFiltered -or (Test-WindowsUpdateConsoleMessage -Message $Message -IsDebug:$IsDebug)
     if (-not $show) { return }
 
     $isTableLine = $Message -match '^\s*ComputerName\s+Status\s+KB\b|^\s*-{3,}(?:\s+-{2,})+|^\s*\S+\s+[A-Za-z-]{7}\s+(?:KB\d+)?(?:\s+\S.*)?$'
     $isPackageRow = $Message -match '^\s{2,}\S+\s*:'
-    if (-not [string]::IsNullOrWhiteSpace($Message) -and (($wasTableActive -and -not $script:WindowsUpdateConsoleTableActive -and -not $isTableLine -and $wasTableHasRows) -or ($wasPackageRowsActive -and -not $script:WindowsUpdateConsolePackageRowsActive -and -not $isPackageRow))) {
+    $packageTableEnded = $wasPackageTableActive -and (-not $script:WindowsUpdateConsolePackageTableActive -or $Message -match '(?i)^\s*(?:WinGet|Chocolatey) auf ')
+    if (-not [string]::IsNullOrWhiteSpace($Message) -and (($wasTableActive -and -not $script:WindowsUpdateConsoleTableActive -and -not $isTableLine -and $wasTableHasRows) -or ($wasPackageRowsActive -and -not $script:WindowsUpdateConsolePackageRowsActive -and -not $isPackageRow) -or $packageTableEnded)) {
         Write-Host ''
     }
     if ($wasTableActive -and -not $script:WindowsUpdateConsoleTableActive) { $script:WindowsUpdateConsoleTableHasRows = $false }
