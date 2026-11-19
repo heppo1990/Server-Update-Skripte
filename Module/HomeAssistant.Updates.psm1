@@ -160,7 +160,19 @@ function Test-HAEndpointAvailable {
 # SSH ist auf Home Assistant im Normalbetrieb ausgeschaltet. Wenn der Host
 # deshalb nicht erreichbar ist, überspringen wir den HA-Zweig ohne Passwort-
 # oder Key-Setup-Versuch und melden den Status ausdrücklich als übersprungen.
-if (-not $CheckOnly -and -not $ConnectionOnly -and -not (Test-HAEndpointAvailable -RemoteHost $HAHost -RemotePort $Port)) {
+if (-not $CheckOnly -and -not (Test-HAEndpointAvailable -RemoteHost $HAHost -RemotePort $Port)) {
+    if ($ConnectionOnly) {
+        # Ein geschlossener SSH-Port ist kein fehlender Schlüssel. Insbesondere
+        # bei ausgeschaltetem HA keine interaktive Schlüsselinstallation starten.
+        $connectionStats = [PSCustomObject]@{
+            Host = $HAHost; Success = $false; Skipped = $true; SkippedHosts = 1
+            SetupReady = $false; SetupIssue = ''; AvailableUpdates = 0
+            UpdateDetails = @(); Error = ''; LogFile = $LogFile
+        }
+        $connectionStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $LogDir 'ha_update_check_stats.json') -Encoding utf8
+        Write-HostLog -Message "$HAHost ist nicht erreichbar" -RemoteHost $HAHost -LogFile $LogFile -Level Info
+        return
+    }
     $skipReason = "SSH-Port $Port auf $HAHost ist nicht erreichbar; Home-Assistant-Updates wurden übersprungen. SSH für einen HA-Update-Lauf einschalten."
     Write-HostLog -Message $skipReason -RemoteHost $HAHost -LogFile $LogFile -Level Info
 

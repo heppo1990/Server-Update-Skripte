@@ -91,6 +91,7 @@ function Write-DeployLog {
     if ($LogOnly) { return }
 
     $show = [string]::IsNullOrWhiteSpace($Message) -or $Level -in @('Warning', 'Error') -or
+        $Message -match '^\S+ ist nicht erreichbar$|^Übersprungen \(nicht erreichbar\):' -or
         $Message -match '(?i)^\s*(WARNUNG|WARNING|FEHLER|ERROR|WindowsUpdateAdm-Verteilung|Ziele:|Eingeschränkter Lauf:|\[[^]]+\] (Deployment gestartet|Verbinde|Übertrage|Führe (lokales )?Setup|Warte|Teste|Erfolg|FEHLER|Verbindung vorbereitet|WindowsUpdateAdm-Endpunkt|Linux-Hosts|Home Assistant|Setup:)|\[(Linux|Home Assistant)\]|Ergebnis:|Windows-Ziele:|Erfolgreich:|Fehler:|Linux-Hosts:|SSH-Schlüssel/Verbindung:|Home-Assistant-Instanzen:|Verbindung:|Gesamt Systeme:|Gesamt:|Logdatei:|\s{2,}[^:]+: (SSH-Schlüssel|Verbindung/Einrichtung)|\s{2,}[^:]+: \d+ (Paketupdates|Updates? verfügbar)|\s{2,}(Linux-Paket|Core|Supervisor|OS|Add-on))'
     if (-not $show) { return }
 
@@ -252,6 +253,7 @@ $FailCount    = 0
 $SkippedCount = 0
 $LinuxConnectionErrors = 0
 $HAConnectionErrors = 0
+$HAConnectionSkipped = 0
 $script:BootstrapCredentials = @{}
 
 # Nutzbare lokale Verwaltungsserver-Adressen werden einmal ermittelt und nur
@@ -440,7 +442,10 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
                 Write-DeployLog ''
             }
             else {
-                if (-not $connectionStats.Success) {
+                if ($connectionStats.PSObject.Properties['Skipped'] -and $connectionStats.Skipped) {
+                    $HAConnectionSkipped = 1
+                    Write-DeployLog "$($connectionStats.Host) ist nicht erreichbar"
+                } elseif (-not $connectionStats.Success) {
                     $HAConnectionErrors = 1
                     Write-DeployLog '[Home Assistant] Verbindung/Einrichtung fehlgeschlagen; Details im Log.' -Level Warning
                 } else {
@@ -503,11 +508,12 @@ if ($LinuxSystemCount -gt 0 -or $LinuxConnectionErrors -gt 0) {
     Write-DeployLog "Fehler: $LinuxConnectionErrors" -Level $(if ($LinuxConnectionErrors -eq 0) { 'Success' } else { 'Error' })
 }
 if ($HASystemCount -gt 0 -or $HAConnectionErrors -gt 0) {
-    $haConnectedCount = [Math]::Max(0, $HASystemCount - $HAConnectionErrors)
+    $haConnectedCount = [Math]::Max(0, $HASystemCount - $HAConnectionErrors - $HAConnectionSkipped)
     Write-DeployLog ''
     Write-DeployLog "Home-Assistant-Instanzen: $HASystemCount"
     Write-DeployLog "Verbindung: $haConnectedCount erfolgreich" -Level $(if ($HAConnectionErrors -eq 0) { 'Success' } else { 'Warning' })
     Write-DeployLog "Fehler: $HAConnectionErrors" -Level $(if ($HAConnectionErrors -eq 0) { 'Success' } else { 'Error' })
+    if ($HAConnectionSkipped -gt 0) { Write-DeployLog "Übersprungen (nicht erreichbar): $HAConnectionSkipped" }
 }
 $totalSystems = $Results.Count + $LinuxSystemCount + $HASystemCount
 Write-DeployLog ''

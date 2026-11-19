@@ -4,20 +4,17 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Verteilung
 
-- [ ] **Server-2019-Zertifikat:** Verteilung erhält den bestätigten JEA-Betrieb im gemappten Administratorkontext auf Nicht-AD-Servern mit Build 17763. Vorprüfung verlangt passende Live-Registrierung und erfolgreiche feste Paketmanagerabfrage; AD-Server, Windows-Clients und neuere Server behalten virtuelle Konten.
 
 - [ ] **Modulbereitstellung:** Eine tatsächlich neuere Modul-/NuGet-Version bereitstellen, ohne Passwortbestätigung oder dauerhafte Änderung des PSGallery-Vertrauens.
 - [ ] **Server Core:** WinGet in Verteilung, Check und Install auslassen; Windows Update und vorhandenes Chocolatey weiter nutzen. Zertifikatszugang auf Hyper-V Server 2019 Core bestätigen.
-- [ ] **Ausgeschaltete Ziele:** Check, Download und Install zeigen nur den Zielnamen mit dem Zusatz 'ist nicht erreichbar', ohne Warnungs-/Fehlerpräfix; technische Gründe bleiben im Log. Authentifizierungs- und Konfigurationsfehler bleiben Warnungen. Erreichbare IPv4-Ziele bleiben bei zusätzlicher unerreichbarer IPv6-Adresse enthalten; negative Portvorprüfung allein verwirft keinen erfolgreichen JEA-Zugang.
+- [ ] **Erreichbarkeit:** Erreichbare IPv4-Ziele bleiben bei zusätzlicher unerreichbarer IPv6-Adresse enthalten; negative Portvorprüfung allein verwirft keinen erfolgreichen JEA-Zugang.
 
 ## Check, Download und Install
 
-- [ ] **Parallelbetrieb:** Konsolenhinweis nennt nur die maximale Anzahl gleichzeitiger Windows-Ziele. Noch prüfen: Linux und Home Assistant nach allen Windows-Zielen; Reihenfolge auch bei ParallelTargets=1. Verständlichen Hinweis bei unbekannter Bauart bestätigen. Install: höchstens drei vollständige Windows-Zielabläufe gleichzeitig; Summen, Bericht und Mail stimmen.
-- [ ] **Neustartplanung:** Intervall wird vor dem ersten Windows-Ziel im Hauptlauf und im parallelen Worker initialisiert; Neustart- und Nachinstallationsplanung nach Installation bestätigen. Gemeinsame VM-Reservierungen halten Mindestabstand, eingestellten Neustartmodus und Wartungsfenster ein; VM-Nachinstallationen erhalten getrennte Starttermine. Physische Neustarts bleiben hinter dem VM-Block, Verwaltungsserver hinter dem Gesamtbericht.
+- [ ] **Parallelbetrieb:** Noch prüfen: Home Assistant nach allen Windows- und Linux-Zielen; Reihenfolge auch bei ParallelTargets=1.
 - [ ] **Geplanter Check:** Bestehende Aufgabe wird auf den PS5.1-Starthelfer aktualisiert. Fehlende/defekte PS7 fällt auf PS5.1 zurück; ein fehlgeschlagener Check startet nicht doppelt. Startprotokoll: Logs/ScheduledCheck-Launcher.log.
-- [ ] **PowerShell-Vorabupdate:** Dieselbe WinGet-CLI wie bei der Suche verwenden. Bei Installer-Technikkonflikt mit vorhandener PowerShell fortsetzen und manuelle Nacharbeit im Bericht nennen.
 - [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
-- [ ] **Paketergebnisse und Ausgabe:** Kompakte WinGet-/Chocolatey-Paketlisten erscheinen auch bei parallelen Läufen vollständig in der Konsole, mit Leerzeile vor dem nächsten Server oder Paketmanager; keine wiederholte Ziellistenüberschrift oder zugehörigen Leerzeilen. Download und Install nennen die richtige Zielart; der Start des Windows-Update-Teils bleibt nur im Log. Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur; Konsolenhinweis benennt nicht installierte Anwendungsupdates verständlich und verweist auf die Zusammenfassung. Erfolgreicher Rückfall erzeugt keine zusätzliche Fehlermeldung in der Konsole; echte Fehler bleiben sichtbar.
+- [ ] **Paketergebnisse:** Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur.
 
 ## WinGet-Wartung und Downloadcache
 
@@ -28,7 +25,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Sicherheit und Fehlerdiagnosen
 
-- [ ] **SMTP-TLS:** Berichte, Nachinstallationsabschluss und Testmail verwenden STARTTLS mit TLS 1.2; kein Rückfall auf Klartext, TLS 1.0 oder 1.1. Versand unter PS5.1 und PS7 mit gültigem Serverzertifikat bestätigen. Bereits angelegte Nachinstallationsaufgaben vor diesem Fix enthalten noch den alten Mailversand.
+- [ ] **Nachinstallationsmail:** Abschluss- und Testmail aus der SYSTEM-Aufgabe mit STARTTLS/TLS 1.2 praktisch bestätigen. Bereits angelegte Nachinstallationsaufgaben vor dem TLS-Fix enthalten noch den alten Mailversand.
 
 - [ ] **JEA-Grenzen:** Paket-Install/Uninstall und freie Prozess-, Dienst-, Registry-, WMI- und Importbefehle ablehnen. Nur feste Update-/Wartungsfunktionen zulassen; SYSTEM-Abfragerolle und Verlauf prüfen. Cacheempfang erlaubt keine freien Zielpfade oder Skriptausführung.
 - [ ] **WinRM-Baseline:** Vorhandene Listener, Zertifikatszuordnungen, Firewallregeln und Remote-UAC unverändert lassen. Nur neue HTTPS-Regeln auf Verwaltungsserver-Adressen beschränken; mehrere Adressen berücksichtigen.
