@@ -10,7 +10,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Check, Download und Install
 
-- [ ] **Parallelbetrieb:** Konsolenhinweis nennt nur die maximale Anzahl gleichzeitiger Windows-Ziele. Neue Reihenfolge bestätigen: Windows-VMs einschließlich Verwaltungsserver, physische Windows-Systeme, Linux, Home Assistant; auch bei ParallelTargets=1. Verständlichen Hinweis bei unbekannter Bauart bestätigen. Download/Install: höchstens drei vollständige Windows-Zielabläufe gleichzeitig; Summen, Bericht und Mail stimmen.
+- [ ] **Parallelbetrieb:** Konsolenhinweis nennt nur die maximale Anzahl gleichzeitiger Windows-Ziele. Noch prüfen: Linux und Home Assistant nach allen Windows-Zielen; Reihenfolge auch bei ParallelTargets=1. Verständlichen Hinweis bei unbekannter Bauart bestätigen. Install: höchstens drei vollständige Windows-Zielabläufe gleichzeitig; Summen, Bericht und Mail stimmen.
 - [ ] **Neustartplanung:** Gemeinsame VM-Reservierungen halten Mindestabstand, eingestellten Neustartmodus und Wartungsfenster ein; VM-Nachinstallationen erhalten getrennte Starttermine. Physische Neustarts bleiben hinter dem VM-Block, Verwaltungsserver hinter dem Gesamtbericht.
 - [ ] **Geplanter Check:** Bestehende Aufgabe wird auf den PS5.1-Starthelfer aktualisiert. Fehlende/defekte PS7 fällt auf PS5.1 zurück; ein fehlgeschlagener Check startet nicht doppelt. Startprotokoll: Logs/ScheduledCheck-Launcher.log.
 - [ ] **PowerShell-Vorabupdate:** Dieselbe WinGet-CLI wie bei der Suche verwenden. Bei Installer-Technikkonflikt mit vorhandener PowerShell fortsetzen und manuelle Nacharbeit im Bericht nennen.
@@ -25,6 +25,8 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 - [ ] **Worker und Offlinefallback:** Wartungsworker aktualisiert sich ohne Verteilung. API-Sperren verwenden Release-Web-/Raw-Fallback beziehungsweise geprüften Cache; keine beschädigten oder unsignierten ausführbaren Dateien starten. Downloadfortschritt, Größenlimit und Stillstandsabbruch bestätigen.
 
 ## Sicherheit und Fehlerdiagnosen
+
+- [ ] **SMTP-TLS:** Berichte, Nachinstallationsabschluss und Testmail verwenden STARTTLS mit TLS 1.2; kein Rückfall auf Klartext, TLS 1.0 oder 1.1. Versand unter PS5.1 und PS7 mit gültigem Serverzertifikat bestätigen. Bereits angelegte Nachinstallationsaufgaben vor diesem Fix enthalten noch den alten Mailversand.
 
 - [ ] **JEA-Grenzen:** Paket-Install/Uninstall und freie Prozess-, Dienst-, Registry-, WMI- und Importbefehle ablehnen. Nur feste Update-/Wartungsfunktionen zulassen; SYSTEM-Abfragerolle und Verlauf prüfen. Cacheempfang erlaubt keine freien Zielpfade oder Skriptausführung.
 - [ ] **WinRM-Baseline:** Vorhandene Listener, Zertifikatszuordnungen, Firewallregeln und Remote-UAC unverändert lassen. Nur neue HTTPS-Regeln auf Verwaltungsserver-Adressen beschränken; mehrere Adressen berücksichtigen.

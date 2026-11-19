@@ -132,6 +132,71 @@ function ConvertTo-WindowsUpdateMailSafeString {
     return $result
 }
 
+function Send-WindowsUpdateSmtpMessage {
+    param([Parameter(Mandatory)]$MailSettings, [Parameter(Mandatory)][string]$Subject,
+        [Parameter(Mandatory)][string]$Body, [bool]$IsBodyHtml = $true)
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        # SmtpClient unter modernem .NET übernimmt ServicePointManager nicht
+        # zuverlässig. Der feste PS5.1-Transport erzwingt TLS 1.2 auch bei PS7.
+        # Zugangsdaten und Mailinhalt ausschließlich über stdin, nie argv/Datei.
+        $definition = 'function Send-WindowsUpdateSmtpMessageTls12 {' + ${function:Send-WindowsUpdateSmtpMessageTls12}.ToString() + '}' + [Environment]::NewLine + 'function Send-WindowsUpdateSmtpMessage {' + ${function:Send-WindowsUpdateSmtpMessage}.ToString() + '}'
+        $runner = $definition + @'
+
+$ErrorActionPreference = 'Stop'
+try {
+    $data = [Management.Automation.PSSerializer]::Deserialize([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())))
+    Send-WindowsUpdateSmtpMessage @data
+    [Console]::Out.Write('SMTP_OK')
+} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+'@
+        $start = New-Object Diagnostics.ProcessStartInfo
+        $start.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $start.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($runner))
+        $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+        $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $start
+        try {
+            [void]$process.Start()
+            $output = $process.StandardOutput.ReadToEndAsync(); $errorOutput = $process.StandardError.ReadToEndAsync()
+            $data = @{MailSettings=$MailSettings;Subject=$Subject;Body=$Body;IsBodyHtml=$IsBodyHtml}
+            $process.StandardInput.Write([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([Management.Automation.PSSerializer]::Serialize($data))))
+            $process.StandardInput.Close()
+            if (-not $process.WaitForExit(90000)) { $process.Kill(); $process.WaitForExit(); throw 'SMTP-Versand nach 90 Sekunden abgebrochen.' }
+            if ($process.ExitCode -ne 0 -or $output.GetAwaiter().GetResult() -ne 'SMTP_OK') {
+                throw "SMTP-Versand mit TLS 1.2 fehlgeschlagen: $($errorOutput.GetAwaiter().GetResult())"
+            }
+        } finally { $process.Dispose() }
+        return
+    }
+    Send-WindowsUpdateSmtpMessageTls12 @PSBoundParameters
+}
+
+function Send-WindowsUpdateSmtpMessageTls12 {
+    param([Parameter(Mandatory)]$MailSettings, [Parameter(Mandatory)][string]$Subject,
+        [Parameter(Mandatory)][string]$Body, [bool]$IsBodyHtml = $true)
+    $previousProtocol = [Net.ServicePointManager]::SecurityProtocol
+    $smtp = $null; $message = $null
+    try {
+        # Bewusst ersetzen statt -bor: SSL3/TLS1.0/TLS1.1 nicht weiter erlauben.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $smtp = New-Object Net.Mail.SmtpClient($MailSettings.Host, [int]$MailSettings.Port)
+        $smtp.EnableSsl = $true
+        $smtp.Timeout = 60000
+        if ($MailSettings.Auth) { $smtp.Credentials = New-Object Net.NetworkCredential($MailSettings.AuthUser, $MailSettings.AuthPass) }
+        $message = New-Object Net.Mail.MailMessage
+        $message.From = $MailSettings.Sender; $message.To.Add($MailSettings.MailTo)
+        if ($MailSettings.MailCC -and $MailSettings.MailCC -ne $MailSettings.MailTo) { $message.CC.Add($MailSettings.MailCC) }
+        if ($MailSettings.MailBCC -and $MailSettings.MailBCC -ne $MailSettings.MailTo) { $message.Bcc.Add($MailSettings.MailBCC) }
+        $message.Subject = $Subject; $message.Body = $Body; $message.IsBodyHtml = $IsBodyHtml
+        $message.BodyEncoding = [Text.Encoding]::UTF8; $message.SubjectEncoding = [Text.Encoding]::UTF8
+        $smtp.Send($message)
+    } finally {
+        if ($message) { $message.Dispose() }; if ($smtp) { $smtp.Dispose() }
+        [Net.ServicePointManager]::SecurityProtocol = $previousProtocol
+    }
+}
+
 function Send-WindowsUpdateHtmlMail {
     param(
         [Parameter(Mandatory)]$MailSettings,
@@ -145,15 +210,7 @@ function Send-WindowsUpdateHtmlMail {
     for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
         $smtp = $null; $mail = $null
         try {
-            $smtp = New-Object -TypeName Net.Mail.SmtpClient -ArgumentList $MailSettings.Host, ([int]$MailSettings.Port)
-            $smtp.EnableSsl = [bool]$MailSettings.UseSSL
-            if ($MailSettings.Auth) { $smtp.Credentials = New-Object -TypeName Net.NetworkCredential -ArgumentList $MailSettings.AuthUser, $MailSettings.AuthPass }
-            $mail = New-Object -TypeName Net.Mail.MailMessage
-            $mail.From = $MailSettings.Sender; $mail.To.Add($MailSettings.MailTo)
-            if ($MailSettings.MailCC -and $MailSettings.MailCC -ne $MailSettings.MailTo) { $mail.CC.Add($MailSettings.MailCC) }
-            if ($MailSettings.MailBCC -and $MailSettings.MailBCC -ne $MailSettings.MailTo) { $mail.Bcc.Add($MailSettings.MailBCC) }
-            $mail.Subject = $Subject; $mail.Body = $HtmlBody; $mail.IsBodyHtml = $true; $mail.BodyEncoding = [Text.Encoding]::UTF8; $mail.SubjectEncoding = [Text.Encoding]::UTF8
-            $smtp.Send($mail)
+            Send-WindowsUpdateSmtpMessage -MailSettings $MailSettings -Subject $Subject -Body $HtmlBody
             if ($WriteLog) { & $WriteLog 'E-Mail erfolgreich versendet' }
             return $true
         }

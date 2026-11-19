@@ -539,7 +539,9 @@ function Register-DeferredUpdateTask {
   $expiresAt = [DateTime]::FromFileTimeUtc($registeredAt).AddDays(5).ToLocalTime()
   $scheduledAtFileTime = if ($ScheduledAt -gt [datetime]::MinValue) { $ScheduledAt.ToUniversalTime().ToFileTimeUtc() } else { 0 }
   $maintenanceEndBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($MaintenanceEndTime))
+  $smtpHelper = 'function Send-WindowsUpdateSmtpMessageTls12 {' + ${function:Send-WindowsUpdateSmtpMessageTls12}.ToString() + '}'
   $script = @"
+$smtpHelper
 `$taskName = '$taskName'
 `$workerFailed = `$false
 `$taskExpired = `$false
@@ -651,13 +653,7 @@ try {
         return `$true
       }
       `$mailSubject = if (-not [string]::IsNullOrWhiteSpace([string]`$mail.Install.Subject)) { `$Subject + ' ' + [string]`$mail.Install.Subject } else { `$Subject }
-      `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port)
-      `$smtp.EnableSsl = [bool]`$mail.UseSSL
-      if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
-      `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, `$mailSubject, `$Body)
-      `$message.BodyEncoding = [Text.Encoding]::UTF8
-      `$message.IsBodyHtml = `$IsHtml
-      `$smtp.Send(`$message)
+      Send-WindowsUpdateSmtpMessageTls12 -MailSettings `$mail -Subject `$mailSubject -Body `$Body -IsBodyHtml:`$IsHtml
       [System.IO.File]::WriteAllText(`$notificationPath, [DateTime]::UtcNow.ToString('o'))
       Write-DeferredLog 'Abschluss-E-Mail erfolgreich versendet.'
       return `$true
@@ -1163,7 +1159,9 @@ function Register-DeferredMailTestTask {
   $testMailSettings = $MailSettings | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
   Add-Member -InputObject $testMailSettings -NotePropertyName AuthPass -NotePropertyValue '' -Force
   $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($testMailSettings | ConvertTo-Json -Depth 5 -Compress)))
+  $smtpHelper = 'function Send-WindowsUpdateSmtpMessageTls12 {' + ${function:Send-WindowsUpdateSmtpMessageTls12}.ToString() + '}'
   $script = @"
+$smtpHelper
 `$taskName = '$taskName'
 `$logDirectory = Join-Path `$env:ProgramData 'WindowsUpdateAdm'
 `$logFile = Join-Path `$logDirectory 'DeferredUpdates.log'
@@ -1213,14 +1211,8 @@ h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
   for (`$attempt = 1; `$attempt -le 3 -and -not `$mailSent; `$attempt++) {
     try {
       Write-TestMailLog "Sende Testmail (Versuch `$attempt/3)."
-      `$smtp = New-Object Net.Mail.SmtpClient(`$mail.Host, [int]`$mail.Port)
-      `$smtp.EnableSsl = [bool]`$mail.UseSSL
-      if (`$mail.Auth) { `$smtp.Credentials = New-Object Net.NetworkCredential(`$mail.AuthUser, `$mail.AuthPass) }
-      `$message = New-Object Net.Mail.MailMessage(`$mail.Sender, `$mail.MailTo, `$subject, `$body)
-      `$message.BodyEncoding = [Text.Encoding]::UTF8
-      `$message.IsBodyHtml = `$true
-      `$smtp.Send(`$message)
-      `$message.Dispose(); `$smtp.Dispose()
+      Send-WindowsUpdateSmtpMessageTls12 -MailSettings `$mail -Subject `$subject -Body `$body
+
       `$mailSent = `$true
       Write-TestMailLog 'Testmail erfolgreich versendet.'
     } catch {
