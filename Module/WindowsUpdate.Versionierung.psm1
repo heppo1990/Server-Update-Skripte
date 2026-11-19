@@ -3,7 +3,16 @@
 }
 
 function Get-WindowsUpdateScriptsVersion {
-    '5.2.12'
+    '5.2.13'
+}
+
+function Test-WindowsUpdateCertificateRunAsCompatibility {
+    param([Parameter(Mandatory)][bool]$IsInDomain,
+        [Parameter(Mandatory)][int]$Build,
+        [Parameter(Mandatory)][ValidateSet(1,2,3)][int]$ProductType)
+    # Zertifikatsanmeldung mit virtuellem JEA-Konto ist auf Nicht-AD-Server
+    # 2019 auch mit Desktop Experience betroffen, nicht nur auf Hyper-V Core.
+    return (-not $IsInDomain -and $Build -eq 17763 -and $ProductType -ne 1)
 }
 
 function Test-WindowsUpdateAdmVersion {

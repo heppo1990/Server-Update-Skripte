@@ -260,7 +260,8 @@ ForEach ($Server in $ServerADList) {
 
       Try {
         if ($index -gt 1) { Write-ScriptLog '' }
-        Write-ScriptLog "Starte Update-Download auf AD-Server $Servername..."
+        $targetLabel = if ($Server.IsHypervisor) { 'Hypervisor' } elseif ($Server.IsAdditional) { 'Zusatzcomputer' } else { 'AD-Ziel' }
+        Write-ScriptLog "Starte Update-Download auf $targetLabel $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
         $winRmProbe = $winRmProbeResults[$Servername]

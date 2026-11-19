@@ -399,8 +399,8 @@ try {
     # mehr erforderlich.
     # =========================================================
     $IsInDomain = (Get-CimInstance -ClassName Win32_ComputerSystem).PartOfDomain
-    $certificateRunAsCompatibility = -not $IsInDomain -and $serverCore -and
-        [int]$setupOsForWinGet.BuildNumber -eq 17763 -and $setupOsForWinGet.Caption -like 'Microsoft Hyper-V Server*'
+    $certificateRunAsCompatibility = Test-WindowsUpdateCertificateRunAsCompatibility `
+        -IsInDomain ([bool]$IsInDomain) -Build ([int]$setupOsForWinGet.BuildNumber) -ProductType ([int]$setupOsForWinGet.ProductType)
 
     if (-not $IsInDomain) {
         Write-SetupLog "" "INFO"
@@ -1160,7 +1160,7 @@ exit `$process.ExitCode
         Remove-Item -Path $PermanentPSSC -Force -ErrorAction Stop
         Write-SetupLog "Alte Session Configuration Datei entfernt" "INFO"
     }
-    # Windows Server 2016 (Build 14393) verarbeitet JEA mit
+    # Windows Server 2016/2019 verarbeitet JEA mit
     # RunAsVirtualAccount und WinRM-Clientzertifikaten nicht zuverlässig.
     # Das betrifft ausschließlich Nicht-AD-Systeme. AD-Systeme behalten auch
     # auf Server 2016 den virtuellen SYSTEM-Kontext, den Windows Update für
@@ -1174,7 +1174,7 @@ exit `$process.ExitCode
         ExecutionPolicy   = 'RemoteSigned'
     }
     if ($certificateRunAsCompatibility) {
-        Write-SetupLog 'Hyper-V Server 2019 Core: JEA verwendet den zertifikatsgemappten Administrator-Kontext.' 'INFO'
+        Write-SetupLog 'Server-2019-Zertifikat-Kompatibilität: JEA verwendet den zertifikatsgemappten Administrator-Kontext; Befehlsbeschränkungen bleiben erhalten.' 'INFO'
     } elseif (-not $IsInDomain -and $osBuild -le 14393) {
         Write-SetupLog "Windows Server 2016-Kompatibilitätsmodus: JEA verwendet den zertifikatsgemappten Administrator-Kontext." "WARN"
     } else {

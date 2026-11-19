@@ -78,6 +78,24 @@ function Test-WindowsUpdateDeploymentConfiguration {
 
     try {
         $rawStatus = Invoke-Command @endpointParameters
+        # Build 17763 umfasst auch Windows-Clients. Nur tatsächliche Nicht-AD-
+        # Server benötigen diesen Modus. Die Live-Registrierung muss dazu passen.
+        if ($certificate -and $rawStatus.PSObject.Properties['TargetBuild'] -and [int]$rawStatus.TargetBuild -eq 17763) {
+            $runtimeParameters = @{}
+            foreach ($key in $endpointParameters.Keys) { $runtimeParameters[$key] = $endpointParameters[$key] }
+            [void]$runtimeParameters.Remove('ConfigurationName')
+            $runtimeParameters.ScriptBlock = {
+                $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+                $system = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+                $configuration = Get-PSSessionConfiguration -Name WindowsUpdateAdm -ErrorAction Stop
+                [pscustomobject]@{ Build=[int]$os.BuildNumber; ProductType=[int]$os.ProductType; IsInDomain=[bool]$system.PartOfDomain; RunAsVirtualAccount=[bool]::Parse([string]$configuration.RunAsVirtualAccount) }
+            }
+            $runtime = Invoke-Command @runtimeParameters
+            if (Test-WindowsUpdateCertificateRunAsCompatibility -IsInDomain $runtime.IsInDomain -Build $runtime.Build -ProductType $runtime.ProductType) {
+                $RequireCertificateRunAsCompatibility = $true
+                if ($runtime.RunAsVirtualAccount) { throw 'Server-2019-Zertifikatszugang verwendet noch ein virtuelles JEA-Konto; Einrichtung muss korrigiert werden.' }
+            }
+        }
         if (($rawStatus.PSObject.Properties['TargetBuild'] -and [int]$rawStatus.TargetBuild -lt 17763) -or
             ($rawStatus.PSObject.Properties['ServerCore'] -and [bool]$rawStatus.ServerCore)) {
             $ExpectedWinGetUpdateOnly = $false
@@ -121,6 +139,8 @@ function Test-WindowsUpdateDeploymentConfiguration {
                     [PSCustomObject]@{
                         MaintenanceCurrent = $moduleText -match "MaintenanceRevision\s*=\s*'6'"
                         Build = $build
+                        ProductType = [int]$os.ProductType
+                        IsInDomain = [bool](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).PartOfDomain
                         Caption = [string]$os.Caption
                         ServerCore = ((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType -eq 'Server Core')
                         HasStatusFunction = $versionMatch.Success
@@ -135,8 +155,7 @@ function Test-WindowsUpdateDeploymentConfiguration {
                 $ExpectedWinGetUpdateOnly = $false
                 $ExpectedWinGetMaintenanceOnly = $false
             }
-            if ($legacyStatus.ServerCore -and [int]$legacyStatus.Build -eq 17763 -and
-                $legacyStatus.Caption -like 'Microsoft Hyper-V Server*') {
+            if (Test-WindowsUpdateCertificateRunAsCompatibility -IsInDomain $legacyStatus.IsInDomain -Build $legacyStatus.Build -ProductType $legacyStatus.ProductType) {
                 return [PSCustomObject]@{ IsCurrent = $false; Reason = $reason; Version = '' }
             }
             if ([int]$legacyStatus.Build -le 17763) {
@@ -485,11 +504,10 @@ function Invoke-WindowsUpdateWinRMDeployment {
         }
 
         $targetOsForWinGet = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
-            Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object Caption, BuildNumber, ProductType, @{ Name = 'InstallationType'; Expression = { (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType } }
+            Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop | Select-Object Caption, BuildNumber, ProductType, @{ Name = 'InstallationType'; Expression = { (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType } }, @{ Name = 'IsInDomain'; Expression = { [bool](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).PartOfDomain } }
         }
         $requireCertificateCompatibility = $DeployType -ne 'AD' -and
-            $targetOsForWinGet.InstallationType -eq 'Server Core' -and [int]$targetOsForWinGet.BuildNumber -eq 17763 -and
-            $targetOsForWinGet.Caption -like 'Microsoft Hyper-V Server*'
+            (Test-WindowsUpdateCertificateRunAsCompatibility -IsInDomain $targetOsForWinGet.IsInDomain -Build ([int]$targetOsForWinGet.BuildNumber) -ProductType ([int]$targetOsForWinGet.ProductType))
         if ($targetOsForWinGet.InstallationType -eq 'Server Core' -or
             [int]$targetOsForWinGet.BuildNumber -lt 17763) {
             $EnableWingetUpdates = $false

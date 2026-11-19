@@ -386,7 +386,7 @@ function Invoke-WindowsUpdates {
   )
 
   try {
-    Write-ScriptLog "Starte Windows-Updates auf ${Servername}..."
+    Write-ScriptLog "Starte Windows-Updates auf ${Servername}..." -LogOnly:$true
 
     $LocalFqdn2 = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
     $IsLocal = $Servername -ieq $env:COMPUTERNAME -or
@@ -1291,7 +1291,7 @@ ForEach ($Server in $ServerADList) {
           Write-ScriptLog ''
           Write-ScriptLog ''
         }
-        $targetLabel = if ($Server.IsHypervisor) { 'Hypervisor' } elseif ($Server.IsAdditional) { 'Nicht-AD-Ziel' } else { 'AD-Server' }
+        $targetLabel = if ($Server.IsHypervisor) { 'Hypervisor' } elseif ($Server.IsAdditional) { 'Zusatzcomputer' } else { 'AD-Ziel' }
         Write-ScriptLog "Starte Update-Installation auf $targetLabel $Servername..."
         $RepBody += "<div class='server-title'>Server: ${Servername}</div>"
 
