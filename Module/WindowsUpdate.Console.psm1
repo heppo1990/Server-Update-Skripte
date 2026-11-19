@@ -223,7 +223,7 @@ function Test-WindowsUpdateConsoleMessage {
     if ($Message -match '^WinGet auf [A-Za-z0-9_.-]+ übersprungen: Auf Server Core nicht unterstützt;') { return $true }
     if ($Message -match '(?i)^\s*(Starte (Update-(Check|Download|Installation)|Windows-Updates) auf|Verarbeite (Windows|AD|Hypervisor)|Gesamtliste nach Zusammenführung|Check abgeschlossen\.|Download abgeschlossen\.|Installation abgeschlossen\.|E-Mail erfolgreich versendet|Mailkonfigurationstest erfolgreich)') { return $true }
     if ($Message -match '(?i)^\s*(Zurückgestellte Kategorien:|Zurückgestellte KBs:|Nachinstallation aktiviert$)') { return $true }
-    if ($Message -match '(?i)^\s*(Neue WindowsUpdateAdm-Verteilung nötig für:|Paketupdates auf .+: \d+ Pakete? offen;)' ) { return $true }
+    if ($Message -match '(?i)^\s*(Neue WindowsUpdateAdm-Verteilung nötig für:|Paketupdates auf .+: \d+ Pakete? offen;|Auf \S+ (?:konnte 1 Anwendungsupdate|konnten \d+ Anwendungsupdates) nicht installiert werden\.)' ) { return $true }
     if ($Message -match '(?i)keine Paketupdates verfügbar\.') { return $true }
     if ($Message -match '(?i)(Paketupdates? verfügbar|Paketupdate\(s\) (erkannt und verarbeitet|verfügbar)|\d+ Paketupdates installiert|Home-Assistant-Check: .*Update\(s\) verfügbar)') {
         $script:WindowsUpdateConsolePackageRowsActive = $Message -notmatch '(?i)Keine Paketupdates'

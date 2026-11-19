@@ -324,8 +324,8 @@ function Invoke-PackageManagerUpdates {
     }
     if ($successfulPackagesByManager.Count -eq 0 -and $manualPackageCount -eq 0) { Write-ScriptLog '' }
     if ($manualPackageCount -gt 0) {
-      $manualPackageLabel = if ($manualPackageCount -eq 1) { 'Paket' } else { 'Pakete' }
-      Write-ScriptLog "Paketupdates auf ${Servername}: $manualPackageCount $manualPackageLabel offen; Übersicht am Laufende."
+      $manualPackageText = if ($manualPackageCount -eq 1) { 'konnte 1 Anwendungsupdate' } else { "konnten $manualPackageCount Anwendungsupdates" }
+      Write-ScriptLog "Auf $Servername $manualPackageText nicht installiert werden. Details stehen in der Zusammenfassung am Ende."
       foreach ($manualAction in $manualPackageActions) {
         $manualRows = @($manualAction.Packages)
         $manualPackageName = ''
@@ -628,6 +628,8 @@ $LinuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Propert
 $HAConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
 $LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Where-Object { $_ }).Count } else { 0 }
 $UpdateSettings = $Settings.UpdateSettings
+# Vor allen Zielabläufen initialisieren, auch im separaten PS5.1-Worker.
+$vmRebootIntervalMinutes = [Math]::Max(0, [int]$UpdateSettings.VMRebootIntervalMinutes)
 if (-not $ParallelTarget) {
   $configuredParallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
   $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Windows-Ziele nacheinander.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig" }
@@ -1720,7 +1722,6 @@ if ($IsWindowsOnlyRun) {
 # Die optionalen Linux-/HA-Skripte melden bereits geplante VM-Neustarts über
 # den gemeinsamen Zähler. Damit kann die physische Windows-Gruppe ihren
 # Neustart frühestens eine Stunde nach dem letzten VM-Neustart beginnen.
-$vmRebootIntervalMinutes = [Math]::Max(0, [int]$UpdateSettings.VMRebootIntervalMinutes)
 foreach ($externalStatsName in @('LinuxStats','HAStats')) {
   $externalStats = Get-Variable -Name $externalStatsName -ValueOnly -ErrorAction SilentlyContinue
   if ($externalStats -and $externalStats.PSObject.Properties['VMRebootLatestAt'] -and $externalStats.VMRebootLatestAt) {
