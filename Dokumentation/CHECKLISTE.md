@@ -10,7 +10,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Check, Download und Install
 
-- [ ] **Parallelbetrieb:** Plattformübergreifend alle VMs einschließlich Verwaltungsserver vor allen physischen Systemen; auch bei ParallelTargets=1. JEA-Bauartabfrage nach Verteilung 5.2.1 und verständlichen Hinweis bei unbekannter Bauart bestätigen. Download/Install: höchstens drei vollständige Windows-Zielabläufe gleichzeitig; Summen, Bericht und Mail stimmen.
+- [ ] **Parallelbetrieb:** Plattformübergreifend alle VMs einschließlich Verwaltungsserver vor allen physischen Systemen; auch bei ParallelTargets=1. Verständlichen Hinweis bei unbekannter Bauart bestätigen. Download/Install: höchstens drei vollständige Windows-Zielabläufe gleichzeitig; Summen, Bericht und Mail stimmen.
 - [ ] **Neustartplanung:** Gemeinsame VM-Reservierungen halten Mindestabstand, eingestellten Neustartmodus und Wartungsfenster ein; VM-Nachinstallationen erhalten getrennte Starttermine. Physische Neustarts bleiben hinter dem VM-Block, Verwaltungsserver hinter dem Gesamtbericht.
 - [ ] **Geplanter Check:** Bestehende Aufgabe wird auf den PS5.1-Starthelfer aktualisiert. Fehlende/defekte PS7 fällt auf PS5.1 zurück; ein fehlgeschlagener Check startet nicht doppelt. Startprotokoll: Logs/ScheduledCheck-Launcher.log.
 - [ ] **PowerShell-Vorabupdate:** Dieselbe WinGet-CLI wie bei der Suche verwenden. Bei Installer-Technikkonflikt mit vorhandener PowerShell fortsetzen und manuelle Nacharbeit im Bericht nennen.

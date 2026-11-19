@@ -450,7 +450,7 @@ foreach ($executionPhase in @($executionPlan.Phases)) {
   $LinuxTargetHosts = @($executionPhase.Targets | Where-Object Platform -eq Linux | ForEach-Object { $_.Name })
   $LinuxConfigured = $LinuxTargetHosts.Count -gt 0
   $HAConfigured = @($executionPhase.Targets | Where-Object Platform -eq HomeAssistant).Count -gt 0
-  if (-not $ParallelTarget) { Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly }
+  if (-not $ParallelTarget) { Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly:$true }
 if ($ServerADList.Count -gt 0) {
   Write-ScriptLog ''
   Write-ScriptLog "Verarbeite Windows-Zielliste..."

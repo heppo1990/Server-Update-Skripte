@@ -175,7 +175,7 @@ foreach ($executionPhase in @($executionPlan.Phases)) {
   $LinuxTargetHosts = @($executionPhase.Targets | Where-Object Platform -eq Linux | ForEach-Object { $_.Name })
   $LinuxConfigured = $LinuxTargetHosts.Count -gt 0
   $HAConfigured = @($executionPhase.Targets | Where-Object Platform -eq HomeAssistant).Count -gt 0
-  if (-not $ParallelTarget) { Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly }
+  if (-not $ParallelTarget) { Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly:$true }
 if ($ServerADList.Count -gt 0) {
   Write-ScriptLog ''
   Write-ScriptLog "Verarbeite AD-Serverliste..."
@@ -350,7 +350,7 @@ ForEach ($Server in $ServerADList) {
         } elseif ($isLocalManagementTarget) {
           $reason = 'WindowsUpdateAdm/JEA ist auf dem Verwaltungsserver nicht verfügbar; direkter lokaler oder uneingeschränkter Loopback-Fallback ist deaktiviert.'
           Write-ScriptLog "FEHLER: $reason"
-          Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'JEA-Download-Verwaltungsserver' -Target $Servername -ErrorRecord ([InvalidOperationException]::new($reason)) -Context @('Fallback=keiner')
+          Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly:$true } -Operation 'JEA-Download-Verwaltungsserver' -Target $Servername -ErrorRecord ([InvalidOperationException]::new($reason)) -Context @('Fallback=keiner')
           throw $reason
         } elseif (-not $jeaSupported -and $svcCredential) {
           # Windows Server 2016 außerhalb der AD: Der über Client-Zertifikat
