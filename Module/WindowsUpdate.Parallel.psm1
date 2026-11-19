@@ -17,11 +17,9 @@ function Invoke-WindowsUpdateTargetBatch {
     [void][IO.Directory]::CreateDirectory($root)
     $pending = [Collections.Generic.List[object]]::new()
     $answers = [Collections.Generic.List[object]]::new()
-    # Der Verwaltungsserver läuft zuletzt, damit dessen Updates die übrigen
-    # Worker nicht unterbrechen. Seine Neustartanforderung bleibt im Elternlauf.
-    $localNames = @($env:COMPUTERNAME,[Net.Dns]::GetHostName())
-    if ($env:USERDNSDOMAIN) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
-    $batches = @(@($Targets | Where-Object { $localNames -notcontains $_.Name }), @($Targets | Where-Object { $localNames -contains $_.Name }))
+    # Die Plattformplanung übergibt genau eine VM-/Physisch-Phase.
+    # Auch der Verwaltungsserver bleibt in seiner Phase; nur sein Neustart wartet.
+    $batches = @(,@($Targets))
     try {
         $contextPath = Join-Path $root 'context.xml'
         $Context | Export-Clixml -LiteralPath $contextPath -Depth 12

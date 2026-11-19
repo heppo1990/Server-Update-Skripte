@@ -131,7 +131,7 @@ $LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Whe
 $UpdateSettings = $Settings.UpdateSettings
 if (-not $ParallelTarget) {
   $configuredParallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
-  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Windows-Ziele nacheinander.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig." }
+  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Ziele nacheinander; zuerst alle VMs, danach physische Systeme.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig; zuerst alle VMs, danach physische Systeme." }
   Write-Host $parallelNotice -ForegroundColor Gray
 }
 $MailSettings = $Settings.MailSettings
@@ -153,7 +153,30 @@ $ServerADList = Get-WindowsUpdateTargets `
 $RepBody = New-WindowsUpdateDownloadReportHeader -ComputerName $ComputerFQDN -Timestamp $TimeStamp -PowerShellVersion ([string]$PSVersionTable.PSVersion)
 
 # Server verarbeiten
-if ($ServerADList -ne $null) {
+# Ein gemeinsamer Phasenplan für alle Plattformen: VMs vollständig vor Physisch.
+$executionOriginalWindows = @($ServerADList | Where-Object { $_ })
+$executionOriginalLinux = $LinuxConfigured
+$executionOriginalHA = $HAConfigured
+if ($ParallelTarget) {
+  # Der Elternlauf hat die Bauart bereits bestimmt; Worker planen nicht erneut.
+  $executionPlan = [pscustomobject]@{Phases=@([pscustomobject]@{Name='Ziel';Targets=@($executionOriginalWindows | ForEach-Object { [pscustomobject]@{Platform='Windows';Name=$_.Name;Target=$_} })});Skipped=@()}
+} else {
+  $planLinux = if ($executionOriginalLinux) { $linuxSettings } else { $null }
+  $planHA = if ($executionOriginalHA) { $haSettings } else { $null }
+  $executionPlan = Get-WindowsUpdateExecutionPhases -WindowsTargets $executionOriginalWindows -UpdateSettings $UpdateSettings -LinuxSettings $planLinux -HomeAssistantSettings $planHA -WriteLog { param($message,$logOnly=$false) Write-ScriptLog $message -LogOnly:$logOnly }
+  foreach ($skipped in @($executionPlan.Skipped)) {
+    $RepBody += "<div class='warning-box'>Ziel $([Net.WebUtility]::HtmlEncode($skipped.Name)) übersprungen: Bauart nicht ermittelbar. $([Net.WebUtility]::HtmlEncode($skipped.Reason))</div>"
+    if ($skipped.Platform -eq 'Windows' -and $skipped.Unreachable) { $WindowsUnreachableHosts++ }
+  }
+}
+foreach ($executionPhase in @($executionPlan.Phases)) {
+  if (@($executionPhase.Targets).Count -eq 0) { continue }
+  $ServerADList = @($executionPhase.Targets | Where-Object Platform -eq Windows | ForEach-Object { $_.Target })
+  $LinuxTargetHosts = @($executionPhase.Targets | Where-Object Platform -eq Linux | ForEach-Object { $_.Name })
+  $LinuxConfigured = $LinuxTargetHosts.Count -gt 0
+  $HAConfigured = @($executionPhase.Targets | Where-Object Platform -eq HomeAssistant).Count -gt 0
+  if (-not $ParallelTarget) { Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly }
+if ($ServerADList.Count -gt 0) {
   Write-ScriptLog ''
   Write-ScriptLog "Verarbeite AD-Serverliste..."
   Write-ScriptLog ''
@@ -183,9 +206,7 @@ if ($ServerADList -ne $null) {
   $index = 0
   $Anzahl = 0 + $ServerADList.Count
 
-  if ($Anzahl -eq 0) {
-    $RepBody += "<div class='warning-box'><p>Der Abruf der Serverliste ist fehlgeschlagen!</p></div>"
-  }
+
 
   # Begrenzte parallele Erreichbarkeitsprüfung, ohne konkurrierende Änderungen,
   # Berichtsdateien oder Update-/Neustartprozesse auf den Zielen.
@@ -423,8 +444,6 @@ ForEach ($Server in $ServerADList) {
     exit 0
   }
 
-} else {
-  $RepBody += "<div class='warning-box'><p>Der Abruf der Serverliste ist fehlgeschlagen!</p></div>"
 }
 
 # Linux und Home Assistant besitzen keinen getrennten Download-Cache. Der
@@ -446,10 +465,10 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
     # SSH-Eingabeaufforderungen müssen sichtbar bleiben; das Kinderskript ist
     # im Quiet-Modus, damit nur echte SSH-Prompts die Konsole erreichen.
     $sharedAuxLog = if ($UpdateSettings.WriteLogFile) { $LogFileName } else { '' }
-    & $linuxCheckScript -CheckOnly -Quiet -NoSeparateLog -SharedLogPath $sharedAuxLog
+    & $linuxCheckScript -TargetHost $LinuxTargetHosts -CheckOnly -Quiet -NoSeparateLog -SharedLogPath $sharedAuxLog
     if (Test-Path -LiteralPath $linuxStatsPath) {
       $linuxStats = Get-Content -LiteralPath $linuxStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
-      $LinuxAvailableUpdateCount = [int]$linuxStats.UpdatesInstalled
+      $LinuxAvailableUpdateCount += [int]$linuxStats.UpdatesInstalled
       $LinuxCheckExecuted = $true
       foreach ($linuxHost in @($linuxStats.HostStatus)) {
         if ([int]$linuxHost.UpdateCount -gt 0) {
@@ -505,6 +524,14 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   }
 }
 
+}
+# Für die Gesamtzählung wieder die vollständigen konfigurierten Ziele verwenden.
+$ServerADList = $executionOriginalWindows
+$Anzahl = $executionOriginalWindows.Count
+$LinuxConfigured = $executionOriginalLinux
+$HAConfigured = $executionOriginalHA
+$LinuxCheckAttempted = $executionOriginalLinux
+$HACheckAttempted = $executionOriginalHA
 # Zusammenfassung
 $ScriptDuration = [math]::Round((New-TimeSpan -Start $ScriptStartTime).TotalMinutes, 2)
 $ProcessedSystemCount = $Anzahl + $(if ($LinuxCheckAttempted) { $LinuxConfiguredHostCount } else { 0 }) + $(if ($HACheckAttempted) { 1 } else { 0 })

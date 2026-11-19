@@ -1,4 +1,4 @@
-# Fachmodul: WindowsUpdate.Ziele
+﻿# Fachmodul: WindowsUpdate.Ziele
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Get-WindowsUpdateSshArguments {
@@ -14,6 +14,112 @@ function Get-WindowsUpdateSshArguments {
     if ($BatchMode) { $arguments += @('-o', 'BatchMode=yes') }
     if ($AcceptNewHostKey) { $arguments += @('-o', 'StrictHostKeyChecking=accept-new') }
     return $arguments
+}
+
+# Ausschließlich lesende SSH-Abfrage, einschließlich einer Laufzeitgrenze für
+# den Befehl selbst (ConnectTimeout allein begrenzt nur den Verbindungsaufbau).
+function Invoke-WindowsUpdateInventorySsh {
+    param([Parameter(Mandatory)]$Settings, [Parameter(Mandatory)][string]$HostName,
+        [Parameter(Mandatory)][string]$UserName, [Parameter(Mandatory)][string]$Command)
+    if ($HostName -match '^[\-]' -or $UserName -notmatch '^[A-Za-z0-9_.-]+$') { throw 'Ungültiges SSH-Ziel.' }
+    $ssh = if ($Settings.PSObject.Properties['SSHPath'] -and $Settings.SSHPath) { [string]$Settings.SSHPath } else { (Get-Command ssh.exe -ErrorAction Stop).Source }
+    $key = if ($Settings.PSObject.Properties['KeyPath'] -and $Settings.KeyPath) { [string]$Settings.KeyPath } else { Join-Path $env:USERPROFILE '.ssh\id_rsa_linux' }
+    $port = if ($Settings.PSObject.Properties['Port'] -and [int]$Settings.Port -gt 0) { [int]$Settings.Port } else { 22 }
+    $arguments = @(Get-WindowsUpdateSshArguments -KeyPath $key -Port $port -ConnectTimeoutSeconds 5 -BatchMode)
+    # Keine Passwort-/Hostkey-Prompts bei der Bestandsaufnahme.
+    $arguments += @('-o','StrictHostKeyChecking=yes','-o','ConnectionAttempts=1',"${UserName}@${HostName}",$Command)
+    $quoted = @($arguments | ForEach-Object { '"' + ([string]$_ -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"' })
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $ssh; $start.Arguments = $quoted -join ' '
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $start
+    try {
+        [void]$process.Start()
+        $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(20000)) { $process.Kill(); $process.WaitForExit(); throw 'SSH-Bauartabfrage nach 20 Sekunden abgebrochen.' }
+        $output = $stdout.GetAwaiter().GetResult(); $errorText = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw "SSH-Bauartabfrage fehlgeschlagen: $errorText" }
+        return $output.Trim()
+    } finally { $process.Dispose() }
+}
+
+function Get-WindowsUpdateExecutionPhases {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][object[]]$WindowsTargets = @(), [Parameter(Mandatory)]$UpdateSettings,
+        $LinuxSettings, $HomeAssistantSettings, [scriptblock]$WriteLog)
+    $virtual = [Collections.Generic.List[object]]::new()
+    $physical = [Collections.Generic.List[object]]::new()
+    $skipped = [Collections.Generic.List[object]]::new()
+    $targets = @($WindowsTargets | ForEach-Object { [pscustomobject]@{Platform='Windows';Name=$_.Name;Target=$_} })
+    if ($LinuxSettings -and $LinuxSettings.PSObject.Properties['Hosts']) {
+        foreach ($entry in @($LinuxSettings.Hosts)) {
+            if (-not $entry) { continue }
+            $name = if ($entry -is [string]) { $entry } elseif ($entry.PSObject.Properties['Host']) { [string]$entry.Host } elseif ($entry.PSObject.Properties['Name']) { [string]$entry.Name } else { '' }
+            if ($name) { $targets += [pscustomobject]@{Platform='Linux';Name=$name;Target=$entry} }
+        }
+    }
+    if ($HomeAssistantSettings -and $HomeAssistantSettings.PSObject.Properties['Host'] -and $HomeAssistantSettings.Host) {
+        $targets += [pscustomobject]@{Platform='HomeAssistant';Name=[string]$HomeAssistantSettings.Host;Target=$HomeAssistantSettings}
+    }
+    $localNames = @($env:COMPUTERNAME,[Net.Dns]::GetHostName())
+    if ($env:USERDNSDOMAIN) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
+    foreach ($entry in $targets) {
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $unreachable = $false
+        try {
+            if ($entry.Platform -eq 'Windows') {
+                $probe = {
+                    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+                    $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop
+                    if ([string]::IsNullOrWhiteSpace([string]$cs.Model)) { throw 'Hardwaremodell fehlt.' }
+                    [pscustomobject]@{IsVirtual=(($cs.Manufacturer+' '+$cs.Model+' '+$bios.Manufacturer) -match 'VMware|VirtualBox|Virtual Machine|KVM|QEMU|Xen|Bochs|Parallels|bhyve|HVM domU')}
+                }
+                if ($localNames -contains $entry.Name) { $state = & $probe }
+                else {
+                    $ports = Test-WindowsUpdateWinRmPorts -ComputerName $entry.Name -TimeoutMilliseconds 750 -Attempts 1
+                    if (-not $ports.Reachable) { $unreachable = $true; throw 'WinRM nicht erreichbar.' }
+                    $auth = $null
+                    if ($entry.Target.IsAdditional -or $entry.Target.IsHypervisor) {
+                        $auth = Get-WindowsUpdateClientCertificateAuthInfo -UpdateSettings $UpdateSettings -TargetComputer $entry.Name
+                        if ($null -eq $auth) { throw 'Clientzertifikat fehlt; keine andere Anmeldung versuchen.' }
+                    }
+                    # Der feste JEA-Status funktioniert auch mit URI-beschränktem Zertifikat.
+                    $state = $null
+                    try {
+                        $status = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $entry.Name -AuthInfo $auth -ConfigurationName WindowsUpdateAdm -ScriptBlock { Get-WindowsUpdateAdmDeploymentStatus } -TimeoutSeconds 15 -OperationName 'Bauart über JEA ermitteln')
+                        if ($status.Count -gt 0 -and $status[-1].PSObject.Properties['IsVirtual'] -and $status[-1].IsVirtual -is [bool]) { $state = $status[-1] }
+                    } catch { }
+                    if ($null -eq $state) {
+                        $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $entry.Name -AuthInfo $auth -ScriptBlock $probe -TimeoutSeconds 15 -OperationName 'Bauart ermitteln')
+                        if ($result.Count -eq 0) { throw 'Bauart fehlt; aktuelle Verteilung ausführen.' }
+                        $state = $result[-1]
+                    }
+                }
+                if (-not $state.PSObject.Properties['IsVirtual'] -or $state.IsVirtual -isnot [bool]) { throw 'Ungültige Bauartantwort; aktuelle Verteilung ausführen.' }
+                $isVirtual = [bool]$state.IsVirtual
+            } elseif ($entry.Platform -eq 'Linux') {
+                if (-not $entry.Target.PSObject.Properties['User'] -or -not $entry.Target.User) { throw 'SSH-Benutzer fehlt.' }
+                $answer = Invoke-WindowsUpdateInventorySsh -Settings $LinuxSettings -HostName $entry.Name -UserName $entry.Target.User -Command 'systemd-detect-virt --vm; result=$?; if [ "$result" -eq 1 ]; then exit 0; fi; exit "$result"'
+                if ($answer -notmatch '^[a-zA-Z0-9_-]+$') { throw 'Ungültige Virtualisierungsantwort.' }
+                $isVirtual = $answer -ne 'none'
+            } else {
+                # Supervisor fragt den Host ab, nicht den SSH-Addon-Container.
+                $answer = Invoke-WindowsUpdateInventorySsh -Settings $HomeAssistantSettings -HostName $entry.Name -UserName $HomeAssistantSettings.User -Command 'ha host info --raw-json'
+                $info = $answer | ConvertFrom-Json -ErrorAction Stop
+                if ($info.PSObject.Properties['data']) { $info = $info.data }
+                if (-not $info.PSObject.Properties['virtualization']) { throw 'Home-Assistant-Host meldet keine Virtualisierung.' }
+                $isVirtual = -not [string]::IsNullOrWhiteSpace([string]$info.virtualization) -and [string]$info.virtualization -ne 'none'
+            }
+            if ($isVirtual) { $virtual.Add($entry) } else { $physical.Add($entry) }
+            if ($WriteLog) { & $WriteLog ("Bauart {0}: {1}; Dauer {2:N1}s." -f $entry.Name,$(if ($isVirtual) {'VM'} else {'physisch'}),$timer.Elapsed.TotalSeconds) $true }
+        } catch {
+            $skipped.Add([pscustomobject]@{Platform=$entry.Platform;Name=$entry.Name;Unreachable=$unreachable;Reason=$_.Exception.Message})
+            if ($WriteLog) { & $WriteLog "WARNUNG: Bauart auf $($entry.Name) nicht ermittelbar; Ziel übersprungen. Details im Log." $false; & $WriteLog "Bauartabfrage $($entry.Name): $($_.Exception.Message); Dauer $($timer.Elapsed.TotalSeconds)s." $true }
+        }
+    }
+    [pscustomobject]@{Phases=@([pscustomobject]@{Name='VMs';Targets=@($virtual.ToArray())},[pscustomobject]@{Name='Physische Systeme';Targets=@($physical.ToArray())});Skipped=@($skipped.ToArray())}
 }
 
 function Get-WindowsUpdateTargets {

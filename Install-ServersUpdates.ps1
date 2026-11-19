@@ -4,7 +4,7 @@
 .SYNOPSIS
     Install-ServersUpdates.ps1
     Umfassendes Update-Management für Windows-Server, Linux und Home Assistant
-    
+
 .DESCRIPTION
     - Windows Updates (PSWindowsUpdate) - Installation
     - Package Manager Updates (Chocolatey, Winget)
@@ -13,14 +13,14 @@
     - HTML-Reports & E-Mail-Benachrichtigung
     - PowerShell 7 kompatibel (Server 2016-2025)
     - Unterstützt zusätzliche Geräte außerhalb der AD via "AdditionalComputers" in der Settings-JSON
-    
+
 .PARAMETER Debug
     Aktiviert erweiterte Debug-Ausgaben
-    
+
 .EXAMPLE
     .\Install-ServersUpdates.ps1
     Führt das Skript ohne Debug-Ausgaben aus
-    
+
 .EXAMPLE
     .\Install-ServersUpdates.ps1 -Debug
     Führt das Skript mit erweiterten Debug-Informationen aus
@@ -146,14 +146,14 @@ function Write-ScriptLog {
     [Parameter(Mandatory=$false)]
     [AllowEmptyString()]
     [string]$Message = "",
-    
+
     [Parameter(Mandatory=$false)]
     [switch]$IsDebug,
 
     [Parameter(Mandatory=$false)]
     [switch]$LogOnly
   )
-  
+
   Write-WindowsUpdateLog -Message $Message -LogFile $LogFileName -ScriptName $ScriptName -RunTimestamp $TimeStamp -WriteLogFile ([bool]($null -ne $UpdateSettings -and $UpdateSettings.WriteLogFile)) -IsDebug:$IsDebug -LogOnly:$LogOnly -DebugEnabled ([bool]$DebugMode)
 }
 
@@ -384,15 +384,15 @@ function Invoke-WindowsUpdates {
     [string[]]$DeferredKBs = @(),
     [bool]$DeferredOnly = $false
   )
-  
+
   try {
     Write-ScriptLog "Starte Windows-Updates auf ${Servername}..."
-    
+
     $LocalFqdn2 = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
-    $IsLocal = $Servername -ieq $env:COMPUTERNAME -or 
-               $Servername -ieq $ComputerFQDN -or 
+    $IsLocal = $Servername -ieq $env:COMPUTERNAME -or
+               $Servername -ieq $ComputerFQDN -or
                $Servername -ieq $LocalFqdn2
-    
+
     if ($IsLocal) {
       # Auch der Verwaltungsserver verwendet zuerst denselben eingeschränkten
       # WindowsUpdateAdm-Endpunkt wie entfernte Ziele und der Download-Lauf.
@@ -460,7 +460,7 @@ function Invoke-WindowsUpdates {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'JEA-Verbindungstest' -Target $Servername -ErrorRecord $_ -Context @('Fallback=Standard-Remoting')
       }
       }
-      
+
       if ($useJEA) {
         $jeaParams = @{
           ComputerName      = $Servername
@@ -548,12 +548,12 @@ function Invoke-WindowsUpdates {
         if (-not $success) { throw "Zertifikats-Update-Installation auf $Servername fehlgeschlagen." }
       }
     }
-    
+
     if ($UpdResult) {
       $UpdResult = $UpdResult | Sort-Object -Property KB, ComputerName -Unique
       Write-ScriptLog "Windows-Updates installiert auf ${Servername}: $(@($UpdResult).Count) Update(s)"
     }
-    
+
     return @(,$UpdResult)
   }
   catch {
@@ -630,7 +630,7 @@ $LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Whe
 $UpdateSettings = $Settings.UpdateSettings
 if (-not $ParallelTarget) {
   $configuredParallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
-  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Windows-Ziele nacheinander.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig." }
+  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Ziele nacheinander; zuerst alle VMs, danach physische Systeme.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig; zuerst alle VMs, danach physische Systeme." }
   Write-Host $parallelNotice -ForegroundColor Gray
 }
 $MailSettings = $Settings.MailSettings
@@ -1018,149 +1018,6 @@ $ServerADList = Get-WindowsUpdateTargets `
   -IncludeAdditionalTargetCounts `
   -WriteLog { param($message) Write-ScriptLog $message }
 
-# Linux-Updates Skript
-$LinuxUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Komponenten\Install-Linux Updates.ps1"
-$LinuxStatsFile = Join-Path (Join-Path $PSScriptRoot 'Logs') "linux_update_stats.json"
-if (-not $IsWindowsOnlyRun) {
-  # Im Gesamtlauf zählen konfigurierte Linux- und HA-Ziele auch bei fehlender Statistikdatei.
-  $LinuxServerCount = $LinuxConfiguredHostCount
-  $HAServerCount = if ($HAConfigured) { 1 } else { 0 }
-}
-
-if ($IsWindowsOnlyRun) {
-  if ($LinuxConfigured) { Write-ScriptLog "Eingeschränkter Windows-Testlauf: Linux-Updates werden übersprungen." }
-} elseif ($LinuxConfigured -and (Test-Path $LinuxUpdateScript)) {
-  $LinuxScriptExecuted = $true
-  Write-ScriptLog ''
-  Write-ScriptLog "Führe Linux-Updates Skript aus: $LinuxUpdateScript"
-  try {
-    & $LinuxUpdateScript -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
-    Write-ScriptLog "Linux-Updates Skript erfolgreich ausgeführt."
-    
-    if (Test-Path $LinuxStatsFile) {
-        $LinuxStats = Get-Content $LinuxStatsFile | ConvertFrom-Json
-      if ($LinuxStats.PSObject.Properties.Name -contains 'PendingPhysicalReboots') {
-        foreach ($pendingLinuxReboot in @($LinuxStats.PendingPhysicalReboots)) { $script:PendingLinuxPhysicalReboots.Add($pendingLinuxReboot) }
-      }
-      $LinuxServerCount = [math]::Max($LinuxServerCount, [int]$LinuxStats.TotalHosts)
-      
-      if ($LinuxStats.PSObject.Properties.Name -contains 'UpdatesInstalled') {
-        $LinuxUpdatesInstalled = $LinuxStats.UpdatesInstalled
-        $LinuxUpdatesFailed = if ($LinuxStats.PSObject.Properties.Name -contains 'FailedHosts') { $LinuxStats.FailedHosts } else { 0 }
-        $LinuxRebootScheduleFailures = if ($LinuxStats.PSObject.Properties.Name -contains 'RebootScheduleFailedHosts') { [int]$LinuxStats.RebootScheduleFailedHosts } else { 0 }
-        
-        if ($LinuxStats.PSObject.Properties.Name -contains 'HostStatus') {
-          # ConvertFrom-Json liefert bei exakt einem Host ein Einzelobjekt.
-          # Für die spätere Berichtsverarbeitung stets als Array normalisieren.
-          $LinuxUpdateDetails = @($LinuxStats.HostStatus)
-        }
-        if ($LinuxStats.PSObject.Properties.Name -contains 'VMRebootsScheduled') {
-          $script:VMRebootIndex += [int]$LinuxStats.VMRebootsScheduled
-        }
-        
-        Write-ScriptLog "Linux-Stats: $LinuxServerCount Server verarbeitet, $LinuxUpdatesInstalled Update(s) installiert, $LinuxUpdatesFailed fehlgeschlagen"
-      }
-      else {
-        $LinuxUpdatesInstalled = 0
-        $LinuxUpdatesFailed = 0
-        Write-ScriptLog "Linux-Stats: $LinuxServerCount Server, keine Detail-Informationen"
-      }
-      
-      Remove-Item $LinuxStatsFile -Force -ErrorAction SilentlyContinue
-      Write-ScriptLog "Linux-Stats-Datei gelöscht: $LinuxStatsFile"
-    }
-  }
-  catch {
-    Write-ScriptLog 'WARNUNG: Linux-Update-Skript fehlgeschlagen; Details im Log.'
-    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Linux-Install' -Target 'Linux' -ErrorRecord $_
-    # Die Hauptmeldung einer verschachtelten Skriptausführung enthält häufig
-    # keine Zeilennummer. Für einen eventuellen Folgefehler wird deshalb die
-    # echte Position des Linux-Skripts mitprotokolliert.
-    if ($_.InvocationInfo.PositionMessage) {
-      Write-ScriptLog "Linux-Fehlerposition: $($_.InvocationInfo.PositionMessage)"
-    }
-    if ($_.ScriptStackTrace) {
-      Write-ScriptLog "Linux-Fehlerstack: $($_.ScriptStackTrace)"
-    }
-  }
-}
-
-# Home Assistant-Updates Skript
-$HAUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Komponenten\Install-HomeAssistant Updates.ps1"
-$HAStatsFile = Join-Path (Join-Path $PSScriptRoot 'Logs') "ha_update_stats.json"
-
-if ($IsWindowsOnlyRun) {
-  if ($HAConfigured) { Write-ScriptLog "Eingeschränkter Windows-Testlauf: Home-Assistant-Updates werden übersprungen." }
-} elseif ($HAConfigured -and (Test-Path $HAUpdateScript)) {
-  $HAScriptExecuted = $true
-  Write-ScriptLog ''
-  Write-ScriptLog "Führe Home Assistant-Updates Skript aus: $HAUpdateScript"
-  try {
-    & $HAUpdateScript -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
-    Write-ScriptLog "Home Assistant-Updates Skript erfolgreich ausgeführt."
-    
-    if (Test-Path $HAStatsFile) {
-      $HAStats = Get-Content $HAStatsFile | ConvertFrom-Json
-      if ($HAStats.PSObject.Properties.Name -contains 'PendingPhysicalReboot' -and $null -ne $HAStats.PendingPhysicalReboot) {
-        $script:PendingHAPhysicalReboots.Add($HAStats.PendingPhysicalReboot)
-      }
-      $HAServerCount = [math]::Max($HAServerCount, [int]$HAStats.TotalHosts)
-      
-      if ($HAStats.PSObject.Properties.Name -contains 'SuccessfulUpdates') {
-        $HAUpdatesInstalled = $HAStats.SuccessfulUpdates
-      } else {
-        $HAUpdatesInstalled = 0
-      }
-      
-      if ($HAStats.PSObject.Properties.Name -contains 'FailedUpdates') {
-        $HAUpdatesFailed = $HAStats.FailedUpdates
-      } else {
-        $HAUpdatesFailed = 0
-      }
-      if ($HAStats.PSObject.Properties.Name -contains 'SkippedHosts') {
-        $HASkippedHosts = [int]$HAStats.SkippedHosts
-      }
-      
-      if ($HAStats.PSObject.Properties.Name -contains 'HostStatus') {
-        $HAUpdateDetails = $HAStats.HostStatus
-      } elseif ($HAStats.PSObject.Properties.Name -contains 'UpdateDetails') {
-        $HAUpdateDetails = $HAStats.UpdateDetails
-      }
-      if ($HAStats.PSObject.Properties.Name -contains 'VMRebootsScheduled') {
-        $script:VMRebootIndex += [int]$HAStats.VMRebootsScheduled
-      }
-      
-      Write-ScriptLog "HA-Stats: $HAServerCount Instanz(en), $HAUpdatesInstalled Update(s) installiert, $HAUpdatesFailed fehlgeschlagen, $HASkippedHosts übersprungen"
-      
-      Remove-Item $HAStatsFile -Force -ErrorAction SilentlyContinue
-      Write-ScriptLog "HA-Stats-Datei gelöscht: $HAStatsFile"
-    }
-  }
-  catch {
-    Write-ScriptLog 'WARNUNG: Home-Assistant-Update-Skript fehlgeschlagen; Details im Log.'
-    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'HomeAssistant-Install' -Target 'Home Assistant' -ErrorRecord $_
-  }
-}
-
-# Die optionalen Linux-/HA-Skripte melden bereits geplante VM-Neustarts über
-# den gemeinsamen Zähler. Damit kann die physische Windows-Gruppe ihren
-# Neustart frühestens eine Stunde nach dem letzten VM-Neustart beginnen.
-$vmRebootIntervalMinutes = [Math]::Max(0, [int]$UpdateSettings.VMRebootIntervalMinutes)
-foreach ($externalStatsName in @('LinuxStats','HAStats')) {
-  $externalStats = Get-Variable -Name $externalStatsName -ValueOnly -ErrorAction SilentlyContinue
-  if ($externalStats -and $externalStats.PSObject.Properties['VMRebootLatestAt'] -and $externalStats.VMRebootLatestAt) {
-    $externalAt = [datetime]$externalStats.VMRebootLatestAt
-    if ($null -eq $script:VMRebootLatestAt -or $externalAt -gt $script:VMRebootLatestAt) { $script:VMRebootLatestAt = $externalAt }
-  }
-}
-if ($script:VMRebootIndex -gt 0 -and $null -eq $script:VMRebootLatestAt) {
-  if ([bool]$UpdateSettings.VMRebootImmediately) {
-    $script:VMRebootLatestAt = (Get-Date).AddMinutes(1 + (($script:VMRebootIndex - 1) * $vmRebootIntervalMinutes))
-  } elseif (-not [string]::IsNullOrWhiteSpace([string]$UpdateSettings.VMRebootStartTime)) {
-    $script:VMRebootLatestAt = Get-NextRebootTimeInWindow -StartTime ([string]$UpdateSettings.VMRebootStartTime) -LatestTime ([string]$UpdateSettings.VMRebootWindowEndTime) -DelayMinutes (($script:VMRebootIndex - 1) * $vmRebootIntervalMinutes)
-  }
-}
-
 # Ein gezielter Testlauf verändert die allgemeine Serverliste nicht, sondern filtert sie nur für diesen Start.
 if ($TargetComputer -and $TargetComputer.Count -gt 0) {
   $requestedNames = @($TargetComputer | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -1198,14 +1055,14 @@ $RepBody = @"
 <meta charset="UTF-8">
 <title>Update-Installation Report - ${ComputerFQDN}</title>
 <style>
-    body { 
-        font-family: Arial, sans-serif; 
-        margin: 20px; 
+    body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
         background-color: #f5f5f5;
     }
-    h1 { 
-        color: #333; 
-        border-bottom: 2px solid #4CAF50; 
+    h1 {
+        color: #333;
+        border-bottom: 2px solid #4CAF50;
         padding-bottom: 10px;
     }
     h2 {
@@ -1235,25 +1092,25 @@ $RepBody = @"
         border-left: 4px solid #ffc107;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    table { 
-        border-collapse: collapse; 
-        width: 100%; 
-        margin: 10px 0; 
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 10px 0;
         background-color: white;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    th, td { 
-        border: 1px solid #ddd; 
-        padding: 12px 8px; 
-        text-align: left; 
+    th, td {
+        border: 1px solid #ddd;
+        padding: 12px 8px;
+        text-align: left;
     }
-    th { 
-        background-color: #4CAF50; 
-        color: white; 
+    th {
+        background-color: #4CAF50;
+        color: white;
         font-weight: bold;
     }
-    tr:nth-child(even) { 
-        background-color: #f9f9f9; 
+    tr:nth-child(even) {
+        background-color: #f9f9f9;
     }
     tr:hover {
         background-color: #f1f1f1;
@@ -1342,20 +1199,38 @@ if (-not [string]::IsNullOrWhiteSpace($script:ManagementPowerShellPreflightFailu
     Text = "$($script:ManagementPowerShellPreflightFailure) Das PowerShell-Paket wurde zur Vermeidung eines erneuten Abbruchs auf dem Verwaltungsserver nicht erneut automatisch gestartet. Bitte den Update-Status prüfen."
   }
 }
-foreach ($linuxHost in @($LinuxUpdateDetails | Where-Object { $_.Status -eq 'Updates installiert; Neustartplanung fehlgeschlagen' })) {
-  $ManualActions += [PSCustomObject]@{
-    Server = [string]$linuxHost.Host
-    Manager = 'Linux-Neustart'
-    Packages = @()
-    Text = 'Updates wurden installiert, aber der erforderliche Neustart konnte nicht geplant werden. Bitte den Server manuell neu starten. Details stehen im Linux-Laufprotokoll.'
+if ($IsWindowsOnlyRun) { $LinuxConfigured = $false; $HAConfigured = $false }
+# Ein gemeinsamer Phasenplan für alle Plattformen: VMs vollständig vor Physisch.
+$executionOriginalWindows = @($ServerADList | Where-Object { $_ })
+$executionOriginalLinux = $LinuxConfigured
+$executionOriginalHA = $HAConfigured
+if ($ParallelTarget) {
+  # Der Elternlauf hat die Bauart bereits bestimmt; Worker planen nicht erneut.
+  $executionPlan = [pscustomobject]@{Phases=@([pscustomobject]@{Name='Ziel';Targets=@($executionOriginalWindows | ForEach-Object { [pscustomobject]@{Platform='Windows';Name=$_.Name;Target=$_} })});Skipped=@()}
+} else {
+  $planLinux = if ($executionOriginalLinux) { $linuxSettings } else { $null }
+  $planHA = if ($executionOriginalHA) { $haSettings } else { $null }
+  $executionPlan = Get-WindowsUpdateExecutionPhases -WindowsTargets $executionOriginalWindows -UpdateSettings $UpdateSettings -LinuxSettings $planLinux -HomeAssistantSettings $planHA -WriteLog { param($message,$logOnly=$false) Write-ScriptLog $message -LogOnly:$logOnly }
+  foreach ($skipped in @($executionPlan.Skipped)) {
+    $RepBody += "<div class='warning-box'>Ziel $([Net.WebUtility]::HtmlEncode($skipped.Name)) übersprungen: Bauart nicht ermittelbar. $([Net.WebUtility]::HtmlEncode($skipped.Reason))</div>"
+    if ($skipped.Platform -eq 'Windows' -and $skipped.Unreachable) { $WindowsUnreachableHosts++ }
+    elseif ($skipped.Platform -eq 'Linux') { $LinuxUpdatesFailed++ }
+    elseif ($skipped.Platform -eq 'HomeAssistant') { $HAUpdatesFailed++ } else { $ErrorCount++ }
   }
 }
-
-if ($ServerADList -ne $null) {
+if (-not $IsWindowsOnlyRun) { $LinuxServerCount = $LinuxConfiguredHostCount; $HAServerCount = $(if ($executionOriginalHA) { 1 } else { 0 }) }
+foreach ($executionPhase in @($executionPlan.Phases)) {
+  if (@($executionPhase.Targets).Count -eq 0) { continue }
+  $ServerADList = @($executionPhase.Targets | Where-Object Platform -eq Windows | ForEach-Object { $_.Target })
+  $LinuxTargetHosts = @($executionPhase.Targets | Where-Object Platform -eq Linux | ForEach-Object { $_.Name })
+  $LinuxConfigured = $LinuxTargetHosts.Count -gt 0
+  $HAConfigured = @($executionPhase.Targets | Where-Object Platform -eq HomeAssistant).Count -gt 0
+  if (-not $ParallelTarget) { $script:ExecutionPhaseIsVirtual = $executionPhase.Name -eq 'VMs'; Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly }
+if ($ServerADList.Count -gt 0) {
   Write-ScriptLog ''
   Write-ScriptLog "Verarbeite Windows-Zielliste..."
   Write-ScriptLog ''
-  
+
   $RepBody += "<div class='section-title'>🖥️ Windows-Server Updates</div>"
 
   $SucheOnline = $UpdateSettings.SucheOnline
@@ -1364,9 +1239,7 @@ if ($ServerADList -ne $null) {
   $WindowsNonAdCount = @($ServerADList | Where-Object { $_.IsAdditional -or $_.IsHypervisor }).Count
   $WindowsAdCount = $Anzahl - $WindowsNonAdCount
 
-  if ($Anzahl -eq 0) {
-    $RepBody += "<div class='warning-box'><p>Der Abruf der Serverliste ist fehlgeschlagen!</p></div>"
-  }
+
 
   $parallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
   if ($ParallelTarget) {
@@ -1383,7 +1256,7 @@ if ($ServerADList -ne $null) {
   $parallelArrays = @('UpdResultFull','WindowsUpdateDetails','PackageUpdateDetails','ManualActions','DeploymentRequiredTargets')
   if (-not $ParallelTarget -and $parallelLimit -gt 1 -and @($ServerADList).Count -gt 1) {
     $context = @{}
-    foreach ($key in @('ManagementPowerShellUpdateExcludeId','ManagementPowerShellUpdateExcludeChocolateyId','SkipWingetUserUpdates')) {
+    foreach ($key in @('ExecutionPhaseIsVirtual','ManagementPowerShellUpdateExcludeId','ManagementPowerShellUpdateExcludeChocolateyId','SkipWingetUserUpdates')) {
       $value = Get-Variable -Name $key -ValueOnly -ErrorAction SilentlyContinue
       if ($null -ne $value) { $context[$key] = $value }
     }
@@ -1600,7 +1473,7 @@ ForEach ($Server in $ServerADList) {
           Write-ScriptLog "Kein Neustartstatus für $Servername abgefragt: In diesem Hauptlauf wurden keine Windows-Updates installiert."
         }
         if ($rebootRequired) {
-          $isVirtual = Test-ServerIsVirtual -Servername $Servername -ComputerFQDN $ComputerFQDN -AuthInfo $svcCredential -WriteLog { param($message) Write-ScriptLog $message }
+          $isVirtual = [bool]$script:ExecutionPhaseIsVirtual
           $vmDelayMinutes = $script:VMRebootIndex * $vmRebootIntervalMinutes
           if ($isVirtual -and $vmRebootImmediately) {
             $vmRebootAt = Get-NextRebootTimeInWindow -StartTime $vmRebootStartTime -LatestTime $vmRebootWindowEndTime -DelayMinutes $vmDelayMinutes -PreferImmediate
@@ -1628,7 +1501,7 @@ ForEach ($Server in $ServerADList) {
           $deferredCheck = Get-DeferredWindowsUpdates -Servername $Servername -SucheOnline $SucheOnline -AuthInfo $svcCredential -DeferredCategories $deferredCategories -DeferredKBs $deferredKBs -ManagementComputerFQDN $ComputerFQDN -WriteLog { param($message, $logOnly) if ($logOnly) { Write-ScriptLog $message -LogOnly } else { Write-ScriptLog $message } }
           if ($deferredCheck.Success -and @($deferredCheck.Updates).Count -gt 0) {
             Write-ScriptLog "Zurückgestellte Updates auf $Servername verfügbar: $(@($deferredCheck.Updates).Count)."
-            $isVirtualForDeferred = Test-ServerIsVirtual -Servername $Servername -ComputerFQDN $ComputerFQDN -AuthInfo $svcCredential -WriteLog { param($message) Write-ScriptLog $message }
+            $isVirtualForDeferred = [bool]$script:ExecutionPhaseIsVirtual
             $deferredMaintenanceTime = if ($isVirtualForDeferred) { $vmRebootStartTime } else { $physicalRebootTime }
             $deferredMaintenanceEndTime = if ($isVirtualForDeferred) { [string]$UpdateSettings.VMRebootWindowEndTime } else { [string]$UpdateSettings.PhysicalRebootWindowEndTime }
             $deferredScheduledAt = if (-not [string]::IsNullOrWhiteSpace($deferredMaintenanceTime)) { Get-NextScheduledTime $deferredMaintenanceTime } else { [datetime]::MinValue }
@@ -1721,8 +1594,166 @@ ForEach ($Server in $ServerADList) {
     [pscustomobject]@{Target=$ParallelTarget;Html=$RepBody.Substring($workerReportPrefixLength);Data=$workerData;LogFile=$LogFileName} | Export-Clixml -LiteralPath $ParallelResultPath -Depth 16
     exit 0
   }
-} else {
-  $RepBody += "<div class='warning-box'><p>Der Abruf der Serverliste ist fehlgeschlagen!</p></div>"
+}
+
+# Linux-Updates Skript
+$LinuxUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Komponenten\Install-Linux Updates.ps1"
+$LinuxStatsFile = Join-Path (Join-Path $PSScriptRoot 'Logs') "linux_update_stats.json"
+if (-not $IsWindowsOnlyRun) {
+  # Im Gesamtlauf zählen konfigurierte Linux- und HA-Ziele auch bei fehlender Statistikdatei.
+  $LinuxServerCount = [Math]::Max($LinuxServerCount, $LinuxConfiguredHostCount)
+  $HAServerCount = [Math]::Max($HAServerCount, $(if ($executionOriginalHA) { 1 } else { 0 }))
+}
+
+if ($IsWindowsOnlyRun) {
+  if ($LinuxConfigured) { Write-ScriptLog "Eingeschränkter Windows-Testlauf: Linux-Updates werden übersprungen." }
+} elseif ($LinuxConfigured -and (Test-Path $LinuxUpdateScript)) {
+  $LinuxScriptExecuted = $true
+  Write-ScriptLog ''
+  Write-ScriptLog "Führe Linux-Updates Skript aus: $LinuxUpdateScript"
+  try {
+    & $LinuxUpdateScript -MachineType $(if ($executionPhase.Name -eq 'VMs') { 'Virtual' } else { 'Physical' }) -TargetHost $LinuxTargetHosts -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
+    Write-ScriptLog "Linux-Updates Skript erfolgreich ausgeführt."
+
+    if (Test-Path $LinuxStatsFile) {
+        $LinuxStats = Get-Content $LinuxStatsFile | ConvertFrom-Json
+      if ($LinuxStats.PSObject.Properties.Name -contains 'PendingPhysicalReboots') {
+        foreach ($pendingLinuxReboot in @($LinuxStats.PendingPhysicalReboots)) { $script:PendingLinuxPhysicalReboots.Add($pendingLinuxReboot) }
+      }
+      $LinuxServerCount = [math]::Max($LinuxServerCount, [int]$LinuxStats.TotalHosts)
+
+      if ($LinuxStats.PSObject.Properties.Name -contains 'UpdatesInstalled') {
+        $LinuxUpdatesInstalled += $LinuxStats.UpdatesInstalled
+        $LinuxUpdatesFailed += $(if ($LinuxStats.PSObject.Properties.Name -contains 'FailedHosts') { $LinuxStats.FailedHosts } else { 0 })
+        $LinuxRebootScheduleFailures += $(if ($LinuxStats.PSObject.Properties.Name -contains 'RebootScheduleFailedHosts') { [int]$LinuxStats.RebootScheduleFailedHosts } else { 0 })
+
+        if ($LinuxStats.PSObject.Properties.Name -contains 'HostStatus') {
+          # ConvertFrom-Json liefert bei exakt einem Host ein Einzelobjekt.
+          # Für die spätere Berichtsverarbeitung stets als Array normalisieren.
+          $LinuxUpdateDetails += @($LinuxStats.HostStatus)
+        }
+        if ($LinuxStats.PSObject.Properties.Name -contains 'VMRebootsScheduled') {
+          $script:VMRebootIndex += [int]$LinuxStats.VMRebootsScheduled
+        }
+
+        Write-ScriptLog "Linux-Stats: $LinuxServerCount Server verarbeitet, $LinuxUpdatesInstalled Update(s) installiert, $LinuxUpdatesFailed fehlgeschlagen"
+      }
+      else {
+        # Keine neuen Detailwerte.
+
+        Write-ScriptLog "Linux-Stats: $LinuxServerCount Server, keine Detail-Informationen"
+      }
+
+      Remove-Item $LinuxStatsFile -Force -ErrorAction SilentlyContinue
+      Write-ScriptLog "Linux-Stats-Datei gelöscht: $LinuxStatsFile"
+    }
+  }
+  catch {
+    Write-ScriptLog 'WARNUNG: Linux-Update-Skript fehlgeschlagen; Details im Log.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'Linux-Install' -Target 'Linux' -ErrorRecord $_
+    # Die Hauptmeldung einer verschachtelten Skriptausführung enthält häufig
+    # keine Zeilennummer. Für einen eventuellen Folgefehler wird deshalb die
+    # echte Position des Linux-Skripts mitprotokolliert.
+    if ($_.InvocationInfo.PositionMessage) {
+      Write-ScriptLog "Linux-Fehlerposition: $($_.InvocationInfo.PositionMessage)"
+    }
+    if ($_.ScriptStackTrace) {
+      Write-ScriptLog "Linux-Fehlerstack: $($_.ScriptStackTrace)"
+    }
+  }
+}
+
+# Home Assistant-Updates Skript
+$HAUpdateScript = Join-Path -Path $PSScriptRoot -ChildPath "Komponenten\Install-HomeAssistant Updates.ps1"
+$HAStatsFile = Join-Path (Join-Path $PSScriptRoot 'Logs') "ha_update_stats.json"
+
+if ($IsWindowsOnlyRun) {
+  if ($HAConfigured) { Write-ScriptLog "Eingeschränkter Windows-Testlauf: Home-Assistant-Updates werden übersprungen." }
+} elseif ($HAConfigured -and (Test-Path $HAUpdateScript)) {
+  $HAScriptExecuted = $true
+  Write-ScriptLog ''
+  Write-ScriptLog "Führe Home Assistant-Updates Skript aus: $HAUpdateScript"
+  try {
+    & $HAUpdateScript -MachineType $(if ($executionPhase.Name -eq 'VMs') { 'Virtual' } else { 'Physical' }) -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
+    Write-ScriptLog "Home Assistant-Updates Skript erfolgreich ausgeführt."
+
+    if (Test-Path $HAStatsFile) {
+      $HAStats = Get-Content $HAStatsFile | ConvertFrom-Json
+      if ($HAStats.PSObject.Properties.Name -contains 'PendingPhysicalReboot' -and $null -ne $HAStats.PendingPhysicalReboot) {
+        $script:PendingHAPhysicalReboots.Add($HAStats.PendingPhysicalReboot)
+      }
+      $HAServerCount = [math]::Max($HAServerCount, [int]$HAStats.TotalHosts)
+
+      if ($HAStats.PSObject.Properties.Name -contains 'SuccessfulUpdates') {
+        $HAUpdatesInstalled = $HAStats.SuccessfulUpdates
+      } else {
+        $HAUpdatesInstalled = 0
+      }
+
+      if ($HAStats.PSObject.Properties.Name -contains 'FailedUpdates') {
+        $HAUpdatesFailed = $HAStats.FailedUpdates
+      } else {
+        $HAUpdatesFailed = 0
+      }
+      if ($HAStats.PSObject.Properties.Name -contains 'SkippedHosts') {
+        $HASkippedHosts = [int]$HAStats.SkippedHosts
+      }
+
+      if ($HAStats.PSObject.Properties.Name -contains 'HostStatus') {
+        $HAUpdateDetails = $HAStats.HostStatus
+      } elseif ($HAStats.PSObject.Properties.Name -contains 'UpdateDetails') {
+        $HAUpdateDetails = $HAStats.UpdateDetails
+      }
+      if ($HAStats.PSObject.Properties.Name -contains 'VMRebootsScheduled') {
+        $script:VMRebootIndex += [int]$HAStats.VMRebootsScheduled
+      }
+
+      Write-ScriptLog "HA-Stats: $HAServerCount Instanz(en), $HAUpdatesInstalled Update(s) installiert, $HAUpdatesFailed fehlgeschlagen, $HASkippedHosts übersprungen"
+
+      Remove-Item $HAStatsFile -Force -ErrorAction SilentlyContinue
+      Write-ScriptLog "HA-Stats-Datei gelöscht: $HAStatsFile"
+    }
+  }
+  catch {
+    Write-ScriptLog 'WARNUNG: Home-Assistant-Update-Skript fehlgeschlagen; Details im Log.'
+    Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-ScriptLog $message -LogOnly } -Operation 'HomeAssistant-Install' -Target 'Home Assistant' -ErrorRecord $_
+  }
+}
+
+# Die optionalen Linux-/HA-Skripte melden bereits geplante VM-Neustarts über
+# den gemeinsamen Zähler. Damit kann die physische Windows-Gruppe ihren
+# Neustart frühestens eine Stunde nach dem letzten VM-Neustart beginnen.
+$vmRebootIntervalMinutes = [Math]::Max(0, [int]$UpdateSettings.VMRebootIntervalMinutes)
+foreach ($externalStatsName in @('LinuxStats','HAStats')) {
+  $externalStats = Get-Variable -Name $externalStatsName -ValueOnly -ErrorAction SilentlyContinue
+  if ($externalStats -and $externalStats.PSObject.Properties['VMRebootLatestAt'] -and $externalStats.VMRebootLatestAt) {
+    $externalAt = [datetime]$externalStats.VMRebootLatestAt
+    if ($null -eq $script:VMRebootLatestAt -or $externalAt -gt $script:VMRebootLatestAt) { $script:VMRebootLatestAt = $externalAt }
+  }
+}
+if ($script:VMRebootIndex -gt 0 -and $null -eq $script:VMRebootLatestAt) {
+  if ([bool]$UpdateSettings.VMRebootImmediately) {
+    $script:VMRebootLatestAt = (Get-Date).AddMinutes(1 + (($script:VMRebootIndex - 1) * $vmRebootIntervalMinutes))
+  } elseif (-not [string]::IsNullOrWhiteSpace([string]$UpdateSettings.VMRebootStartTime)) {
+    $script:VMRebootLatestAt = Get-NextRebootTimeInWindow -StartTime ([string]$UpdateSettings.VMRebootStartTime) -LatestTime ([string]$UpdateSettings.VMRebootWindowEndTime) -DelayMinutes (($script:VMRebootIndex - 1) * $vmRebootIntervalMinutes)
+  }
+}
+
+}
+# Für die Gesamtzählung wieder die vollständigen konfigurierten Ziele verwenden.
+$ServerADList = $executionOriginalWindows
+$Anzahl = $executionOriginalWindows.Count
+$LinuxConfigured = $executionOriginalLinux
+$HAConfigured = $executionOriginalHA
+$WindowsNonAdCount = @($ServerADList | Where-Object { $_.IsAdditional -or $_.IsHypervisor }).Count
+$WindowsAdCount = $Anzahl - $WindowsNonAdCount
+foreach ($linuxHost in @($LinuxUpdateDetails | Where-Object { $_.Status -eq 'Updates installiert; Neustartplanung fehlgeschlagen' })) {
+  $ManualActions += [PSCustomObject]@{
+    Server = [string]$linuxHost.Host
+    Manager = 'Linux-Neustart'
+    Packages = @()
+    Text = 'Updates wurden installiert, aber der erforderliche Neustart konnte nicht geplant werden. Bitte den Server manuell neu starten. Details stehen im Linux-Laufprotokoll.'
+  }
 }
 
 # Physische Windows-Systeme starten erst nach dem VM-Neustartblock. Für jeden
@@ -1792,17 +1823,17 @@ if ($PackageUpdateDetails.Count -gt 0) {
 # Linux-Updates in Report einfügen
 if ($LinuxScriptExecuted) {
   $RepBody += "<div class='section-title'>🐧 Linux-Server Updates</div>"
-  
+
   if ($LinuxUpdateDetails -and @($LinuxUpdateDetails).Count -gt 0) {
     foreach ($hostInfo in $LinuxUpdateDetails) {
       $RepBody += "<div class='server-title'>Server: $($hostInfo.Host)</div>"
       if ($hostInfo.Status -eq 'Updates installiert; Neustartplanung fehlgeschlagen') {
         $RepBody += "<div class='warning-box'><strong>Neustart erforderlich:</strong> Die Neustartplanung ist fehlgeschlagen. Bitte den Server manuell neu starten; Details stehen im Laufprotokoll.</div>"
       }
-      
+
       if ($hostInfo.UpdateCount -gt 0) {
         $RepBody += "<p><strong>Installierte Updates:</strong> $($hostInfo.UpdateCount)</p>"
-        
+
         if ($hostInfo.Packages) {
           $RepBody += "<div class='linux-package-list'>"
           $RepBody += "<strong>Aktualisierte Pakete:</strong><br>"
@@ -1821,7 +1852,7 @@ if ($LinuxScriptExecuted) {
 # Home Assistant-Updates in Report einfügen
 if ($HAScriptExecuted) {
   $RepBody += "<div class='section-title'>🏠 Home Assistant Updates</div>"
-  
+
   if ($HAUpdateDetails -and $HAUpdateDetails.Count -gt 0) {
     foreach ($hostInfo in $HAUpdateDetails) {
       $RepBody += "<div class='server-title'>Instanz: $($hostInfo.Host)</div>"
@@ -1831,11 +1862,11 @@ if ($HAScriptExecuted) {
         $RepBody += "<div class='info-box'><p><strong>Status:</strong> Übersprungen</p><p>$skipDetailsHtml</p></div>"
       } elseif ($hostInfo.UpdateCount -gt 0 -or $hostInfo.Status -eq "Erfolgreich") {
         $RepBody += "<p><strong>Status:</strong> $($hostInfo.Status)</p>"
-        
+
         if ($hostInfo.UpdateCount) {
           $RepBody += "<p><strong>Installierte Updates:</strong> $($hostInfo.UpdateCount)</p>"
         }
-        
+
         if ($hostInfo.Details) {
           $RepBody += "<div class='linux-package-list'>"
           $RepBody += "<strong>Details:</strong><br>"
@@ -1959,7 +1990,7 @@ if ($HAServerCount -gt 0) {
 
 $RepBody += @"
     </ul>
-    
+
     <h3>Installierte Updates</h3>
     <p><strong>Gesamt installiert:</strong> $TotalUpdatesInstalled</p>
     <ul>
@@ -1981,7 +2012,7 @@ if ($HAScriptExecuted) {
 
 $RepBody += @"
     </ul>
-    
+
     <h3>Fehler</h3>
     <p><strong>Fehler aufgetreten:</strong> $TotalUpdatesFailed</p>
     <ul>
@@ -1998,7 +2029,7 @@ if ($HAScriptExecuted) {
 
 $RepBody += @"
     </ul>
-    
+
     <p><strong>⏱️ Verarbeitungsdauer:</strong> $ScriptDuration Minuten</p>
 </div>
 </body>

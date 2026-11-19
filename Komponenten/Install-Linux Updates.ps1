@@ -6,6 +6,8 @@ param(
     [switch]$Quiet,
     [switch]$NoSeparateLog,
     [string]$SharedLogPath,
+    [ValidateSet('Automatic','Virtual','Physical')][string]$MachineType = 'Automatic',
+    [string[]]$TargetHost,
     [switch]$DeferPhysicalReboots,
     [string]$KeyPath,
     [string]$SSHPath,

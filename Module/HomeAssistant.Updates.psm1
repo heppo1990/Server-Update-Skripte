@@ -1,4 +1,5 @@
-﻿Set-StrictMode -Version Latest
+﻿
+    if ($MachineType -ne 'Automatic') { return $MachineType -eq 'Virtual' }Set-StrictMode -Version Latest
 
 function Invoke-HomeAssistantUpdates {
 [CmdletBinding()]
@@ -8,6 +9,7 @@ param(
     [switch]$Quiet,
     [switch]$NoSeparateLog,
     [string]$SharedLogPath,
+    [ValidateSet('Automatic','Virtual','Physical')][string]$MachineType = 'Automatic',
     [switch]$DeferPhysicalReboots,
     [string]$HAHost,
     [string]$User,

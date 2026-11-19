@@ -9,6 +9,8 @@ param(
     [switch]$Quiet,
     [switch]$NoSeparateLog,
     [string]$SharedLogPath,
+    [ValidateSet('Automatic','Virtual','Physical')][string]$MachineType = 'Automatic',
+    [string[]]$TargetHost,
     [switch]$DeferPhysicalReboots,
     [string]$KeyPath,
     [string]$SSHPath,
@@ -119,6 +121,7 @@ function Get-NextLinuxScheduledTime {
 
 function Test-LinuxHostIsVirtual {
     param([Parameter(Mandatory)][string]$RemoteHost, [Parameter(Mandatory)][string]$RemoteUser, [Parameter(Mandatory)][string]$KeyPath, [Parameter(Mandatory)][AllowEmptyString()][string]$LogFile)
+    if ($MachineType -ne 'Automatic') { return $MachineType -eq 'Virtual' }
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
     $arguments += "${RemoteUser}@${RemoteHost}", 'systemd-detect-virt --vm 2>/dev/null; result=$?; if [ "$result" -eq 1 ]; then exit 0; fi; exit "$result"'
     $output = & $script:SSHPath @arguments 2>&1
@@ -128,7 +131,7 @@ function Test-LinuxHostIsVirtual {
         throw "Virtualisierungstyp auf $RemoteHost konnte nicht sicher bestimmt werden (SSH-Exitcode $exitCode)."
     }
     $virtualizationType = ($output -join '').Trim()
-    $isVirtual = -not [string]::IsNullOrWhiteSpace($virtualizationType)
+    $isVirtual = -not [string]::IsNullOrWhiteSpace($virtualizationType) -and $virtualizationType -ne 'none'
     $decision = if ($isVirtual) { "Linux-Host $RemoteHost als virtuelle Maschine erkannt ($virtualizationType)." } else { "Linux-Host $RemoteHost als physischer Computer erkannt." }
     Write-LinuxLog -Message $decision -LogFile $LogFile
     return $isVirtual
@@ -550,6 +553,14 @@ $hostEntries = @(
         if (-not [string]::IsNullOrWhiteSpace($hostValue) -or -not [string]::IsNullOrWhiteSpace($userValue)) { $entry }
     }
 )
+if ($TargetHost -and $TargetHost.Count -gt 0) {
+    $hostEntries = @($hostEntries | Where-Object {
+        $name = if ($_ -is [string]) { $_ } elseif ($_.PSObject.Properties['Host']) { [string]$_.Host } elseif ($_.PSObject.Properties['Name']) { [string]$_.Name } else { '' }
+        $TargetHost -contains $name
+    })
+    $foundNames = @($hostEntries | ForEach-Object { if ($_ -is [string]) { $_ } elseif ($_.PSObject.Properties['Host']) { [string]$_.Host } else { [string]$_.Name } })
+    foreach ($requestedName in $TargetHost) { if ($foundNames -notcontains $requestedName) { throw "Linux-Ziel '$requestedName' ist nicht konfiguriert." } }
+}
 $hostStatus = @(); $updateDetails = @(); $totalUpdatesInstalled = 0; $vmRebootsScheduled = 0; $rebootScheduleFailures = 0
 foreach ($entry in $hostEntries) {
     $properties = $entry.PSObject.Properties

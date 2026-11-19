@@ -203,9 +203,10 @@ function Test-WindowsUpdateConsoleMessage {
         $script:WindowsUpdateConsolePackageRowsActive = $false
     }
     if ($script:WindowsUpdateConsolePackageTableActive) {
-        if ($Message -match '^\s*ComputerName\s+Name\s+Id\s+InstalledVersion\s+AvailableVersion\s+Source\s*$' -or
+        if ($Message -match '^\s*(?:ComputerName\s+Name\s+Id\s+InstalledVersion\s+AvailableVersion\s+Source|Name\s+Id\s+Installed\s+Available)\s*$' -or
             $Message -match '^\s*-{3,}(?:\s+-{2,})+' -or
             $Message -match '^\s*\S+\s+.+\s{2,}\S+\s+\S+\s+\S+\s+\S+\s*$' -or
+            $Message -match '(?i)^\s*.+?\s+[A-Za-z0-9][A-Za-z0-9._+…-]*\s+(?:v?\d\S*|Unknown|Unbekannt)\s+(?:v?\d\S*|Unknown|Unbekannt)\s*$' -or
             $Message -match '^\s{2,}\S.*$') { return $true }
         $script:WindowsUpdateConsolePackageTableActive = $false
     }

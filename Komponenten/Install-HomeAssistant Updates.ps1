@@ -4,6 +4,7 @@
     [switch]$Quiet,
     [switch]$NoSeparateLog,
     [string]$SharedLogPath,
+    [ValidateSet('Automatic','Virtual','Physical')][string]$MachineType = 'Automatic',
     [switch]$DeferPhysicalReboots,
     [string]$HAHost,
     [string]$User,

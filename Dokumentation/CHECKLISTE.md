@@ -10,12 +10,12 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Check, Download und Install
 
-- [ ] **Parallelbetrieb:** Konsole nennt den Parallelitätswert einmal im Kopf; Start-/Abschlussmeldungen je Worker bleiben nur im Log. PS7→PS5-Start mit bereinigtem Modulpfad, vorbereiteten lokalen Modulen und Klartextausgabe auf dem Ziel bestätigen; temporäre Worker-Logs werden im Hauptlog gesammelt und entfernt. ParallelTargets=3 führt vollständige Windows-Zielabläufe gleichzeitig aus; Fehler eines Workers stoppen andere nicht. Zähler, Teilprotokolle und HTML stimmen; nur ein Gesamtbericht und eine Mail. Verwaltungsserver zuletzt; ParallelTargets=1 bleibt sequenziell.
+- [ ] **Parallelbetrieb:** Plattformübergreifend alle VMs einschließlich Verwaltungsserver vor allen physischen Systemen; auch bei ParallelTargets=1. JEA-Bauartabfrage nach Verteilung 5.2.1 und verständlichen Hinweis bei unbekannter Bauart bestätigen. Download/Install: höchstens drei vollständige Windows-Zielabläufe gleichzeitig; Summen, Bericht und Mail stimmen.
 - [ ] **Neustartplanung:** Gemeinsame VM-Reservierungen halten Mindestabstand, eingestellten Neustartmodus und Wartungsfenster ein; VM-Nachinstallationen erhalten getrennte Starttermine. Physische Neustarts bleiben hinter dem VM-Block, Verwaltungsserver hinter dem Gesamtbericht.
 - [ ] **Geplanter Check:** Bestehende Aufgabe wird auf den PS5.1-Starthelfer aktualisiert. Fehlende/defekte PS7 fällt auf PS5.1 zurück; ein fehlgeschlagener Check startet nicht doppelt. Startprotokoll: Logs/ScheduledCheck-Launcher.log.
 - [ ] **PowerShell-Vorabupdate:** Dieselbe WinGet-CLI wie bei der Suche verwenden. Bei Installer-Technikkonflikt mit vorhandener PowerShell fortsetzen und manuelle Nacharbeit im Bericht nennen.
 - [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
-- [ ] **Paketergebnisse und Ausgabe:** Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur. Erfolgreicher Rückfall erzeugt keine zusätzliche Fehlermeldung in der Konsole; echte Fehler bleiben sichtbar.
+- [ ] **Paketergebnisse und Ausgabe:** Kompakte WinGet-/Chocolatey-Paketlisten erscheinen auch bei parallelen Läufen vollständig in der Konsole. Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur. Erfolgreicher Rückfall erzeugt keine zusätzliche Fehlermeldung in der Konsole; echte Fehler bleiben sichtbar.
 
 ## WinGet-Wartung und Downloadcache
 
