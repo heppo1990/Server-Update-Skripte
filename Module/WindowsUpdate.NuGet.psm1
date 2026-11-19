@@ -1,4 +1,4 @@
-# Fachmodul: WindowsUpdate.NuGet
+﻿# Fachmodul: WindowsUpdate.NuGet
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Update-PS7PackageManagementModule {
@@ -145,7 +145,20 @@ function Get-WindowsUpdateOnlineNuGetProviderVersion {
         return [pscustomobject]@{ Version = [version]$provider.Version; Error = $null }
     }
     catch {
-        $detail = ([string]$_.Exception.Message -replace '\s+', ' ').Trim()
+        $discoveryError = $_.Exception.Message
+        try {
+            # Direkter offizieller Feed, falls PackageManagements Bootstrap-
+            # Ermittlung (insbesondere unter PS7) keine Providerzeile liefert.
+            $feed = Invoke-WebRequest -Uri 'https://cdn.oneget.org/providers/nugetv2.feed.swidtag' -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            $content = [string]$feed.Content
+            if ($content.Length -gt 1048576) { throw 'NuGet-Metadaten unerwartet groß.' }
+            $versions = @([regex]::Matches($content, 'href="https://cdn\.oneget\.org/providers/nuget-(\d+(?:\.\d+){1,3})\.package\.swidtag"') | ForEach-Object { [version]$_.Groups[1].Value })
+            if ($versions.Count -eq 0) { throw 'Offizieller Feed enthält keine Provider-Version.' }
+            $latest = $versions | Sort-Object -Descending | Select-Object -First 1
+            if ($WriteLog) { & $WriteLog "NuGet-Provider-Version $latest aus dem offiziellen Discovery-Feed ermittelt." 'INFO' }
+            return [pscustomobject]@{Version=$latest;Error=$null}
+        } catch { $discoveryError += '; Discovery-Feed: ' + $_.Exception.Message }
+        $detail = ([string]$discoveryError -replace '\s+', ' ').Trim()
         if ($WriteLog) { & $WriteLog "Aktuelle NuGet-Provider-Version konnte online nicht ermittelt werden. Ursache: $detail" 'WARN' }
         return [pscustomobject]@{ Version = $null; Error = $detail }
     }

@@ -135,6 +135,20 @@ function Get-WindowsUpdateWinGetCachedArtifacts {
     }
     $releaseIndex = Join-Path $env:ProgramData 'WindowsUpdateAdm\DownloadCache\winget-release.json'
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # Gemeinsamer Metadatenabgleich für alle parallelen Worker. Archive haben
+    # zusätzlich ihre eigene Download-Sperre; kein Worker lädt dieselben Bytes erneut.
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $releaseIndex))
+    $indexLock = $null; $indexTimer = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        while (-not $indexLock) {
+            try { $indexLock = [IO.File]::Open(($releaseIndex+'.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+            catch [IO.IOException] { if ($indexTimer.Elapsed.TotalSeconds -gt 90) { throw 'Zentraler WinGet-Releaseabgleich ist belegt.' }; Start-Sleep -Milliseconds 250 }
+        }
+        $release = $null
+        if ((Test-Path -LiteralPath $releaseIndex) -and ([datetime]::UtcNow-(Get-Item -LiteralPath $releaseIndex).LastWriteTimeUtc).TotalMinutes -lt 15) {
+            try { $release = [IO.File]::ReadAllText($releaseIndex) | ConvertFrom-Json } catch { $release = $null }
+        }
+        if (-not $release) {
     try {
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/microsoft/winget-cli/releases/latest' -Headers @{'User-Agent'='Server-Update-Skripte'} -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
     } catch {
@@ -155,6 +169,12 @@ function Get-WindowsUpdateWinGetCachedArtifacts {
         }
     }
     if ([string]$release.tag_name -notmatch '^v[0-9][A-Za-z0-9._-]*$') { throw 'Ungültige gespeicherte WinGet-Version.' }
+            $indexStaging = $releaseIndex+'.tmp'
+            $release | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $indexStaging -Encoding UTF8
+            Move-Item -LiteralPath $indexStaging -Destination $releaseIndex -Force
+        }
+    } finally { if ($indexLock) { $indexLock.Dispose() } }
+    if ([string]$release.tag_name -notmatch '^v[0-9][A-Za-z0-9._-]*$') { throw 'Ungültige gespeicherte WinGet-Version.' }
     $artifacts = @(
         foreach ($name in @('Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle','DesktopAppInstaller_Dependencies.zip')) {
             $asset = @($release.assets | Where-Object name -eq $name)
@@ -165,8 +185,58 @@ function Get-WindowsUpdateWinGetCachedArtifacts {
             [pscustomobject]@{Name=$name;Version=[string]$release.tag_name;Path=$download.Path;Bytes=$download.Bytes;Sha256=$download.Sha256;Folder=(Split-Path -Parent $download.Path)}
         }
     )
-    $release | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $releaseIndex -Encoding UTF8
     $script:WinGetCachedArtifactsCheckedUtc = [DateTime]::UtcNow
     $script:WinGetCachedArtifactsForRun = $artifacts
     return $artifacts
+}
+
+function Sync-WindowsUpdateWinGetCache {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ComputerName, $AuthInfo, [scriptblock]$WriteLog)
+    $session = $null
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $parameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $AuthInfo -ConfigurationName 'WindowsUpdateAdm' -OperationTimeoutSeconds 120
+        $session = New-PSSession @parameters
+        $status = Invoke-Command -Session $session -ScriptBlock { Get-WindowsUpdateAdmDeploymentStatus } -ErrorAction Stop
+        if (-not $status.PSObject.Properties['CacheTransferSupported'] -or -not $status.CacheTransferSupported) {
+            # Der vorhandene zentrale Versionshinweis sammelt den Verteilungsbedarf.
+            return
+        }
+        $artifacts = @(Get-WindowsUpdateWinGetCachedArtifacts -WriteLog $WriteLog)
+        foreach ($artifact in $artifacts) {
+            $uri = 'https://github.com/microsoft/winget-cli/releases/download/{0}/{1}' -f $artifact.Version,$artifact.Name
+            $uploadId = [guid]::NewGuid().ToString('N')
+            $request = { param($action,$uri,$bytes,$sha,$id,$offset,$data) Receive-WindowsUpdateAdmWinGetCache -Action $action -Uri $uri -Bytes $bytes -Sha256 $sha -UploadId $id -Offset $offset -Data $data }
+            $arguments = @('Probe',$uri,[long]$artifact.Bytes,[string]$artifact.Sha256,$uploadId,[long]0,'')
+            $probe = Invoke-Command -Session $session -ScriptBlock $request -ArgumentList $arguments -ErrorAction Stop
+            if ($probe.Present) { if ($WriteLog) { & $WriteLog "WinGet-Cache auf ${ComputerName}: $($artifact.Name) SHA256-geprüft vorhanden; keine Übertragung." }; continue }
+            $arguments[0] = 'Start'
+            $null = Invoke-Command -Session $session -ScriptBlock $request -ArgumentList $arguments -ErrorAction Stop
+            if ($WriteLog) { & $WriteLog "WinGet-Cache auf ${ComputerName}: Übertragung $($artifact.Name), $($artifact.Bytes) Bytes beginnt." }
+            $stream = [IO.File]::OpenRead($artifact.Path)
+            try {
+                $buffer = New-Object byte[] 65536
+                $offset = [long]0
+                $lastProgress = $timer.Elapsed.TotalSeconds
+                while (($count = $stream.Read($buffer,0,$buffer.Length)) -gt 0) {
+                    if ($timer.Elapsed.TotalSeconds -gt 1800) { throw 'Cacheübertragung überschritt 30 Minuten.' }
+                    $arguments[0] = 'Append'; $arguments[5] = $offset; $arguments[6] = [Convert]::ToBase64String($buffer,0,$count)
+                    $reply = Invoke-Command -Session $session -ScriptBlock $request -ArgumentList $arguments -ErrorAction Stop
+                    $offset += $count
+                    if ([long]$reply.Offset -ne $offset) { throw 'Ziel bestätigte eine falsche Cacheposition.' }
+                    if ($WriteLog -and $timer.Elapsed.TotalSeconds - $lastProgress -ge 15) {
+                        & $WriteLog "WinGet-Cache auf ${ComputerName}: $offset / $($artifact.Bytes) Bytes; Laufzeit $([int]$timer.Elapsed.TotalSeconds)s."
+                        $lastProgress = $timer.Elapsed.TotalSeconds
+                    }
+                }
+            } finally { $stream.Dispose() }
+            $arguments[0] = 'Complete'; $arguments[5] = $offset; $arguments[6] = ''
+            $reply = Invoke-Command -Session $session -ScriptBlock $request -ArgumentList $arguments -ErrorAction Stop
+            if (-not $reply.Present) { throw 'Cacheabschluss nicht bestätigt.' }
+            if ($WriteLog) { & $WriteLog "WinGet-Cache auf ${ComputerName}: $($artifact.Name) vollständig übertragen und SHA256 bestätigt; Laufzeit $([int]$timer.Elapsed.TotalSeconds)s." }
+        }
+    } catch {
+        if ($WriteLog) { & $WriteLog "WinGet-Cache auf ${ComputerName} nicht vollständig nachgeliefert: $($_.Exception.Message) Geprüfter Ziel-Download bleibt als Rückfallweg erhalten." $true }
+    } finally { if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue } }
 }

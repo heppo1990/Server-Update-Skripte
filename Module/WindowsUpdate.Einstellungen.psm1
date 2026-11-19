@@ -1,4 +1,4 @@
-# Fachmodul: WindowsUpdate.Einstellungen
+﻿# Fachmodul: WindowsUpdate.Einstellungen
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Initialize-WindowsUpdateDpapi {
@@ -284,6 +284,9 @@ function Get-WindowsUpdateClientCertificateAuthInfo {
                 Select-Object -First 1
         }
         if ($certificate) {
+            if (-not $certificate.HasPrivateKey -or $certificate.NotAfter -le (Get-Date) -or $certificate.NotBefore -gt (Get-Date)) {
+                throw "Clientzertifikat für '$TargetComputer' ist zeitlich ungültig oder besitzt keinen zugänglichen privaten Schlüssel. Zertifikatseinrichtung prüfen."
+            }
             return [PSCustomObject]@{ Type = 'Certificate'; Thumbprint = $thumbprint }
         }
         Write-CommonLog $WriteLog "WARNUNG: Zertifikat mit Thumbprint '$thumbprint' nicht gefunden."

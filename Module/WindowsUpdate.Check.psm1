@@ -166,9 +166,28 @@ function Invoke-WindowsUpdateCheckCacheCleanup {
       } catch { $detectNowDiagnostic = $_.Exception.ToString() }
       if ($wuaucltDiagnostic) { $diagnostics.Add($wuaucltDiagnostic) }
 
-      # Warten bis der WU-Scan abgeschlossen ist
-      Start-Sleep -Seconds $DetectNowWaitSec
-
+      # Suchbereitschaft in einem lokalen PS5-Prozess prüfen: synchrone COM-
+      # Suche im Kindprozess, aber strikt begrenzte Wartezeit im Setup-Prozess.
+      $scanTimer = [Diagnostics.Stopwatch]::StartNew()
+      $scanProcess = $null
+      try {
+        $probeSource = '$ErrorActionPreference="Stop"; try { $session=New-Object -ComObject Microsoft.Update.Session; $result=$session.CreateUpdateSearcher().Search("IsInstalled=0 and IsHidden=0"); if([int]$result.ResultCode -eq 2){exit 0}; exit 2 } catch { exit 1 }'
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeSource))
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $scanProcess = [Diagnostics.Process]::Start($startInfo)
+        if ($scanProcess.WaitForExit($DetectNowWaitSec * 1000)) {
+          if ($scanProcess.ExitCode -ne 0) { throw "WU-Suchprozess lieferte Exitcode $($scanProcess.ExitCode)." }
+          $diagnostics.Add("WU-Suchbereitschaft nach $([math]::Round($scanTimer.Elapsed.TotalSeconds,1))s bestätigt.")
+        } else {
+          $scanProcess.Kill()
+          $diagnostics.Add("WU-Bereitschaftssuche nach ${DetectNowWaitSec}s abgebrochen; reguläre Update-Abfrage prüft erneut.")
+        }
+      } catch {
+        $diagnostics.Add("WU-Suchbereitschaft nach $([math]::Round($scanTimer.Elapsed.TotalSeconds,1))s nicht bestätigt: $($_.Exception.Message)")
+      } finally { if ($scanProcess) { $scanProcess.Dispose() } }
       return [PSCustomObject]@{ Status = $result; DetectNowDiagnostic = $detectNowDiagnostic; Diagnostic = ($diagnostics -join [Environment]::NewLine) }
     }
     catch {
@@ -179,7 +198,7 @@ function Invoke-WindowsUpdateCheckCacheCleanup {
   # Wartezeit nach DetectNow aus Settings lesen (Standard 60 Sekunden)
   $detectWait = 60
   if ($UpdateSettings.DetectNowWaitSeconds -gt 0) {
-    $detectWait = $UpdateSettings.DetectNowWaitSeconds
+    $detectWait = [Math]::Min(180, [int]$UpdateSettings.DetectNowWaitSeconds)
   }
 
   try {
@@ -205,7 +224,7 @@ function Invoke-WindowsUpdateCheckCacheCleanup {
     }
 
     switch -Wildcard ($result) {
-      "SUCCESS"           { Write-ScriptLog "Cache (Download + DataStore) erfolgreich bereinigt auf ${Servername}. DetectNow wurde ausgelöst, ${detectWait}s gewartet." }
+      "SUCCESS"           { Write-ScriptLog "Cache (Download + DataStore) erfolgreich bereinigt auf ${Servername}. DetectNow wurde ausgelöst; Suchbereitschaft innerhalb von maximal ${detectWait}s geprüft." }
       "TIMEOUT_STOP_*"    { Write-ScriptLog "WARNUNG: Dienst $($result -replace 'TIMEOUT_STOP_','') konnte nicht gestoppt werden auf ${Servername} - Cache möglicherweise unvollständig bereinigt." }
       "SERVICE_FAILED"    { Write-ScriptLog "WARNUNG: wuauserv konnte nach dem Reset nicht gestartet werden auf ${Servername}." }
       "SKIPPED"           { Write-ScriptLog "Cache-Bereinigung auf ${Servername} übersprungen." }

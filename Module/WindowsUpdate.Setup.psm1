@@ -14,7 +14,7 @@
 
     $moduleSource = @'
 function Get-WindowsUpdateAdmDeploymentStatus {
-    [PSCustomObject]@{ Version = '__VERSION__'; TargetBuild = [Environment]::OSVersion.Version.Build; ServerCore = __SERVER_CORE__; CertificateRunAsCompatibility = __CERTIFICATE_RUNAS_COMPATIBILITY__; MaintenanceRevision = '6'; MaintenanceFunctionsPresent = [bool]((Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated -CommandType Function -ErrorAction SilentlyContinue) -and (Get-Command -Name Invoke-WindowsUpdateAdmWinGetMaintenance -CommandType Function -ErrorAction SilentlyContinue)); WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
+    [PSCustomObject]@{ Version = '__VERSION__'; TargetBuild = [Environment]::OSVersion.Version.Build; ServerCore = __SERVER_CORE__; CertificateRunAsCompatibility = __CERTIFICATE_RUNAS_COMPATIBILITY__; CacheTransferSupported = __WINGET_MAINTENANCE_ONLY__; MaintenanceRevision = '6'; MaintenanceFunctionsPresent = [bool]((Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated -CommandType Function -ErrorAction SilentlyContinue) -and (Get-Command -Name Invoke-WindowsUpdateAdmWinGetMaintenance -CommandType Function -ErrorAction SilentlyContinue)); WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
 }
 function Update-WindowsUpdateAdmWinGetPackage {
     [CmdletBinding()]
@@ -91,7 +91,88 @@ function Invoke-WindowsUpdateAdmWinGetMaintenance {
     $exitCode = $LASTEXITCODE
     [PSCustomObject]@{ Action = $Action; Success = ([int]$exitCode -eq 0); ExitCode = [int]$exitCode; Output = [string]$output }
 }
-Export-ModuleMember -Function Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage, Get-WindowsUpdateAdmChocolateyOutdated, Update-WindowsUpdateAdmChocolateyPackages, Invoke-WindowsUpdateAdmWinGetMaintenance
+function Receive-WindowsUpdateAdmWinGetCache {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Probe','Start','Append','Complete')][string]$Action,
+        [Parameter(Mandatory)][ValidatePattern('^https://github\.com/microsoft/winget-cli/releases/download/v[0-9][A-Za-z0-9._-]*/(?:Microsoft\.DesktopAppInstaller_8wekyb3d8bbwe\.msixbundle|DesktopAppInstaller_Dependencies\.zip)$')][string]$Uri,
+        [Parameter(Mandatory)][ValidateRange(1,1073741824)][long]$Bytes,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$Sha256,
+        [ValidatePattern('^[a-f0-9]{32}$')][string]$UploadId,
+        [ValidateRange(0,1073741824)][long]$Offset = 0,
+        [ValidateLength(0,90000)][string]$Data = ''
+    )
+    $ErrorActionPreference = 'Stop'
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Uri))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+    $root = Join-Path $env:ProgramData 'WindowsUpdateAdm\DownloadCache'
+    $folder = Join-Path $root $key
+    foreach ($directory in @($root,$folder)) {
+        if (Test-Path -LiteralPath $directory) {
+            if ((Get-Item -LiteralPath $directory).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Cacheverzeichnis darf kein Verweis sein.' }
+        } else { [void][IO.Directory]::CreateDirectory($directory) }
+    }
+    $file = Join-Path $folder 'payload.bin'
+    $metadata = Join-Path $folder 'payload.json'
+    $partial = Join-Path $folder 'transfer.part'
+    $statePath = Join-Path $folder 'transfer.json'
+    $lock = [IO.File]::Open((Join-Path $folder 'download.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    try {
+        foreach ($path in @($file,$metadata,$partial,$statePath)) {
+            if ((Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Cachedatei darf kein Verweis sein.' }
+        }
+        if ($Action -eq 'Probe') {
+            $valid = (Test-Path -LiteralPath $file) -and (Test-Path -LiteralPath $metadata)
+            if ($valid) {
+                try {
+                    $saved = [IO.File]::ReadAllText($metadata) | ConvertFrom-Json
+                    $valid = (Get-Item -LiteralPath $file).Length -eq $Bytes -and $saved.Bytes -eq $Bytes -and $saved.Sha256 -eq $Sha256 -and (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -eq $Sha256
+                } catch { $valid = $false }
+            }
+            return [pscustomobject]@{Present=[bool]$valid;Offset=0}
+        }
+        if (-not $UploadId) { throw 'Übertragungskennung fehlt.' }
+        if ($Action -eq 'Start') {
+            # Der Aufrufer darf keinen selbst gewählten Hash als Vertrauen
+            # einschleusen: Digest und Größe unabhängig beim offiziellen Release prüfen.
+            $assetUri = [uri]$Uri
+            $segments = $assetUri.AbsolutePath.Split('/')
+            $tag = $segments[$segments.Length-2]
+            $assetName = $segments[$segments.Length-1]
+            $release = Invoke-RestMethod -Uri ('https://api.github.com/repos/microsoft/winget-cli/releases/tags/'+$tag) -Headers @{'User-Agent'='WindowsUpdateAdm-CacheValidation'} -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+            $officialAssets = @($release.assets | Where-Object { $_.name -ceq $assetName -and $_.browser_download_url -ceq $Uri })
+            if ($officialAssets.Count -ne 1 -or -not $officialAssets[0].PSObject.Properties['digest']) { throw 'Offizielle SHA256-Metadaten fehlen; Cacheübernahme abgelehnt.' }
+            $officialHash = [string]$officialAssets[0].digest -replace '^sha256:',''
+            if ($officialHash -notmatch '^[a-fA-F0-9]{64}$' -or $officialHash -ine $Sha256 -or [long]$officialAssets[0].size -ne $Bytes) { throw 'Cachedatei entspricht nicht dem offiziellen WinGet-Release.' }
+            if (Test-Path -LiteralPath $statePath) {
+                $prior = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+                if (([DateTime]::UtcNow - [datetime]$prior.UpdatedUtc).TotalMinutes -lt 30 -and $prior.UploadId -ne $UploadId) { throw 'Cacheübertragung ist bereits aktiv.' }
+            }
+            [IO.File]::WriteAllBytes($partial, [byte[]]@())
+            @{UploadId=$UploadId;Bytes=$Bytes;Sha256=$Sha256;UpdatedUtc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+            return [pscustomobject]@{Offset=0}
+        }
+        $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+        if ($state.UploadId -ne $UploadId -or $state.Bytes -ne $Bytes -or $state.Sha256 -ne $Sha256) { throw 'Übertragungskennung oder Metadaten stimmen nicht.' }
+        $length = (Get-Item -LiteralPath $partial).Length
+        if ($length -ne $Offset) { throw 'Unerwartete Übertragungsposition.' }
+        if ($Action -eq 'Append') {
+            $chunk = [Convert]::FromBase64String($Data)
+            if ($chunk.Length -lt 1 -or $chunk.Length -gt 65536 -or $length + $chunk.Length -gt $Bytes) { throw 'Ungültige Blockgröße.' }
+            $stream = [IO.File]::Open($partial,[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            try { $stream.Write($chunk,0,$chunk.Length) } finally { $stream.Dispose() }
+            $state.UpdatedUtc = [DateTime]::UtcNow.ToString('o')
+            $state | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+            return [pscustomobject]@{Offset=($length+$chunk.Length)}
+        }
+        if ($length -ne $Bytes -or (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash -ne $Sha256) { throw 'Cacheübertragung unvollständig oder SHA256 falsch.' }
+        if (Test-Path -LiteralPath $file) { [IO.File]::Replace($partial,$file,$null) } else { [IO.File]::Move($partial,$file) }
+        @{Bytes=$Bytes;Sha256=$Sha256;CompletedUtc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $metadata -Encoding UTF8
+        Remove-Item -LiteralPath $statePath -Force
+        [pscustomobject]@{Present=$true;Offset=$Bytes}
+    } finally { $lock.Dispose() }
+}
+Export-ModuleMember -Function Receive-WindowsUpdateAdmWinGetCache, Get-WindowsUpdateAdmDeploymentStatus, Update-WindowsUpdateAdmWinGetPackage, Get-WindowsUpdateAdmChocolateyOutdated, Update-WindowsUpdateAdmChocolateyPackages, Invoke-WindowsUpdateAdmWinGetMaintenance
 '@
     $moduleSource = $moduleSource.Replace('__VERSION__', $Version).Replace('__SERVER_CORE__', ('$' + $ServerCore.ToString().ToLowerInvariant())).
         Replace('__CERTIFICATE_RUNAS_COMPATIBILITY__', ('$' + $CertificateRunAsCompatibility.ToString().ToLowerInvariant())).

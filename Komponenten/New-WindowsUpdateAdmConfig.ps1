@@ -26,7 +26,7 @@
     Author: IT-Administration
     Requires: Administrator-Rechte
     Distribution: Via Verteilung_WindowsUpdateAdmConfig.ps1 per WinRM
-    Version: 5.0 - Zertifikat-Authentifizierung für Nicht-AD-Geräte
+    Version: 5.2.0 - Eingeschränkter WinGet-Cacheempfang über JEA
 
 .EXAMPLE
     # Standardaufruf auf AD-Server (kein Passwort nötig)
@@ -1006,7 +1006,7 @@ exit `$process.ExitCode
                            -Guid ([Guid]::NewGuid()) `
                            -Author "IT-Administration" `
                            -ModuleVersion "1.0" `
-            -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Get-WindowsUpdateAdmChocolateyOutdated', 'Update-WindowsUpdateAdmChocolateyPackages', 'Invoke-WindowsUpdateAdmWinGetMaintenance') `
+            -FunctionsToExport @('Receive-WindowsUpdateAdmWinGetCache', 'Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Get-WindowsUpdateAdmChocolateyOutdated', 'Update-WindowsUpdateAdmChocolateyPackages', 'Invoke-WindowsUpdateAdmWinGetMaintenance') `
                            -Description "Stabiler JEA Endpunkt fuer Windows Update Verwaltung"
         Write-SetupLog "JEA-Trägermodul-Manifest neu erstellt: $JeaManifest" 'SUCCESS'
     } else {
@@ -1017,7 +1017,7 @@ exit `$process.ExitCode
             # nicht mit der Statusfunktion in die JEA-Sitzung geladen.
             Update-ModuleManifest -Path $JeaManifest `
                                   -RootModule "$JeaModuleName.psm1" `
-                                  -FunctionsToExport @('Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Get-WindowsUpdateAdmChocolateyOutdated', 'Update-WindowsUpdateAdmChocolateyPackages', 'Invoke-WindowsUpdateAdmWinGetMaintenance') `
+                                  -FunctionsToExport @('Receive-WindowsUpdateAdmWinGetCache', 'Get-WindowsUpdateAdmDeploymentStatus', 'Update-WindowsUpdateAdmWinGetPackage', 'Get-WindowsUpdateAdmChocolateyOutdated', 'Update-WindowsUpdateAdmChocolateyPackages', 'Invoke-WindowsUpdateAdmWinGetMaintenance') `
                                   -ErrorAction Stop
             Write-SetupLog "JEA-Trägermodul-Manifest aktualisiert (RootModule und Statusfunktion): $JeaManifest" "SUCCESS"
         }
@@ -1084,6 +1084,7 @@ exit `$process.ExitCode
             'ClientRepair' { Join-Path $JeaBaseDir 'WindowsUpdateAdm-WinGet-ClientRepair.cmd' }
         }
     })
+    if ($winGetMaintenanceSupported) { $jeaVisibleFunctions += 'Receive-WindowsUpdateAdmWinGetCache' }
     if (-not $winGetMaintenanceSupported) {
         $jeaVisibleFunctions = @($jeaVisibleFunctions | Where-Object { $_ -ne 'Invoke-WindowsUpdateAdmWinGetMaintenance' })
         $jeaVisibleExternalCommands = @($chocolateyWrapper, $chocolateyQueryWrapper)

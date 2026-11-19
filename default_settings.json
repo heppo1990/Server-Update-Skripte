@@ -1,4 +1,4 @@
-{
+﻿{
 	"UpdateSettings": {
 		"SucheOnline": false,
 		"WriteReport": true,
@@ -7,6 +7,8 @@
 		"KeepLogFiles": 5,
 		"AutoUpdateScripts": true,
 		"DetectNowWaitSeconds": 60,
+        "ParallelProbeLimit": 4,
+        "ParallelTargets": 3,
 		"ClearUpdateCacheBeforeCheck": false,
 		"EnableWingetUpdates": true,
 		"CheckWingetUserUpdates": true,

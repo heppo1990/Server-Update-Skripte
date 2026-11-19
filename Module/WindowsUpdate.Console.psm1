@@ -1,4 +1,16 @@
-﻿# Fachmodul: WindowsUpdate.Console
+﻿function Get-WindowsUpdateSshFailure {
+    param([AllowEmptyString()][string]$Text)
+    switch -Regex ($Text) {
+        '(?i)REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed' { return 'SSH-Hostschlüssel geändert oder nicht bestätigt; Fingerabdruck unabhängig prüfen.' }
+        '(?i)UNPROTECTED PRIVATE KEY|bad permissions|invalid format|error in libcrypto|Load key .*:' { return 'SSH-Privatschlüssel unlesbar, ungültig oder Dateirechte ungeeignet.' }
+        '(?i)Permission denied|Authentication failed|Too many authentication failures' { return 'SSH-Anmeldung abgelehnt; Benutzer und hinterlegten Schlüssel prüfen.' }
+        '(?i)sudo:|SUDO_.*FAILED|NOPASSWD|visudo' { return 'sudo-Updateberechtigung fehlt oder die verwaltete sudo-Konfiguration ist ungültig.' }
+        '(?i)Could not resolve hostname|Name or service not known|Temporary failure in name resolution' { return 'SSH-Zielname konnte nicht aufgelöst werden.' }
+        '(?i)Connection timed out|Connection refused|No route to host|Network is unreachable|Connection reset' { return 'SSH-Ziel nicht erreichbar oder Verbindung unterbrochen.' }
+        default { return 'SSH-/Remote-Befehl fehlgeschlagen; genaue Ursache im Laufprotokoll prüfen.' }
+    }
+}
+# Fachmodul: WindowsUpdate.Console
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Write-CommonLog {
@@ -40,6 +52,7 @@ function Write-WindowsUpdateDiagnostic {
         }
         $DiagnosticText = $ErrorRecord.Exception.ToString()
     }
+    if ($Operation -match '(?i)SSH|Linux|HomeAssistant') { $lines.Add('RemoteUrsache=' + (Get-WindowsUpdateSshFailure -Text $DiagnosticText)) }
     foreach ($line in ([string]$DiagnosticText -split "`r?`n")) {
         if (-not [string]::IsNullOrWhiteSpace($line)) { $lines.Add($line.TrimEnd()) }
     }

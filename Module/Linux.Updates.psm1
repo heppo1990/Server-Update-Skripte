@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function Invoke-LinuxServerUpdates {
 [CmdletBinding()]
@@ -49,6 +49,7 @@ $script:LogDirectory = Join-Path $repositoryRoot 'Logs'
 $script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
     $settings.UpdateSettings.PSObject.Properties['WriteLogFile'] -and
     [bool]$settings.UpdateSettings.WriteLogFile
+$script:VMRebootLatestAt = $null
 $script:VMRebootIndex = $VMRebootIndexStart
 $script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new()
 
@@ -159,6 +160,10 @@ function Register-LinuxReboot {
         }
         $scheduled = Get-NextLinuxScheduledTime $physicalTime ([string]$settings.UpdateSettings.PhysicalRebootWindowEndTime)
     }
+    if ($IsVirtual -and $null -ne $scheduled) {
+        $scheduled = New-WindowsUpdateVMRebootSlot -Target $RemoteHost -Earliest $scheduled -StartTime $vmStartTime -LatestTime ([string]$settings.UpdateSettings.VMRebootWindowEndTime) -IntervalMinutes $interval -Immediately:$vmImmediately
+        $script:VMRebootLatestAt = $scheduled
+    }
     if ($null -eq $scheduled) { Write-LinuxLog -Message "Kein automatischer Neustart für $RemoteHost konfiguriert." -LogFile $LogFile; return $false }
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($scheduled - (Get-Date)).TotalMinutes))
     $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
@@ -206,6 +211,7 @@ function Test-LinuxKeyLogin {
     $result = & $script:SSHPath @arguments 2>&1
     $exitCode = $LASTEXITCODE
     $success = ($exitCode -eq 0 -and (($result -join "`n") -match '(?m)^OK\s*$'))
+    if (-not $success) { $script:LastSshFailure = Get-WindowsUpdateSshFailure -Text ($result -join [Environment]::NewLine) }
     if (-not $success -and $LogFile) {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-SSH-Schlüsselverbindung prüfen' -Target $RemoteHost -DiagnosticText ($result -join [Environment]::NewLine) -Context @("User=$RemoteUser", "SSHPath=$script:SSHPath", "ExitCode=$exitCode")
     }
@@ -257,6 +263,7 @@ fi
     $result = @(& $script:SSHPath @arguments 2>&1)
     $exitCode = $LASTEXITCODE
     $success = ($exitCode -eq 0)
+    if (-not $success) { $script:LastSshFailure = Get-WindowsUpdateSshFailure -Text ($result -join [Environment]::NewLine) }
     if (-not $success -and $LogFile) {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-NOPASSWD-Updateeinrichtung prüfen' -Target $RemoteHost -DiagnosticText ($result -join [Environment]::NewLine) -Context @("User=$RemoteUser", "SSHPath=$script:SSHPath", "ExpectedVersion=$script:LinuxSudoSetupVersion", "ExitCode=$exitCode")
     }
@@ -494,9 +501,10 @@ if [ "$CHECK_ONLY" = '1' ]; then echo 'Linux-Update-Pruefung abgeschlossen.'; el
         $arguments = Get-LinuxSshArguments -KeyPath $KeyPath -BatchMode
         $checkOnlyArgument = if ($DryRun) { '1' } else { '0' }
         $arguments += "${RemoteUser}@${RemoteHost}", "sh $remoteScript $checkOnlyArgument; result=`$?; rm -f $remoteScript; exit `$result"
-        $updateCount = 0; $updatedPackages = @(); $rebootRequired = $false
+        $updateCount = 0; $updatedPackages = @(); $rebootRequired = $false; $sshFailure = ''
         & $script:SSHPath @arguments 2>&1 | ForEach-Object {
             $line = [string]$_
+            if ($line -match '(?i)sudo:|Permission denied|Host key verification failed|Connection (timed out|refused|reset)|Load key') { $sshFailure = Get-WindowsUpdateSshFailure -Text $line }
             if ([string]::IsNullOrWhiteSpace($line)) { return }
             if ($line -match '^UPDATE_COUNT=(\d+)$') { $updateCount = [int]$matches[1] }
             if ($line -match '^UPDATED_PACKAGES=(.+)$') { $updatedPackages = $matches[1] -split '\s+' | Where-Object { $_ } | Select-Object -Unique }
@@ -505,7 +513,7 @@ if [ "$CHECK_ONLY" = '1' ]; then echo 'Linux-Update-Pruefung abgeschlossen.'; el
                 Write-LinuxLog -Message $line -LogFile $LogFile
             }
         }
-        if ($LASTEXITCODE -ne 0) { throw "Linux-Update auf $RemoteHost wurde mit Exit-Code $LASTEXITCODE beendet." }
+        if ($LASTEXITCODE -ne 0) { throw "Linux-Update auf $RemoteHost wurde mit Exit-Code $LASTEXITCODE beendet. $sshFailure" }
         return [PSCustomObject]@{ Success=$true; UpdateCount=$updateCount; UpdatedPackages=$updatedPackages; RebootRequired=$rebootRequired }
     }
     finally {
@@ -553,6 +561,7 @@ foreach ($entry in $hostEntries) {
     if (-not ($CheckOnly -and $script:QuietMode)) {
         Write-LinuxLog -Message $actionHeading -LogFile $logFile -ConsoleWhenQuiet
     }
+    $script:LastSshFailure = ''
     $setupIssue = ''
     try {
         if (-not $CheckOnly) { Ensure-LinuxSSHKey -KeyPath $KeyPath -LogFile $logFile }
@@ -563,7 +572,7 @@ foreach ($entry in $hostEntries) {
             }
             Write-LinuxLog -Message "Prüfe SSH-Schlüsselverbindung zu Linux-Server $remoteHost ..." -LogFile $logFile -ConsoleWhenQuiet
             if (-not (Test-LinuxKeyLogin -RemoteHost $remoteHost -RemoteUser $remoteUser -KeyPath $KeyPath -LogFile $logFile)) {
-                $setupIssue = 'SSH-Schlüsselverbindung nicht bestätigt; Linux-Verteilung und Verbindung prüfen.'
+                $setupIssue = "SSH-Verbindung nicht bestätigt: $script:LastSshFailure"
                 throw $setupIssue
             }
             Write-LinuxLog -Message "Prüfe Updateberechtigung auf Linux-Server $remoteHost ..." -LogFile $logFile -ConsoleWhenQuiet
@@ -612,14 +621,14 @@ foreach ($entry in $hostEntries) {
         }
         if ($result.UpdateCount -gt 0) { Write-LinuxLog -Message $completionText -LogFile $logFile -Level Success }
     } catch {
-        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; SetupReady=([string]::IsNullOrWhiteSpace($setupIssue)); SetupIssue=$setupIssue; UpdateCount=0; Packages=''; Error='Details im Laufprotokoll'; LogFile=$logFile }
+        $hostStatus += [PSCustomObject]@{ Host=$remoteHost; Status='Fehler'; SetupReady=([string]::IsNullOrWhiteSpace($setupIssue)); SetupIssue=$setupIssue; UpdateCount=0; Packages=''; Error=$(if ($script:LastSshFailure) { $script:LastSshFailure } else { $_.Exception.Message }); LogFile=$logFile }
         Write-LinuxLog -Message "Fehler bei ${remoteHost}; Details im Laufprotokoll." -LogFile $logFile -Level Error
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $logFile } -Operation 'Linux-Host-Update' -Target $remoteHost -ErrorRecord $_
     } finally {
         Invoke-LinuxLogRetention -RemoteHost $remoteHost -LogFile $logFile
     }
 }
-$linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; RebootScheduleFailedHosts=$rebootScheduleFailures; VMRebootsScheduled=$vmRebootsScheduled; PendingPhysicalReboots=@($script:PendingPhysicalReboots); UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
+$linuxStats = [PSCustomObject]@{ TotalHosts=@($hostEntries).Count; HostsProcessed=@($hostStatus | Where-Object { $_.Status -ne 'Fehler' }).Count; UpdatesInstalled=$totalUpdatesInstalled; FailedHosts=@($hostStatus | Where-Object { $_.Status -eq 'Fehler' }).Count; RebootScheduleFailedHosts=$rebootScheduleFailures; VMRebootsScheduled=$vmRebootsScheduled; VMRebootLatestAt=$script:VMRebootLatestAt; PendingPhysicalReboots=@($script:PendingPhysicalReboots); UpdateDetails=@($updateDetails); HostStatus=@($hostStatus) }
 $statsFile = Join-Path $script:LogDirectory $(if ($CheckOnly -or $ConnectionOnly) { 'linux_update_check_stats.json' } else { 'linux_update_stats.json' })
 $linuxStats | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statsFile -Encoding utf8
 $summaryVerb = if ($DryRun) { 'verfügbar' } else { 'installiert' }

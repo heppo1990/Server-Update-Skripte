@@ -41,6 +41,9 @@
 
 [CmdletBinding()]
 param(
+    [string]$ParallelTarget,
+    [string]$ParallelResultPath,
+    [string]$ParallelContextPath,
     [switch]$DebugMode,
     # Optional: begrenzt einen Lauf auf die angegebenen Server, z. B. -TargetComputer SrvHV01
     [Alias('ComputerName')]
@@ -53,6 +56,7 @@ param(
     [string]$ManagementPowerShellRunLogPath,
     [string]$ManagementPowerShellRunTimestamp
 )
+if ($ParallelTarget) { $TargetComputer = @($ParallelTarget) }
 # Ältere Windows-/PowerShell-Versionen verwenden sonst oft TLS 1.0 als Standard.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 # GitHub-Update beim Start: Die eingebundene Routine lädt nur benötigte Skriptdateien.
@@ -78,7 +82,7 @@ if (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf) {
         Write-Warning "GitHub-Updater konnte nicht geladen werden; vorhandene Skriptversion wird ausgeführt. Ursache: $($_.Exception.Message)"
     }
 }
-if ($scriptUpdateLoaded) {
+if ($scriptUpdateLoaded -and -not $ParallelTarget) {
     Invoke-ServerUpdateScripts -ScriptPath $PSCommandPath -BoundParameters $PSBoundParameters -RemainingArguments $args
 }
 
@@ -117,6 +121,7 @@ $script:PendingHAPhysicalReboots = [System.Collections.Generic.List[object]]::ne
 $script:DeferredLocalReboot = $null
 $UpdResultFull = $null
 $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
+if ($ParallelTarget) { $TimeStamp += '-worker-' + [guid]::NewGuid().ToString('N') }
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
 $LogFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_${TimeStamp}.log"
 $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_Report_${TimeStamp}.html"
@@ -1134,7 +1139,14 @@ if ($IsWindowsOnlyRun) {
 # den gemeinsamen Zähler. Damit kann die physische Windows-Gruppe ihren
 # Neustart frühestens eine Stunde nach dem letzten VM-Neustart beginnen.
 $vmRebootIntervalMinutes = [Math]::Max(0, [int]$UpdateSettings.VMRebootIntervalMinutes)
-if ($script:VMRebootIndex -gt 0) {
+foreach ($externalStatsName in @('LinuxStats','HAStats')) {
+  $externalStats = Get-Variable -Name $externalStatsName -ValueOnly -ErrorAction SilentlyContinue
+  if ($externalStats -and $externalStats.PSObject.Properties['VMRebootLatestAt'] -and $externalStats.VMRebootLatestAt) {
+    $externalAt = [datetime]$externalStats.VMRebootLatestAt
+    if ($null -eq $script:VMRebootLatestAt -or $externalAt -gt $script:VMRebootLatestAt) { $script:VMRebootLatestAt = $externalAt }
+  }
+}
+if ($script:VMRebootIndex -gt 0 -and $null -eq $script:VMRebootLatestAt) {
   if ([bool]$UpdateSettings.VMRebootImmediately) {
     $script:VMRebootLatestAt = (Get-Date).AddMinutes(1 + (($script:VMRebootIndex - 1) * $vmRebootIntervalMinutes))
   } elseif (-not [string]::IsNullOrWhiteSpace([string]$UpdateSettings.VMRebootStartTime)) {
@@ -1349,7 +1361,46 @@ if ($ServerADList -ne $null) {
     $RepBody += "<div class='warning-box'><p>Der Abruf der Serverliste ist fehlgeschlagen!</p></div>"
   }
 
-  ForEach ($Server in $ServerADList) {
+  $parallelLimit = 3
+  if ($UpdateSettings.PSObject.Properties['ParallelTargets']) { $parallelLimit = [Math]::Max(1,[Math]::Min(16,[int]$UpdateSettings.ParallelTargets)) }
+  if ($ParallelTarget) {
+    $ServerADList = @($ServerADList | Where-Object { $_.Name -ieq $ParallelTarget })
+    if ($ServerADList.Count -ne 1) { throw 'Parallelziel ist nicht eindeutig in der konfigurierten Zielliste vorhanden.' }
+    $Anzahl = 1
+    if ($ParallelContextPath) {
+      $workerContext = Import-Clixml -LiteralPath $ParallelContextPath
+      foreach ($key in $workerContext.Keys) { Set-Variable -Name $key -Value $workerContext[$key] -Scope Script }
+    }
+  }
+  $workerReportPrefixLength = $RepBody.Length
+  $parallelCounters = @('UpdCount','PackageUpdateCount','WingetUpdateCount','ChocolateyUpdateCount','WindowsUnreachableHosts','ErrorCount','DeferredUpdatesPlanned')
+  $parallelArrays = @('UpdResultFull','WindowsUpdateDetails','PackageUpdateDetails','ManualActions','DeploymentRequiredTargets')
+  if (-not $ParallelTarget -and $parallelLimit -gt 1 -and @($ServerADList).Count -gt 1) {
+    $context = @{}
+    foreach ($key in @('ManagementPowerShellUpdateExcludeId','ManagementPowerShellUpdateExcludeChocolateyId','SkipWingetUserUpdates')) {
+      $value = Get-Variable -Name $key -ValueOnly -ErrorAction SilentlyContinue
+      if ($null -ne $value) { $context[$key] = $value }
+    }
+    $batchResults = @(Invoke-WindowsUpdateTargetBatch -ScriptPath $PSCommandPath -Targets @($ServerADList) -ThrottleLimit $parallelLimit -Context $context -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:$logOnly })
+    foreach ($workerResult in $batchResults) {
+      $RepBody += [string]$workerResult.Html
+      foreach ($key in $parallelCounters) {
+        $current = Get-Variable -Name $key -ValueOnly -ErrorAction SilentlyContinue
+        Set-Variable -Name $key -Value ([int]$current + [int]$workerResult.Data[$key]) -Scope Script
+      }
+      foreach ($key in $parallelArrays) {
+        $existingRows = Get-Variable -Name $key -ValueOnly -ErrorAction SilentlyContinue
+        $mergedRows = @()
+        foreach ($row in $existingRows) { if ($null -ne $row) { $mergedRows += $row } }
+        foreach ($row in $workerResult.Data[$key]) { if ($null -ne $row) { $mergedRows += $row } }
+        Set-Variable -Name $key -Value $mergedRows -Scope Script
+      }
+      if ($workerResult.Data.ContainsKey('PendingPhysicalReboots')) { foreach ($request in @($workerResult.Data.PendingPhysicalReboots)) { $script:PendingPhysicalReboots.Add($request) } }
+      if ($workerResult.Data.ContainsKey('DeferredLocalReboot') -and $workerResult.Data.DeferredLocalReboot) { $script:DeferredLocalReboot = $workerResult.Data.DeferredLocalReboot }
+      if ($workerResult.Data.ContainsKey('VMRebootLatestAt') -and $workerResult.Data.VMRebootLatestAt -and ($null -eq $script:VMRebootLatestAt -or $workerResult.Data.VMRebootLatestAt -gt $script:VMRebootLatestAt)) { $script:VMRebootLatestAt = $workerResult.Data.VMRebootLatestAt }
+    }
+  } else {
+ForEach ($Server in $ServerADList) {
     $index += 1
     $Servername = $Server.Name
 
@@ -1547,12 +1598,14 @@ if ($ServerADList -ne $null) {
           $vmDelayMinutes = $script:VMRebootIndex * $vmRebootIntervalMinutes
           if ($isVirtual -and $vmRebootImmediately) {
             $vmRebootAt = Get-NextRebootTimeInWindow -StartTime $vmRebootStartTime -LatestTime $vmRebootWindowEndTime -DelayMinutes $vmDelayMinutes -PreferImmediate
-            Request-RebootTask -Servername $Servername -Immediately -RebootTime $vmRebootStartTime -LatestRebootTime $vmRebootWindowEndTime -DelayMinutes $vmDelayMinutes -AuthInfo $svcCredential
+            $vmRebootAt = New-WindowsUpdateVMRebootSlot -Target $Servername -Earliest $vmRebootAt -StartTime $vmRebootStartTime -LatestTime $vmRebootWindowEndTime -IntervalMinutes $vmRebootIntervalMinutes -Immediately
+            Request-RebootTask -Servername $Servername -NotBefore $vmRebootAt -Immediately -RebootTime $vmRebootStartTime -LatestRebootTime $vmRebootWindowEndTime -DelayMinutes $vmDelayMinutes -AuthInfo $svcCredential
             $script:VMRebootIndex++
             if ($null -eq $script:VMRebootLatestAt -or $vmRebootAt -gt $script:VMRebootLatestAt) { $script:VMRebootLatestAt = $vmRebootAt }
           } elseif ($isVirtual -and -not [string]::IsNullOrWhiteSpace($vmRebootStartTime)) {
             $vmRebootAt = Get-NextRebootTimeInWindow -StartTime $vmRebootStartTime -LatestTime $vmRebootWindowEndTime -DelayMinutes $vmDelayMinutes
-            Request-RebootTask -Servername $Servername -RebootTime $vmRebootStartTime -LatestRebootTime $vmRebootWindowEndTime -DelayMinutes $vmDelayMinutes -AuthInfo $svcCredential
+            $vmRebootAt = New-WindowsUpdateVMRebootSlot -Target $Servername -Earliest $vmRebootAt -StartTime $vmRebootStartTime -LatestTime $vmRebootWindowEndTime -IntervalMinutes $vmRebootIntervalMinutes
+            Request-RebootTask -Servername $Servername -NotBefore $vmRebootAt -RebootTime $vmRebootStartTime -LatestRebootTime $vmRebootWindowEndTime -DelayMinutes $vmDelayMinutes -AuthInfo $svcCredential
             $script:VMRebootIndex++
             if ($null -eq $script:VMRebootLatestAt -or $vmRebootAt -gt $script:VMRebootLatestAt) { $script:VMRebootLatestAt = $vmRebootAt }
           } elseif (-not $isVirtual -and -not [string]::IsNullOrWhiteSpace($physicalRebootTime)) {
@@ -1573,6 +1626,10 @@ if ($ServerADList -ne $null) {
             $deferredMaintenanceTime = if ($isVirtualForDeferred) { $vmRebootStartTime } else { $physicalRebootTime }
             $deferredMaintenanceEndTime = if ($isVirtualForDeferred) { [string]$UpdateSettings.VMRebootWindowEndTime } else { [string]$UpdateSettings.PhysicalRebootWindowEndTime }
             $deferredScheduledAt = if (-not [string]::IsNullOrWhiteSpace($deferredMaintenanceTime)) { Get-NextScheduledTime $deferredMaintenanceTime } else { [datetime]::MinValue }
+            if ($isVirtualForDeferred -and $deferredScheduledAt -gt [datetime]::MinValue) {
+              $deferredScheduledAt = New-WindowsUpdateVMRebootSlot -Target ($Servername+'/Nachinstallation') -Earliest $deferredScheduledAt -StartTime $deferredMaintenanceTime -LatestTime $deferredMaintenanceEndTime -IntervalMinutes $vmRebootIntervalMinutes
+              if ($null -eq $script:VMRebootLatestAt -or $deferredScheduledAt -gt $script:VMRebootLatestAt) { $script:VMRebootLatestAt = $deferredScheduledAt }
+            }
             if ($deferredScheduledAt -gt [datetime]::MinValue) {
               Write-ScriptLog "Nachinstallation auf $Servername für das Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) geplant ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' })))."
             } else {
@@ -1611,6 +1668,10 @@ if ($ServerADList -ne $null) {
             }
             $deferredUpdatesHtml += '</table>'
             $deferredReadinessText = 'Nach einem Neustart startet die Installation, sobald Windows Update antwortet und das Wartungsfenster offen ist.'
+            if ($isVirtualForDeferred -and $deferredScheduledAt -gt [datetime]::MinValue) {
+              $deferredScheduledAt = New-WindowsUpdateVMRebootSlot -Target ($Servername+'/Nachinstallation') -Earliest $deferredScheduledAt -StartTime $deferredMaintenanceTime -LatestTime $deferredMaintenanceEndTime -IntervalMinutes $vmRebootIntervalMinutes
+              if ($null -eq $script:VMRebootLatestAt -or $deferredScheduledAt -gt $script:VMRebootLatestAt) { $script:VMRebootLatestAt = $deferredScheduledAt }
+            }
             if ($deferredScheduledAt -gt [datetime]::MinValue) {
               $deferredPlanText = "Nachinstallation eingeplant: ab Wartungsfenster $($deferredScheduledAt.ToString('dd.MM.yyyy HH:mm')) ($([string]$(if ($isVirtualForDeferred) { 'VM' } else { 'physisch' }))). $deferredReadinessText"
             } else {
@@ -1643,6 +1704,16 @@ if ($ServerADList -ne $null) {
         $ErrorCount++
       }
     }
+  }
+  }
+  if ($ParallelTarget) {
+    $workerData = @{}
+    foreach ($key in @($parallelCounters + $parallelArrays + @('PendingPhysicalReboots','DeferredLocalReboot','VMRebootLatestAt'))) {
+      $variable = Get-Variable -Name $key -ErrorAction SilentlyContinue
+      if ($variable) { $workerData[$key] = $variable.Value }
+    }
+    [pscustomobject]@{Target=$ParallelTarget;Html=$RepBody.Substring($workerReportPrefixLength);Data=$workerData;LogFile=$LogFileName} | Export-Clixml -LiteralPath $ParallelResultPath -Depth 16
+    exit 0
   }
 } else {
   $RepBody += "<div class='warning-box'><p>Der Abruf der Serverliste ist fehlgeschlagen!</p></div>"

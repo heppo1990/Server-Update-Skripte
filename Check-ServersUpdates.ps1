@@ -45,6 +45,10 @@
 
 [CmdletBinding()]
 param(
+    # Interne, isolierte Windows-Zielworker; Gesamtbericht bleibt im Elternlauf.
+    [string]$ParallelTarget,
+    [string]$ParallelResultPath,
+    [string]$ParallelContextPath,
   [switch]$TestMail,
   [switch]$SkipWingetUserUpdates
 )
@@ -74,7 +78,7 @@ if (Test-Path -LiteralPath $scriptUpdatePath -PathType Leaf) {
         Write-Warning "GitHub-Updater konnte nicht geladen werden; vorhandene Skriptversion wird ausgeführt. Ursache: $($_.Exception.Message)"
     }
 }
-if ($scriptUpdateLoaded) {
+if ($scriptUpdateLoaded -and -not $ParallelTarget) {
     Invoke-ServerUpdateScripts -ScriptPath $PSCommandPath -BoundParameters $PSBoundParameters -RemainingArguments $args
 }
 
@@ -120,6 +124,7 @@ try {
   $script:LocalSystemDetectionError = $_
 }
 $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
+if ($ParallelTarget) { $TimeStamp += '-worker-' + [guid]::NewGuid().ToString('N') }
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
 $LogFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_${TimeStamp}.log"
 $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_Report_${TimeStamp}.html"
@@ -496,7 +501,52 @@ if ($ServerADList -ne $null) {
 
   $modulePaths = @($env:PSModulePath -split ';' | Where-Object { $_ -like "*WindowsPowerShell\Modules*" })
 
-  ForEach ($Server in $ServerADList) {
+  # Begrenzte parallele Erreichbarkeitsprüfung, ohne konkurrierende Änderungen,
+  # Berichtsdateien oder Update-/Neustartprozesse auf den Zielen.
+  if ($ParallelTarget) { $ServerADList = @($ServerADList | Where-Object { $_.Name -ieq $ParallelTarget }) }
+  $probeLimit = 4
+  if ($UpdateSettings.PSObject.Properties['ParallelProbeLimit']) { $probeLimit = [Math]::Max(1,[Math]::Min(8,[int]$UpdateSettings.ParallelProbeLimit)) }
+  $winRmProbeResults = Get-WindowsUpdateWinRmProbeBatch -ComputerName @($ServerADList | ForEach-Object { $_.Name }) -ThrottleLimit $probeLimit
+  $parallelLimit = 3
+  if ($UpdateSettings.PSObject.Properties['ParallelTargets']) { $parallelLimit = [Math]::Max(1,[Math]::Min(16,[int]$UpdateSettings.ParallelTargets)) }
+  if ($ParallelTarget) {
+    $ServerADList = @($ServerADList | Where-Object { $_.Name -ieq $ParallelTarget })
+    if ($ServerADList.Count -ne 1) { throw 'Parallelziel ist nicht eindeutig in der konfigurierten Zielliste vorhanden.' }
+    $Anzahl = 1
+    if ($ParallelContextPath) {
+      $workerContext = Import-Clixml -LiteralPath $ParallelContextPath
+      foreach ($key in $workerContext.Keys) { Set-Variable -Name $key -Value $workerContext[$key] -Scope Script }
+    }
+  }
+  $workerReportPrefixLength = $RepBody.Length
+  $parallelCounters = @('UpdCount','PackageUpdateCount','WingetUpdateCount','ChocolateyUpdateCount','WindowsUnreachableHosts')
+  $parallelArrays = @('UpdResultFull','CheckActionNotices')
+  if (-not $ParallelTarget -and $parallelLimit -gt 1 -and @($ServerADList).Count -gt 1) {
+    $context = @{}
+    foreach ($key in @('ManagementPowerShellUpdateExcludeId','ManagementPowerShellUpdateExcludeChocolateyId','SkipWingetUserUpdates')) {
+      $value = Get-Variable -Name $key -ValueOnly -ErrorAction SilentlyContinue
+      if ($null -ne $value) { $context[$key] = $value }
+    }
+    $batchResults = @(Invoke-WindowsUpdateTargetBatch -ScriptPath $PSCommandPath -Targets @($ServerADList) -ThrottleLimit $parallelLimit -Context $context -WriteLog { param($message, $logOnly = $false) Write-ScriptLog $message -LogOnly:$logOnly })
+    foreach ($workerResult in $batchResults) {
+      $RepBody += [string]$workerResult.Html
+      foreach ($key in $parallelCounters) {
+        $current = Get-Variable -Name $key -ValueOnly -ErrorAction SilentlyContinue
+        Set-Variable -Name $key -Value ([int]$current + [int]$workerResult.Data[$key]) -Scope Script
+      }
+      foreach ($key in $parallelArrays) {
+        $existingRows = Get-Variable -Name $key -ValueOnly -ErrorAction SilentlyContinue
+        $mergedRows = @()
+        foreach ($row in $existingRows) { if ($null -ne $row) { $mergedRows += $row } }
+        foreach ($row in $workerResult.Data[$key]) { if ($null -ne $row) { $mergedRows += $row } }
+        Set-Variable -Name $key -Value $mergedRows -Scope Script
+      }
+      if ($workerResult.Data.ContainsKey('PendingPhysicalReboots')) { foreach ($request in @($workerResult.Data.PendingPhysicalReboots)) { $script:PendingPhysicalReboots.Add($request) } }
+      if ($workerResult.Data.ContainsKey('DeferredLocalReboot') -and $workerResult.Data.DeferredLocalReboot) { $script:DeferredLocalReboot = $workerResult.Data.DeferredLocalReboot }
+      if ($workerResult.Data.ContainsKey('VMRebootLatestAt') -and $workerResult.Data.VMRebootLatestAt -and ($null -eq $script:VMRebootLatestAt -or $workerResult.Data.VMRebootLatestAt -gt $script:VMRebootLatestAt)) { $script:VMRebootLatestAt = $workerResult.Data.VMRebootLatestAt }
+    }
+  } else {
+ForEach ($Server in $ServerADList) {
     $index += 1
     $Servername = $Server.Name
     $isLocalManagementTarget = $Servername -ieq $env:COMPUTERNAME -or $Servername -ieq $ComputerFQDN
@@ -516,7 +566,7 @@ if ($ServerADList -ne $null) {
 
         # Beide WinRM-Transporte prüfen, bevor Module, Updatequellen oder
         # Authentifizierungs-Fallbacks auf einem ausgeschalteten Ziel starten.
-        $winRmProbe = Test-WindowsUpdateWinRmPorts -ComputerName $Servername -Ports @(5985, 5986) -TimeoutMilliseconds 1500
+        $winRmProbe = $winRmProbeResults[$Servername]
         if (-not $winRmProbe.Reachable) {
           $WindowsUnreachableHosts++
           $skipMessage = "WinRM über HTTP (5985) und HTTPS (5986) ist nach $($winRmProbe.AttemptsPerformed) Prüfversuch(en) nicht erreichbar; Ziel wird in diesem Lauf übersprungen."
@@ -967,6 +1017,16 @@ if ($ServerADList -ne $null) {
         $RepBody += "<div class='error-box'><strong>Fehler aufgetreten!</strong><br>Details stehen im Laufprotokoll.</div>"
       }
     }
+  }
+  }
+  if ($ParallelTarget) {
+    $workerData = @{}
+    foreach ($key in @($parallelCounters + $parallelArrays + @('PendingPhysicalReboots','DeferredLocalReboot','VMRebootLatestAt'))) {
+      $variable = Get-Variable -Name $key -ErrorAction SilentlyContinue
+      if ($variable) { $workerData[$key] = $variable.Value }
+    }
+    [pscustomobject]@{Target=$ParallelTarget;Html=$RepBody.Substring($workerReportPrefixLength);Data=$workerData;LogFile=$LogFileName} | Export-Clixml -LiteralPath $ParallelResultPath -Depth 16
+    exit 0
   }
 
 } else {

@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function Invoke-HomeAssistantUpdates {
 [CmdletBinding()]
@@ -68,6 +68,7 @@ if (-not (Test-Path $LogDir)) {
 $LogFile = if ($script:WriteExecutionLog) { Join-Path $LogDir ("{0}_{1}.log" -f $HAHost, (Get-Date -Format 'yyyyMMdd-HHmm')) } else { '' }
 
 # Statistik-Tracking
+$script:VMRebootLatestAt = $null
 $Script:UpdateStats = @{
     CoreUpdated = $false
     CoreVersionOld = ""
@@ -266,6 +267,10 @@ function Register-HAReboot {
         }
         $scheduled = Get-NextHARebootTime $physicalTime ([string]$settings.UpdateSettings.PhysicalRebootWindowEndTime)
     }
+    if ($IsVirtual -and $null -ne $scheduled) {
+        $scheduled = New-WindowsUpdateVMRebootSlot -Target $HAHost -Earliest $scheduled -StartTime $vmStartTime -LatestTime ([string]$settings.UpdateSettings.VMRebootWindowEndTime) -IntervalMinutes $interval -Immediately:$vmImmediately
+        $script:VMRebootLatestAt = $scheduled
+    }
     if ($null -eq $scheduled) { Write-HostLog -Message 'Kein automatischer Neustart für Home Assistant konfiguriert.' -RemoteHost $HAHost -LogFile $LogFile; return $false }
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($scheduled - (Get-Date)).TotalMinutes))
     $Script:UpdateStats.RebootStartsImmediately = ($delayMinutes -le 1)
@@ -406,6 +411,7 @@ function Test-HAKeyLogin {
     $test = @(& $SSHPath @sshArguments 2>&1)
     $exitCode = $LASTEXITCODE
     $success = ($exitCode -eq 0 -and ($test -join "`n").Trim() -eq 'OK')
+    if (-not $success) { $script:LastSshFailure = Get-WindowsUpdateSshFailure -Text ($test -join [Environment]::NewLine) }
     if (-not $success -and $LogFile) {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'Home-Assistant-SSH-Verbindung prüfen' -Target $RemoteHost -DiagnosticText ($test -join [Environment]::NewLine) -Context @("Target=$User@$RemoteHost", "ExitCode=$exitCode")
     }
@@ -417,7 +423,7 @@ if ($CheckOnly) {
     if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
         $setupIssue = 'Lokaler SSH-Privatschlüssel fehlt; Home-Assistant-Verteilung erforderlich.'
     } elseif (-not (Test-HAKeyLogin -RemoteHost $HAHost -User $User -Port $Port -KeyPath $KeyPath -SSHPath $SSHPath -LogFile $LogFile)) {
-        $setupIssue = 'SSH-Schlüsselverbindung nicht bestätigt; Home-Assistant-Verteilung und Verbindung prüfen.'
+        $setupIssue = "SSH-Verbindung nicht bestätigt: $script:LastSshFailure"
     }
     if (-not [string]::IsNullOrWhiteSpace($setupIssue)) {
         Write-HostLog -Message $setupIssue -RemoteHost $HAHost -LogFile $LogFile -Level Warning
@@ -551,7 +557,7 @@ function Invoke-HA {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } `
             -Operation 'HomeAssistant-SSH-Befehl' -Target $RemoteHost -DiagnosticText $outText `
             -Context @("Command=$Command", "ExitCode=$exit")
-        throw "HA-Befehl '$Command' auf $RemoteHost ist mit Exit-Code $exit fehlgeschlagen."
+        throw "HA-Befehl auf $RemoteHost ist mit Exit-Code $exit fehlgeschlagen. $(Get-WindowsUpdateSshFailure -Text $outText)"
     }
 
     return $stdout
@@ -951,6 +957,7 @@ $HAStats = @{
     BackupCreated = $Script:UpdateStats.BackupCreated
     RebootPerformed = $Script:UpdateStats.RebootPerformed
     RebootScheduled = $Script:UpdateStats.RebootScheduled
+    VMRebootLatestAt = $script:VMRebootLatestAt
     VMRebootsScheduled = if ($Script:UpdateStats.RebootScheduled -and $Script:UpdateStats.IsVirtual) { 1 } else { 0 }
     PendingPhysicalReboot = $Script:UpdateStats.PendingPhysicalReboot
     ErrorCount = $Script:UpdateStats.ErrorCount

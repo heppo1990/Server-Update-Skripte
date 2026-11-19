@@ -25,6 +25,9 @@ function New-WindowsUpdateInvokeCommandParams {
     }
     if ($ConfigurationName) { $parameters.ConfigurationName = $ConfigurationName }
     if ($AuthInfo -and $AuthInfo.Type -eq 'Certificate') {
+        if (-not $AuthInfo.PSObject.Properties['Thumbprint'] -or [string]$AuthInfo.Thumbprint -notmatch '^[A-Fa-f0-9]{40}$') {
+            throw "Clientzertifikatsdaten für '$ComputerName' fehlen oder enthalten keinen gültigen Thumbprint. Zertifikatseinrichtung und Settings prüfen; keine Anmeldung mit anderen Daten versuchen."
+        }
         $parameters.UseSSL = $true
         $parameters.CertificateThumbprint = $AuthInfo.Thumbprint
     }
@@ -116,6 +119,9 @@ function Initialize-WindowsUpdateRemoting {
 
     Add-WindowsUpdateTrustedHost -ComputerName $TargetComputer -WriteLog $WriteLog
     $authInfo = Get-WindowsUpdateClientCertificateAuthInfo -UpdateSettings $UpdateSettings -TargetComputer $TargetComputer -WriteLog $WriteLog
+    if (-not $authInfo -or $authInfo.Type -ne 'Certificate') {
+        throw "Für Nicht-AD-Ziel '$TargetComputer' fehlen die Clientzertifikatsdaten. Zertifikatseinrichtung und Verteilung prüfen."
+    }
     return [PSCustomObject]@{ AuthInfo = $authInfo; IsNonAdTarget = $true }
 }
 
@@ -606,4 +612,37 @@ function Reset-WindowsUpdateLocalWinGetSources {
     # der lokale Start-Process-Worker löste denselben WinGet-COM-Fehler aus.
     return Reset-WindowsUpdateRemoteWinGetSources -ComputerName $env:COMPUTERNAME `
         -TimeoutSeconds $TimeoutSeconds -WriteLog $WriteLog
+}
+
+function Get-WindowsUpdateWinRmProbeBatch {
+    [CmdletBinding()]
+    param([string[]]$ComputerName, [ValidateRange(1,8)][int]$ThrottleLimit = 4)
+    $results = @{}
+    $names = @($ComputerName | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    if ($names.Count -eq 0) { return $results }
+    if ($ThrottleLimit -eq 1) {
+        foreach ($name in $names) { $results[$name] = Test-WindowsUpdateWinRmPorts -ComputerName $name -Ports @(5985,5986) -TimeoutMilliseconds 1500 }
+        return $results
+    }
+    $pool = [RunspaceFactory]::CreateRunspacePool(1,$ThrottleLimit)
+    $pending = [Collections.Generic.List[object]]::new()
+    $definition = (Get-Command Test-WindowsUpdateWinRmPorts -CommandType Function).Definition
+    try {
+        $pool.Open()
+        foreach ($name in $names) {
+            $worker = [PowerShell]::Create()
+            $worker.RunspacePool = $pool
+            [void]$worker.AddScript('param($definition,$name); Set-Item Function:\Test-WindowsUpdateWinRmPorts ([scriptblock]::Create($definition)); Test-WindowsUpdateWinRmPorts -ComputerName $name -Ports @(5985,5986) -TimeoutMilliseconds 1500').AddArgument($definition).AddArgument($name)
+            $pending.Add([pscustomobject]@{Name=$name;Worker=$worker;Handle=$worker.BeginInvoke()})
+        }
+        foreach ($item in $pending) {
+            $output = @($item.Worker.EndInvoke($item.Handle))
+            if ($item.Worker.HadErrors -or $output.Count -ne 1) { throw "WinRM-Vorabprüfung für '$($item.Name)' lieferte kein eindeutiges Ergebnis." }
+            $results[$item.Name] = $output[0]
+        }
+    } finally {
+        foreach ($item in $pending) { $item.Worker.Dispose() }
+        $pool.Dispose()
+    }
+    return $results
 }

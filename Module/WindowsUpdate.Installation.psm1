@@ -28,7 +28,7 @@ function Get-NextRebootTimeInWindow {
   $start = Get-NextScheduledTime $StartTime
   if ([string]::IsNullOrWhiteSpace($LatestTime)) {
     $scheduled = $start.AddMinutes($DelayMinutes)
-    while ($scheduled -lt $NotBefore) { $scheduled = $scheduled.AddDays(1) }
+    if ($scheduled -lt $NotBefore) { $scheduled = $NotBefore }
     return $scheduled
   }
 
@@ -39,13 +39,15 @@ function Get-NextRebootTimeInWindow {
   $latest = $start.Date.Add($latestParsed.TimeOfDay)
   if ($latest -lt $start) { $latest = $latest.AddDays(1) }
   $scheduled = $start.AddMinutes($DelayMinutes)
-  while ($scheduled -gt $latest -or $scheduled -lt $NotBefore) {
+  if ($scheduled -lt $NotBefore) { $scheduled = $NotBefore }
+  while ($scheduled -gt $latest) {
     $start = $start.AddDays(1)
     $latest = $latest.AddDays(1)
     $scheduled = $start.AddMinutes($DelayMinutes)
-    if ($scheduled -gt $latest) {
+    if ($start.AddMinutes($DelayMinutes) -gt $latest) {
       throw "Der Neustartversatz von $DelayMinutes Minute(n) liegt außerhalb des konfigurierten Wartungsfensters."
     }
+    if ($scheduled -lt $NotBefore) { $scheduled = $NotBefore }
   }
   return $scheduled
 }
@@ -130,6 +132,7 @@ function Register-WindowsUpdateRebootTask {
     $at = Get-NextRebootTimeInWindow -StartTime $RebootTime -LatestTime $LatestRebootTime -DelayMinutes $DelayMinutes -NotBefore $NotBefore -PreferImmediate
   } elseif ($Immediately) {
     $at = (Get-Date).AddMinutes(1 + $DelayMinutes)
+    if ($NotBefore -gt $at) { $at = $NotBefore }
   } else {
     $at = Get-NextRebootTimeInWindow -StartTime $RebootTime -LatestTime $LatestRebootTime -DelayMinutes $DelayMinutes -NotBefore $NotBefore
   }
@@ -155,3 +158,43 @@ try {
 }
 
 Export-ModuleMember -Function Get-NextScheduledTime, Get-NextRebootTimeInWindow, Test-ServerIsVirtual, Test-WindowsUpdateRebootRequired, Register-WindowsUpdateRebootTask
+
+function New-WindowsUpdateVMRebootSlot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Target, [Parameter(Mandatory)][datetime]$Earliest,
+        [string]$StartTime = '', [string]$LatestTime = '', [int]$IntervalMinutes = 5,
+        [switch]$Immediately,
+        [string]$StatePath = (Join-Path $env:ProgramData 'WindowsUpdateAdm\VM-Reboot-Slots.json'))
+    $ErrorActionPreference = 'Stop'
+    $interval = [Math]::Max(1,$IntervalMinutes)
+    $directory = Split-Path -Parent $StatePath
+    [void][IO.Directory]::CreateDirectory($directory)
+    $lock = $null; $timer = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        while (-not $lock) {
+            try { $lock = [IO.File]::Open(($StatePath+'.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+            catch [IO.IOException] { if ($timer.Elapsed.TotalSeconds -ge 15) { throw 'VM-Neustartplanung ist belegt; kein unkoordinierter Neustart wird angelegt.' }; Start-Sleep -Milliseconds 100 }
+        }
+        $slots = @()
+        if (Test-Path -LiteralPath $StatePath) {
+            $storedSlots = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($storedSlot in $storedSlots) {
+                if ([datetime]$storedSlot.At -gt (Get-Date).AddDays(-1) -and $storedSlot.Target -ine $Target) { $slots += $storedSlot }
+            }
+        }
+        $candidate = $Earliest
+        if ($candidate -lt (Get-Date).AddMinutes(1)) { $candidate = (Get-Date).AddMinutes(1) }
+        do {
+            $conflicts = @($slots | Where-Object { [math]::Abs(([datetime]$_.At - $candidate).TotalMinutes) -lt [Math]::Max($interval,[int]$_.IntervalMinutes) })
+            if ($conflicts.Count -eq 0) { break }
+            $candidate = (@($conflicts | ForEach-Object { ([datetime]$_.At).AddMinutes([Math]::Max($interval,[int]$_.IntervalMinutes)) }) | Sort-Object -Descending | Select-Object -First 1)
+            if (-not $Immediately -and $StartTime) { $candidate = Get-NextRebootTimeInWindow -StartTime $StartTime -LatestTime $LatestTime -NotBefore $candidate }
+        } while ($true)
+        if ($slots.Count -ge 4096) { throw 'Zu viele VM-Neustartreservierungen; Planung manuell prüfen.' }
+        $slots += [pscustomobject]@{Target=$Target;At=$candidate.ToString('o');IntervalMinutes=$interval}
+        $temporary = $StatePath+'.tmp'
+        ConvertTo-Json -InputObject @($slots) -Depth 4 | Set-Content -LiteralPath $temporary -Encoding UTF8
+        if (Test-Path -LiteralPath $StatePath) { [IO.File]::Replace($temporary,$StatePath,[Management.Automation.Language.NullString]::Value) } else { [IO.File]::Move($temporary,$StatePath) }
+        return $candidate
+    } finally { if ($lock) { $lock.Dispose() } }
+}

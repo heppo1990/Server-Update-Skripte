@@ -3385,6 +3385,9 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
     $localNames = @($env:COMPUTERNAME, [System.Net.Dns]::GetHostName()) | Where-Object { $_ }
     if (-not [string]::IsNullOrWhiteSpace($env:USERDNSDOMAIN)) { $localNames += "$env:COMPUTERNAME.$env:USERDNSDOMAIN" }
     $isLocalTarget = $localNames -contains $ComputerName
+    if ($EnableWinget -and -not $isLocalTarget) {
+        Sync-WindowsUpdateWinGetCache -ComputerName $ComputerName -AuthInfo $AuthInfo -WriteLog $WriteLog
+    }
     $portablePreferenceRoot = Join-Path $env:LOCALAPPDATA 'WindowsUpdateAdm\PortablePreference'
     $preferenceHash = [Security.Cryptography.SHA256]::Create()
     try { $preferenceKey = [BitConverter]::ToString($preferenceHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($ComputerName.ToLowerInvariant()))).Replace('-', '') }
