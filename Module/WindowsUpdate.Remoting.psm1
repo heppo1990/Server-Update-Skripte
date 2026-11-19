@@ -49,11 +49,29 @@ function Test-WindowsUpdateWinRmPorts {
         $openPorts = [System.Collections.Generic.List[int]]::new()
         $allClients = [System.Collections.Generic.List[System.Net.Sockets.TcpClient]]::new()
         try {
+            # Alle aufgelösten Adressen unabhängig prüfen. BeginConnect mit
+            # Hostname kann an einer unerreichbaren IPv6-Adresse hängen bleiben,
+            # obwohl IPv4 erreichbar ist. Die Zielnamen der Anmeldung bleiben gleich.
+            $addresses = @()
+            $literalAddress = $null
+            if ([Net.IPAddress]::TryParse($ComputerName, [ref]$literalAddress)) {
+                $addresses = @($literalAddress)
+            } else {
+                $resolution = $null
+                try {
+                    $resolution = [Net.Dns]::BeginGetHostAddresses($ComputerName, $null, $null)
+                    if ($resolution.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
+                        $addresses = @([Net.Dns]::EndGetHostAddresses($resolution))
+                    }
+                } catch { }
+                finally { if ($resolution) { $resolution.AsyncWaitHandle.Close() } }
+            }
+            foreach ($address in $addresses) {
             foreach ($port in $uniquePorts) {
-                $client = [System.Net.Sockets.TcpClient]::new()
+                $client = [System.Net.Sockets.TcpClient]::new($address.AddressFamily)
                 $allClients.Add($client)
                 try {
-                    $asyncResult = $client.BeginConnect($ComputerName, [int]$port, $null, $null)
+                    $asyncResult = $client.BeginConnect($address, [int]$port, $null, $null)
                     $pendingConnections.Add([pscustomobject]@{
                         Port = [int]$port
                         Client = $client
@@ -62,16 +80,20 @@ function Test-WindowsUpdateWinRmPorts {
                 }
                 catch { $client.Dispose() }
             }
+            }
 
             $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
             while ($pendingConnections.Count -gt 0) {
-                $waitHandles = [System.Threading.WaitHandle[]]@(
-                    $pendingConnections | ForEach-Object { $_.AsyncResult.AsyncWaitHandle }
-                )
-                $remainingMilliseconds = [int][Math]::Max(0, [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds))
-                $completedIndex = [System.Threading.WaitHandle]::WaitAny($waitHandles, $remainingMilliseconds)
-                if ($completedIndex -eq [System.Threading.WaitHandle]::WaitTimeout) { break }
-
+                # Polling vermeidet das WaitAny-Limit von 64 Handles bei vielen IPs.
+                $completedIndex = -1
+                for ($i = 0; $i -lt $pendingConnections.Count; $i++) {
+                    if ($pendingConnections[$i].AsyncResult.IsCompleted) { $completedIndex = $i; break }
+                }
+                if ($completedIndex -lt 0) {
+                    if ([DateTime]::UtcNow -ge $deadline) { break }
+                    Start-Sleep -Milliseconds 20
+                    continue
+                }
                 $pending = $pendingConnections[$completedIndex]
                 try {
                     $pending.Client.EndConnect($pending.AsyncResult)
@@ -86,7 +108,7 @@ function Test-WindowsUpdateWinRmPorts {
                 return [pscustomobject]@{
                     ComputerName = $ComputerName
                     Ports = $uniquePorts
-                    OpenPorts = @($openPorts.ToArray())
+                    OpenPorts = @($openPorts.ToArray() | Select-Object -Unique)
                     Reachable = ($openPorts.Count -gt 0)
                     AttemptsPerformed = $attemptNumber
                 }

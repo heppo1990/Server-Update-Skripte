@@ -6,7 +6,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 - [ ] **Modulbereitstellung:** Eine tatsächlich neuere Modul-/NuGet-Version bereitstellen, ohne Passwortbestätigung oder dauerhafte Änderung des PSGallery-Vertrauens.
 - [ ] **Server Core:** WinGet in Verteilung, Check und Install auslassen; Windows Update und vorhandenes Chocolatey weiter nutzen. Zertifikatszugang auf Hyper-V Server 2019 Core bestätigen.
-- [ ] **Ausgeschaltete Ziele:** Verteilung, Check, Download und Install überspringen nicht erreichbare Ziele zügig und mit kompakter Ausgabe.
+- [ ] **Ausgeschaltete Ziele:** Verteilung, Check, Download und Install überspringen nicht erreichbare Ziele zügig und mit kompakter Ausgabe. Erreichbare IPv4-Ziele bleiben bei zusätzlicher unerreichbarer IPv6-Adresse enthalten; negative Portvorprüfung allein verwirft keinen erfolgreichen JEA-Zugang.
 
 ## Check, Download und Install
 

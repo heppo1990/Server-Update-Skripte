@@ -78,8 +78,7 @@ function Get-WindowsUpdateExecutionPhases {
                 }
                 if ($localNames -contains $entry.Name) { $state = & $probe }
                 else {
-                    $ports = Test-WindowsUpdateWinRmPorts -ComputerName $entry.Name -TimeoutMilliseconds 750 -Attempts 1
-                    if (-not $ports.Reachable) { $unreachable = $true; throw 'WinRM nicht erreichbar.' }
+                    $ports = Test-WindowsUpdateWinRmPorts -ComputerName $entry.Name -TimeoutMilliseconds 1500 -Attempts 3
                     $auth = $null
                     if ($entry.Target.IsAdditional -or $entry.Target.IsHypervisor) {
                         $auth = Get-WindowsUpdateClientCertificateAuthInfo -UpdateSettings $UpdateSettings -TargetComputer $entry.Name
@@ -87,10 +86,21 @@ function Get-WindowsUpdateExecutionPhases {
                     }
                     # Der feste JEA-Status funktioniert auch mit URI-beschränktem Zertifikat.
                     $state = $null
+                    $statusFailure = ''
                     try {
-                        $status = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $entry.Name -AuthInfo $auth -ConfigurationName WindowsUpdateAdm -ScriptBlock { Get-WindowsUpdateAdmDeploymentStatus } -TimeoutSeconds 15 -OperationName 'Bauart über JEA ermitteln')
+                        # Ein Porttest allein darf keinen funktionierenden
+                        # Zertifikats-/Kerberos-Endpunkt aus der Zielliste entfernen.
+                        $statusTimeout = if ($ports.Reachable) { 15 } else { 5 }
+                        $status = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $entry.Name -AuthInfo $auth -ConfigurationName WindowsUpdateAdm -ScriptBlock { Get-WindowsUpdateAdmDeploymentStatus } -TimeoutSeconds $statusTimeout -OperationName 'Bauart über JEA ermitteln')
                         if ($status.Count -gt 0 -and $status[-1].PSObject.Properties['IsVirtual'] -and $status[-1].IsVirtual -is [bool]) { $state = $status[-1] }
-                    } catch { }
+                    } catch { $statusFailure = $_.Exception.Message }
+                    if (-not $ports.Reachable -and $null -ne $state -and $WriteLog) {
+                        & $WriteLog "Bauartabfrage $($entry.Name): Portvorprüfung negativ, tatsächliche JEA-Verbindung erfolgreich; Ziel wird verarbeitet." $true
+                    }
+                    if (-not $ports.Reachable -and $null -eq $state) {
+                        $unreachable = $true
+                        throw "WinRM nach drei Portprüfungen und zusätzlichem JEA-Verbindungsversuch nicht erreichbar. $statusFailure"
+                    }
                     if ($null -eq $state) {
                         $result = @(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $entry.Name -AuthInfo $auth -ScriptBlock $probe -TimeoutSeconds 15 -OperationName 'Bauart ermitteln')
                         if ($result.Count -eq 0) { throw 'Bauart fehlt; aktuelle Verteilung ausführen.' }
