@@ -12,7 +12,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 ## Check, Download und Install
 
 - [ ] **Parallelbetrieb:** Noch prüfen: Home Assistant nach allen Windows- und Linux-Zielen; Reihenfolge auch bei ParallelTargets=1.
-- [ ] **Geplanter Check:** Bestehende Aufgabe wird auf den PS5.1-Starthelfer aktualisiert. Fehlende/defekte PS7 fällt auf PS5.1 zurück; ein fehlgeschlagener Check startet nicht doppelt. Startprotokoll: Logs/ScheduledCheck-Launcher.log.
+- [ ] **Geplanter Check:** SYSTEM verarbeitet entfernte Ziele ohne vorgeschaltete Bauartabfrage über die eingeschränkte JEA-Abfragerolle. Ein fehlgeschlagener Check startet nicht doppelt.
 - [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
 - [ ] **Paketergebnisse:** Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur.
 

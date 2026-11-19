@@ -432,13 +432,14 @@ if ($script:IsLocalSystemRun) { $LinuxConfigured = $false; $HAConfigured = $fals
 $executionOriginalWindows = @($ServerADList | Where-Object { $_ })
 $executionOriginalLinux = $LinuxConfigured
 $executionOriginalHA = $HAConfigured
-if ($ParallelTarget) {
-  # Der Elternlauf hat die Bauart bereits bestimmt; Worker planen nicht erneut.
-  $executionPlan = [pscustomobject]@{Phases=@([pscustomobject]@{Name='Ziel';Targets=@($executionOriginalWindows | ForEach-Object { [pscustomobject]@{Platform='Windows';Name=$_.Name;Target=$_} })});Skipped=@()}
+if ($ParallelTarget -or $script:IsLocalSystemRun) {
+  # Worker planen nicht erneut. Die eingeschränkte SYSTEM-Abfragerolle
+  # benötigt keine Hardwareinventur: Alle Ziele gehen direkt in den Check.
+  $executionPlan = [pscustomobject]@{Phases=@([pscustomobject]@{Name='Ziel';Targets=@($executionOriginalWindows | Sort-Object Name | ForEach-Object { [pscustomobject]@{Platform='Windows';Name=$_.Name;Target=$_} })});Skipped=@()}
 } else {
   $planLinux = if ($executionOriginalLinux) { $linuxSettings } else { $null }
   $planHA = if ($executionOriginalHA) { $haSettings } else { $null }
-  $executionPlan = Get-WindowsUpdateExecutionPhases -WindowsTargets $executionOriginalWindows -UpdateSettings $UpdateSettings -LinuxSettings $planLinux -HomeAssistantSettings $planHA -WriteLog { param($message,$logOnly=$false) Write-ScriptLog $message -LogOnly:$logOnly }
+  $executionPlan = Get-WindowsUpdateExecutionPhases -AllowUnknownWindowsType -WindowsTargets $executionOriginalWindows -UpdateSettings $UpdateSettings -LinuxSettings $planLinux -HomeAssistantSettings $planHA -WriteLog { param($message,$logOnly=$false) Write-ScriptLog $message -LogOnly:$logOnly }
   foreach ($skipped in @($executionPlan.Skipped)) {
     $RepBody += "<div class='warning-box'>Ziel $([Net.WebUtility]::HtmlEncode($skipped.Name)) übersprungen: Bauart nicht ermittelbar. $([Net.WebUtility]::HtmlEncode($skipped.Reason))</div>"
     if ($skipped.Platform -eq 'Windows' -and $skipped.Unreachable) { $WindowsUnreachableHosts++ }

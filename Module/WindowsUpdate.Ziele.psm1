@@ -48,10 +48,11 @@ function Invoke-WindowsUpdateInventorySsh {
 function Get-WindowsUpdateExecutionPhases {
     [CmdletBinding()]
     param([AllowEmptyCollection()][object[]]$WindowsTargets = @(), [Parameter(Mandatory)]$UpdateSettings,
-        $LinuxSettings, $HomeAssistantSettings, [scriptblock]$WriteLog)
+        $LinuxSettings, $HomeAssistantSettings, [scriptblock]$WriteLog, [switch]$AllowUnknownWindowsType)
     $virtual = [Collections.Generic.List[object]]::new()
     $physical = [Collections.Generic.List[object]]::new()
     $skipped = [Collections.Generic.List[object]]::new()
+    $unknownWindows = [Collections.Generic.List[object]]::new()
     $targets = @($WindowsTargets | ForEach-Object { [pscustomobject]@{Platform='Windows';Name=$_.Name;Target=$_} })
     if ($LinuxSettings -and $LinuxSettings.PSObject.Properties['Hosts']) {
         foreach ($entry in @($LinuxSettings.Hosts)) {
@@ -125,6 +126,11 @@ function Get-WindowsUpdateExecutionPhases {
             if ($isVirtual) { $virtual.Add($entry) } else { $physical.Add($entry) }
             if ($WriteLog) { & $WriteLog ("Bauart {0}: {1}; Dauer {2:N1}s." -f $entry.Name,$(if ($isVirtual) {'VM'} else {'physisch'}),$timer.Elapsed.TotalSeconds) $true }
         } catch {
+            if ($AllowUnknownWindowsType -and $entry.Platform -eq 'Windows' -and -not $unreachable) {
+                $unknownWindows.Add($entry)
+                if ($WriteLog) { & $WriteLog "Bauartabfrage $($entry.Name) fehlgeschlagen; alphabetische Verarbeitung ohne Bauart: $($_.Exception.Message)" $true }
+                continue
+            }
             $skipped.Add([pscustomobject]@{Platform=$entry.Platform;Name=$entry.Name;Unreachable=$unreachable;Reason=$_.Exception.Message})
             if ($WriteLog) {
                 $notice = if ($unreachable) { "$($entry.Name) ist nicht erreichbar" } else { "WARNUNG: Bauart auf $($entry.Name) nicht ermittelbar; Ziel übersprungen. Details im Log." }
@@ -139,6 +145,9 @@ function Get-WindowsUpdateExecutionPhases {
         foreach ($platform in @('Windows','Linux','HomeAssistant')) {
             [pscustomobject]@{Name="$platform-VMs";IsVirtual=$true;Targets=@($virtual.ToArray() | Where-Object Platform -eq $platform)}
             [pscustomobject]@{Name="$platform physisch";IsVirtual=$false;Targets=@($physical.ToArray() | Where-Object Platform -eq $platform)}
+            if ($platform -eq 'Windows' -and $unknownWindows.Count -gt 0) {
+                [pscustomobject]@{Name='Windows alphabetisch';IsVirtual=$null;Targets=@($unknownWindows.ToArray() | Sort-Object Name)}
+            }
         }
     )
     [pscustomobject]@{Phases=$phases;Skipped=@($skipped.ToArray())}
