@@ -17,6 +17,41 @@ function Invoke-WindowsUpdateTargetBatch {
     try {
         $contextPath = Join-Path $root 'context.xml'
         $Context | Export-Clixml -LiteralPath $contextPath -Depth 12
+        $bootstrapPath = Join-Path $root 'Start-TargetWorker.ps1'
+        $bootstrap = @'
+param([Parameter(Mandatory)][string]$ConfigPath)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$PSModuleAutoLoadingPreference = 'All'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+# Ein von PS7 geerbter Modulpfad ist kein vollständiger PS5-Modulpfad.
+$documents = [Environment]::GetFolderPath('MyDocuments')
+if ([string]::IsNullOrWhiteSpace($documents)) { $documents = Join-Path $env:USERPROFILE 'Documents' }
+$nativeRoots = @(
+    (Join-Path $documents 'WindowsPowerShell\Modules'),
+    (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'),
+    (Join-Path $PSHOME 'Modules')
+)
+if (${env:ProgramFiles(x86)}) { $nativeRoots += Join-Path ${env:ProgramFiles(x86)} 'WindowsPowerShell\Modules' }
+$coreRoots = @((Join-Path $documents 'PowerShell\Modules'),(Join-Path $env:ProgramFiles 'PowerShell\Modules'))
+$customRoots = @($env:PSModulePath -split ';' | Where-Object { $_ -and $coreRoots -notcontains $_.TrimEnd('\','/') -and $_ -notmatch '(?i)[\\/]PowerShell[\\/]7(?:[.\-][^\\/]*)?[\\/]Modules(?:[\\/]|$)' })
+$env:PSModulePath = (@($nativeRoots + $customRoots) | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -Unique) -join ';'
+try {
+    $configuration = Import-Clixml -LiteralPath $ConfigPath
+    $parameters = $configuration.Parameters
+    $global:LASTEXITCODE = 0
+    # -File und Textausgabe vermeiden CLIXML für Write-Host/Information/Error.
+    & $configuration.ScriptPath @parameters *>&1 | ForEach-Object {
+        if ($_ -is [Management.Automation.ErrorRecord]) { [Console]::Error.WriteLine(($_ | Out-String -Width 400)) }
+        else { [Console]::WriteLine([string]$_) }
+    }
+    exit $global:LASTEXITCODE
+} catch {
+    [Console]::Error.WriteLine(($_ | Out-String -Width 400))
+    exit 1
+}
+'@
+        [IO.File]::WriteAllText($bootstrapPath,$bootstrap,[Text.UTF8Encoding]::new($true))
         foreach ($batch in $batches) {
             $queue = [Collections.Generic.Queue[object]]::new()
             foreach ($target in $batch) { $queue.Enqueue($target) }
@@ -25,16 +60,15 @@ function Invoke-WindowsUpdateTargetBatch {
                     $target = $queue.Dequeue()
                     $id = [guid]::NewGuid().ToString('N')
                     $resultPath = Join-Path $root ($id+'.result.xml')
-                    $configuration = @{ScriptPath=$ScriptPath;Parameters=@{ParallelTarget=[string]$target.Name;ParallelResultPath=$resultPath;ParallelContextPath=$contextPath}}
+                    $configuration = @{ScriptPath=$ScriptPath;Parameters=@{ParallelTarget=[string]$target.Name;ParallelResultPath=$resultPath;ParallelContextPath=$contextPath;ParallelLogPath=(Join-Path $root ($id+'.worker.log'))}}
                     $configPath = Join-Path $root ($id+'.config.xml')
                     $configuration | Export-Clixml -LiteralPath $configPath -Depth 8
-                    $command = '$ProgressPreference=''SilentlyContinue''; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $c=Import-Clixml -LiteralPath ''' + $configPath.Replace("'","''") + '''; $p=$c.Parameters; & $c.ScriptPath @p'
-                    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -OutputFormat Text -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+                    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $bootstrapPath,$configPath
                     $stdout = Join-Path $root ($id+'.stdout'); $stderr = Join-Path $root ($id+'.stderr')
                     $process = Start-Process -FilePath (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
                     # Prozesshandle vor dem Ende öffnen, damit ExitCode unter PS5 erhalten bleibt.
                     $null = $process.Handle
-                    $pending.Add([pscustomobject]@{Target=[string]$target.Name;Process=$process;Result=$resultPath;Stdout=$stdout;Stderr=$stderr;Started=[datetime]::UtcNow})
+                    $pending.Add([pscustomobject]@{Target=[string]$target.Name;Process=$process;Result=$resultPath;LogFile=$configuration.Parameters.ParallelLogPath;Stdout=$stdout;Stderr=$stderr;Started=[datetime]::UtcNow})
                     if ($WriteLog) { & $WriteLog "[$($target.Name)] Zielablauf gestartet (maximal $ThrottleLimit gleichzeitig)." }
                 }
                 foreach ($item in @($pending.ToArray())) {
@@ -48,12 +82,15 @@ function Invoke-WindowsUpdateTargetBatch {
                             $targetOutputStarted = $outputFile -eq $item.Stderr
                             foreach ($line in @(Get-Content -LiteralPath $outputFile -Encoding UTF8)) {
                                 if ($line -match 'Starte Update-(Check|Download|Installation)') { $targetOutputStarted = $true }
-                                if ($targetOutputStarted -and -not [string]::IsNullOrWhiteSpace($line)) { & $WriteLog "[$($item.Target)] $line" }
+                                if ($targetOutputStarted -and -not [string]::IsNullOrWhiteSpace($line)) { & $WriteLog $line ($outputFile -eq $item.Stderr) }
                             }
                         }
                     }
+                    if ($WriteLog -and (Test-Path -LiteralPath $item.LogFile -PathType Leaf)) {
+                        foreach ($line in @(Get-Content -LiteralPath $item.LogFile -Encoding UTF8)) { & $WriteLog "[$($item.Target)] $line" $true }
+                    }
                     if ($item.Process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $item.Result)) {
-                        $failure = "Zielablauf '$($item.Target)' lieferte kein vollständiges Ergebnis (Exitcode $($item.Process.ExitCode)). Kein automatischer Wiederholungsversuch."
+                        $failure = "FEHLER: Zielablauf auf $($item.Target) fehlgeschlagen (Exitcode $($item.Process.ExitCode)); kein vollständiges Ergebnis. Kein automatischer Wiederholungsversuch."
                         if ($WriteLog) { & $WriteLog $failure }
                         $answers.Add([pscustomobject]@{Target=$item.Target;Html=('<div class="error-box">'+[Net.WebUtility]::HtmlEncode($failure)+'</div>');Data=@{ErrorCount=1;ManualActions=@([pscustomobject]@{Server=$item.Target;Manager='Zielablauf';Packages=@();Text=$failure})}})
                         $item.Process.Dispose(); [void]$pending.Remove($item)
@@ -61,9 +98,6 @@ function Invoke-WindowsUpdateTargetBatch {
                     }
                     $answer = Import-Clixml -LiteralPath $item.Result
                     if ($answer.Target -ne $item.Target) { throw 'Worker-Ergebnis gehört zu einem anderen Ziel.' }
-                    if ($WriteLog -and $answer.PSObject.Properties['LogFile'] -and $answer.LogFile -and (Test-Path -LiteralPath $answer.LogFile -PathType Leaf)) {
-                        foreach ($line in @(Get-Content -LiteralPath $answer.LogFile -Encoding UTF8)) { & $WriteLog "[$($item.Target)] $line" $true }
-                    }
                     $answers.Add($answer)
                     if ($WriteLog) { & $WriteLog "[$($item.Target)] Zielablauf abgeschlossen." }
                     $item.Process.Dispose(); [void]$pending.Remove($item)

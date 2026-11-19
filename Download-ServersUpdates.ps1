@@ -33,7 +33,8 @@ param(
     # Interne, isolierte Windows-Zielworker; Gesamtbericht bleibt im Elternlauf.
     [string]$ParallelTarget,
     [string]$ParallelResultPath,
-    [string]$ParallelContextPath
+    [string]$ParallelContextPath,
+    [string]$ParallelLogPath
 )
 
 # Ältere Windows-/PowerShell-Versionen verwenden sonst oft TLS 1.0 als Standard.
@@ -95,6 +96,7 @@ $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
 if ($ParallelTarget) { $TimeStamp += '-worker-' + [guid]::NewGuid().ToString('N') }
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
 $LogFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_${TimeStamp}.log"
+if ($ParallelTarget -and $ParallelLogPath) { $LogFileName = $ParallelLogPath }
 $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_Report_${TimeStamp}.html"
 
 ############################################################################################################################################################################

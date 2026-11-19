@@ -1,7 +1,8 @@
-# Fachmodul: WindowsUpdate.ModulPakete
+﻿# Fachmodul: WindowsUpdate.ModulPakete
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Test-WindowsUpdateGalleryNuGetProvider {
+    if (-not (Get-Command Get-PackageProvider -ErrorAction SilentlyContinue)) { return $false }
     $providers = @(Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)
     return @($providers | Where-Object { [version]$_.Version -ge [version]'2.8.5.201' }).Count -gt 0
 }

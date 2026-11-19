@@ -49,6 +49,7 @@ param(
     [string]$ParallelTarget,
     [string]$ParallelResultPath,
     [string]$ParallelContextPath,
+    [string]$ParallelLogPath,
   [switch]$TestMail,
   [switch]$SkipWingetUserUpdates
 )
@@ -127,6 +128,7 @@ $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
 if ($ParallelTarget) { $TimeStamp += '-worker-' + [guid]::NewGuid().ToString('N') }
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
 $LogFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_${TimeStamp}.log"
+if ($ParallelTarget -and $ParallelLogPath) { $LogFileName = $ParallelLogPath }
 $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_Report_${TimeStamp}.html"
 
 ############################################################################################################################################################################
@@ -176,7 +178,7 @@ function Clear-WindowsUpdateCache {
   }
 }
 function Import-PSWindowsUpdate {
-  Import-WindowsUpdatePSWindowsUpdateModule -WriteLog { param($message) Write-ScriptLog $message } -LocalSystemRun:$script:IsLocalSystemRun
+  Import-WindowsUpdatePSWindowsUpdateModule -WriteLog { param($message) Write-ScriptLog $message } -LocalSystemRun:$script:IsLocalSystemRun -SkipUpdate:([bool]$ParallelTarget)
 }
 # Hauptskript
 ############################################################################################################################################################################
@@ -288,7 +290,7 @@ if (-not $moduleLoaded) {
   exit 1
 }
 
-if ($enableWingetUpdates -and -not $script:IsLocalSystemRun) {
+if ($enableWingetUpdates -and -not $script:IsLocalSystemRun -and -not $ParallelTarget) {
   $null = Update-WinGetClientModule -WriteLog { param($message, $level) Write-ScriptLog "[$level] $message" }
 }
 

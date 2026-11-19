@@ -4,14 +4,13 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Verteilung
 
-- [ ] **Stand 5.2.0:** Einrichtung beziehungsweise Aktualisierung und abschließenden JEA-Verbindungstest bestätigen; AD und Zertifikatszugang getrennt abhaken.
-- [ ] **Modulbereitstellung:** Neuere Modul-/NuGet-Version dynamisch erkennen und bereitstellen; Discovery-Feed-Fallback ohne Warnung, Passwortbestätigung oder dauerhafte Änderung des PSGallery-Vertrauens.
+- [ ] **Modulbereitstellung:** Eine tatsächlich neuere Modul-/NuGet-Version bereitstellen, ohne Passwortbestätigung oder dauerhafte Änderung des PSGallery-Vertrauens.
 - [ ] **Server Core:** WinGet in Verteilung, Check und Install auslassen; Windows Update und vorhandenes Chocolatey weiter nutzen. Zertifikatszugang auf Hyper-V Server 2019 Core bestätigen.
 - [ ] **Ausgeschaltete Ziele:** Verteilung, Check, Download und Install überspringen nicht erreichbare Ziele zügig und mit kompakter Ausgabe.
 
 ## Check, Download und Install
 
-- [ ] **Parallelbetrieb:** ParallelTargets=3 führt vollständige Windows-Zielabläufe gleichzeitig aus; Fehler eines Workers stoppen andere nicht. Zähler, Teilprotokolle und HTML stimmen; nur ein Gesamtbericht und eine Mail. Verwaltungsserver zuletzt; ParallelTargets=1 bleibt sequenziell.
+- [ ] **Parallelbetrieb:** PS7→PS5-Start mit bereinigtem Modulpfad, vorbereiteten lokalen Modulen und Klartextausgabe auf dem Ziel bestätigen; temporäre Worker-Logs werden im Hauptlog gesammelt und entfernt. ParallelTargets=3 führt vollständige Windows-Zielabläufe gleichzeitig aus; Fehler eines Workers stoppen andere nicht. Zähler, Teilprotokolle und HTML stimmen; nur ein Gesamtbericht und eine Mail. Verwaltungsserver zuletzt; ParallelTargets=1 bleibt sequenziell.
 - [ ] **Neustartplanung:** Gemeinsame VM-Reservierungen halten Mindestabstand, eingestellten Neustartmodus und Wartungsfenster ein; VM-Nachinstallationen erhalten getrennte Starttermine. Physische Neustarts bleiben hinter dem VM-Block, Verwaltungsserver hinter dem Gesamtbericht.
 - [ ] **Geplanter Check:** Bestehende Aufgabe wird auf den PS5.1-Starthelfer aktualisiert. Fehlende/defekte PS7 fällt auf PS5.1 zurück; ein fehlgeschlagener Check startet nicht doppelt. Startprotokoll: Logs/ScheduledCheck-Launcher.log.
 - [ ] **PowerShell-Vorabupdate:** Dieselbe WinGet-CLI wie bei der Suche verwenden. Bei Installer-Technikkonflikt mit vorhandener PowerShell fortsetzen und manuelle Nacharbeit im Bericht nennen.

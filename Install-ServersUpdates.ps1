@@ -44,6 +44,7 @@ param(
     [string]$ParallelTarget,
     [string]$ParallelResultPath,
     [string]$ParallelContextPath,
+    [string]$ParallelLogPath,
     [switch]$DebugMode,
     # Optional: begrenzt einen Lauf auf die angegebenen Server, z. B. -TargetComputer SrvHV01
     [Alias('ComputerName')]
@@ -124,6 +125,7 @@ $TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm"
 if ($ParallelTarget) { $TimeStamp += '-worker-' + [guid]::NewGuid().ToString('N') }
 $ScriptName = (Split-Path -Path ($MyInvocation.MyCommand.Name) -Leaf).Replace('.ps1','')
 $LogFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_${TimeStamp}.log"
+if ($ParallelTarget -and $ParallelLogPath) { $LogFileName = $ParallelLogPath }
 $ReportFileName = Join-Path -Path ($PSScriptRoot + "/Logs") -ChildPath "${ScriptName}_Report_${TimeStamp}.html"
 if (-not [string]::IsNullOrWhiteSpace($ManagementPowerShellRunTimestamp)) { $TimeStamp = $ManagementPowerShellRunTimestamp }
 if (-not [string]::IsNullOrWhiteSpace($ManagementPowerShellRunLogPath)) { $LogFileName = $ManagementPowerShellRunLogPath }

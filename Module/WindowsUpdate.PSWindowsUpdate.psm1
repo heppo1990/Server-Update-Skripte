@@ -1,4 +1,4 @@
-# Fachmodul: WindowsUpdate.PSWindowsUpdate
+﻿# Fachmodul: WindowsUpdate.PSWindowsUpdate
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
 function Update-PSWindowsUpdateModule {
@@ -312,21 +312,22 @@ function Update-PSWindowsUpdateModule {
 function Import-WindowsUpdatePSWindowsUpdateModule {
     param(
         [Parameter(Mandatory)][scriptblock]$WriteLog,
-        [switch]$LocalSystemRun
+        [switch]$LocalSystemRun,
+        [switch]$SkipUpdate
     )
 
     & $WriteLog 'Versuche PSWindowsUpdate-Modul zu laden...'
-    if ($LocalSystemRun) {
+    if ($LocalSystemRun -or $SkipUpdate) {
         $installedModule = Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue |
             Sort-Object Version -Descending |
             Select-Object -First 1
         if (-not $installedModule) {
-            & $WriteLog 'KRITISCHER FEHLER: PSWindowsUpdate ist maschinenweit nicht installiert; der SYSTEM-Aufgabenlauf kann das Modul nicht aktualisieren.'
+            & $WriteLog 'KRITISCHER FEHLER: Das vorbereitete PSWindowsUpdate-Modul ist im aktuellen Modulpfad nicht verfügbar; dieser Aufgaben-/Workerprozess installiert lokal keine Module nach.'
             return $false
         }
         try {
             Import-Module -Name $installedModule.Path -ErrorAction Stop
-            & $WriteLog "PSWindowsUpdate $($installedModule.Version) aus dem maschinenweiten Modulpfad geladen; Onlineaktualisierung im SYSTEM-Aufgabenlauf übersprungen."
+            & $WriteLog "PSWindowsUpdate $($installedModule.Version) aus dem maschinenweiten Modulpfad geladen; Onlineaktualisierung im Aufgaben-/Workerprozess übersprungen."
             return $true
         }
         catch {
