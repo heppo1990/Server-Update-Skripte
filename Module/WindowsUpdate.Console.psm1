@@ -71,6 +71,7 @@ function Get-WindowsUpdateConsoleColor {
     param([AllowEmptyString()][string]$Message)
 
     if (Test-WindowsUpdateZeroFailureSummary -Message $Message) { return 'Green' }
+    if ($Message -match '^\s*\S+ ist nicht erreichbar$') { return 'Gray' }
     if ($Message -match '(?i)^\s*(WARNUNG|WARNING|\[WARN\])|manuelle Prüfung|manuelle Aktion erforderlich') { return 'Yellow' }
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*0(?:\D|$)') { return 'Green' }
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:\s*[1-9]\d*') { return 'Red' }
@@ -218,6 +219,7 @@ function Test-WindowsUpdateConsoleMessage {
         $script:WindowsUpdateConsoleTableHasRows = $false
         return $true
     }
+    if ($Message -match '^\s*\S+ ist nicht erreichbar$') { return $true }
     if ($Message -match '(?i)^\s*(WARNUNG|WARNING|\[WARN\]|\[ERROR\]|FEHLER\b|ERROR\b)|\bfehlgeschlagen\b|\bkonnte nicht\b|aufgetreten!|manuelle Prüfung|manuelle Aktion erforderlich') { return $true }
     if ($Message -match '(?i)^\s*(Fehler|Errors?)\s*:') { return $true }
     if ($Message -match '^WinGet auf [A-Za-z0-9_.-]+ übersprungen: Auf Server Core nicht unterstützt;') { return $true }

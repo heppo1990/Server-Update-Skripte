@@ -126,7 +126,11 @@ function Get-WindowsUpdateExecutionPhases {
             if ($WriteLog) { & $WriteLog ("Bauart {0}: {1}; Dauer {2:N1}s." -f $entry.Name,$(if ($isVirtual) {'VM'} else {'physisch'}),$timer.Elapsed.TotalSeconds) $true }
         } catch {
             $skipped.Add([pscustomobject]@{Platform=$entry.Platform;Name=$entry.Name;Unreachable=$unreachable;Reason=$_.Exception.Message})
-            if ($WriteLog) { & $WriteLog "WARNUNG: Bauart auf $($entry.Name) nicht ermittelbar; Ziel übersprungen. Details im Log." $false; & $WriteLog "Bauartabfrage $($entry.Name): $($_.Exception.Message); Dauer $($timer.Elapsed.TotalSeconds)s." $true }
+            if ($WriteLog) {
+                $notice = if ($unreachable) { "$($entry.Name) ist nicht erreichbar" } else { "WARNUNG: Bauart auf $($entry.Name) nicht ermittelbar; Ziel übersprungen. Details im Log." }
+                & $WriteLog $notice $false
+                & $WriteLog "Bauartabfrage $($entry.Name): $($_.Exception.Message); Dauer $($timer.Elapsed.TotalSeconds)s." $true
+            }
         }
     }
     # Zuerst sämtliche Windows-Ziele, danach Linux und zuletzt Home Assistant.
