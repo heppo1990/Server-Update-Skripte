@@ -15,7 +15,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 - [ ] **Geplanter Check:** Bestehende Aufgabe wird auf den PS5.1-Starthelfer aktualisiert. Fehlende/defekte PS7 fällt auf PS5.1 zurück; ein fehlgeschlagener Check startet nicht doppelt. Startprotokoll: Logs/ScheduledCheck-Launcher.log.
 - [ ] **PowerShell-Vorabupdate:** Dieselbe WinGet-CLI wie bei der Suche verwenden. Bei Installer-Technikkonflikt mit vorhandener PowerShell fortsetzen und manuelle Nacharbeit im Bericht nennen.
 - [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
-- [ ] **Paketergebnisse und Ausgabe:** Kompakte WinGet-/Chocolatey-Paketlisten erscheinen auch bei parallelen Läufen vollständig in der Konsole, mit Leerzeile vor dem nächsten Server oder Paketmanager. Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur. Erfolgreicher Rückfall erzeugt keine zusätzliche Fehlermeldung in der Konsole; echte Fehler bleiben sichtbar.
+- [ ] **Paketergebnisse und Ausgabe:** Kompakte WinGet-/Chocolatey-Paketlisten erscheinen auch bei parallelen Läufen vollständig in der Konsole, mit Leerzeile vor dem nächsten Server oder Paketmanager; keine wiederholte Ziellistenüberschrift oder zugehörigen Leerzeilen. Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur. Erfolgreicher Rückfall erzeugt keine zusätzliche Fehlermeldung in der Konsole; echte Fehler bleiben sichtbar.
 
 ## WinGet-Wartung und Downloadcache
 

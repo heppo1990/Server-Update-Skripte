@@ -452,9 +452,6 @@ foreach ($executionPhase in @($executionPlan.Phases)) {
   $HAConfigured = @($executionPhase.Targets | Where-Object Platform -eq HomeAssistant).Count -gt 0
   if (-not $ParallelTarget) { Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly:$true }
 if ($ServerADList.Count -gt 0) {
-  Write-ScriptLog ''
-  Write-ScriptLog "Verarbeite Windows-Zielliste..."
-  Write-ScriptLog ''
 
   # -----------------------------------------------------------------------
   # ÄNDERUNG: ScriptBlocks verwenden jetzt immer -Online

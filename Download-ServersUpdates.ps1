@@ -177,9 +177,6 @@ foreach ($executionPhase in @($executionPlan.Phases)) {
   $HAConfigured = @($executionPhase.Targets | Where-Object Platform -eq HomeAssistant).Count -gt 0
   if (-not $ParallelTarget) { Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly:$true }
 if ($ServerADList.Count -gt 0) {
-  Write-ScriptLog ''
-  Write-ScriptLog "Verarbeite AD-Serverliste..."
-  Write-ScriptLog ''
 
   $SucheOnline = $UpdateSettings.SucheOnline
 
