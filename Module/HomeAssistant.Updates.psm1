@@ -1,5 +1,5 @@
 ﻿
-    if ($MachineType -ne 'Automatic') { return $MachineType -eq 'Virtual' }Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 
 function Invoke-HomeAssistantUpdates {
 [CmdletBinding()]
@@ -242,6 +242,7 @@ function Get-NextHARebootTime {
 }
 
 function Test-HAIsVirtual {
+    if ($MachineType -ne 'Automatic') { return $MachineType -eq 'Virtual' }
     try {
         # Die Abfrage beeinflusst nur die Neustartplanung. Sie darf bei einem
         # nicht antwortenden Remote-Befehl den gesamten Update-Lauf nicht
