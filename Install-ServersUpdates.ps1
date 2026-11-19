@@ -630,7 +630,7 @@ $LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Whe
 $UpdateSettings = $Settings.UpdateSettings
 if (-not $ParallelTarget) {
   $configuredParallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
-  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Ziele nacheinander; zuerst alle VMs, danach physische Systeme.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig; zuerst alle VMs, danach physische Systeme." }
+  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Ziele nacheinander; zuerst Windows-VMs, dann physische Windows-Systeme, danach Linux und Home Assistant.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig; zuerst Windows-VMs, dann physische Windows-Systeme, danach Linux und Home Assistant." }
   Write-Host $parallelNotice -ForegroundColor Gray
 }
 $MailSettings = $Settings.MailSettings
@@ -1200,7 +1200,7 @@ if (-not [string]::IsNullOrWhiteSpace($script:ManagementPowerShellPreflightFailu
   }
 }
 if ($IsWindowsOnlyRun) { $LinuxConfigured = $false; $HAConfigured = $false }
-# Ein gemeinsamer Phasenplan für alle Plattformen: VMs vollständig vor Physisch.
+# Gemeinsamer Phasenplan: Windows-VMs, Windows physisch, danach Linux und HA.
 $executionOriginalWindows = @($ServerADList | Where-Object { $_ })
 $executionOriginalLinux = $LinuxConfigured
 $executionOriginalHA = $HAConfigured
@@ -1225,7 +1225,7 @@ foreach ($executionPhase in @($executionPlan.Phases)) {
   $LinuxTargetHosts = @($executionPhase.Targets | Where-Object Platform -eq Linux | ForEach-Object { $_.Name })
   $LinuxConfigured = $LinuxTargetHosts.Count -gt 0
   $HAConfigured = @($executionPhase.Targets | Where-Object Platform -eq HomeAssistant).Count -gt 0
-  if (-not $ParallelTarget) { $script:ExecutionPhaseIsVirtual = $executionPhase.Name -eq 'VMs'; Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly:$true }
+  if (-not $ParallelTarget) { $script:ExecutionPhaseIsVirtual = $executionPhase.IsVirtual; Write-ScriptLog "Verarbeitungsphase: $($executionPhase.Name)." -LogOnly:$true }
 if ($ServerADList.Count -gt 0) {
   Write-ScriptLog ''
   Write-ScriptLog "Verarbeite Windows-Zielliste..."
@@ -1612,7 +1612,7 @@ if ($IsWindowsOnlyRun) {
   Write-ScriptLog ''
   Write-ScriptLog "Führe Linux-Updates Skript aus: $LinuxUpdateScript"
   try {
-    & $LinuxUpdateScript -MachineType $(if ($executionPhase.Name -eq 'VMs') { 'Virtual' } else { 'Physical' }) -TargetHost $LinuxTargetHosts -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
+    & $LinuxUpdateScript -MachineType $(if ($executionPhase.IsVirtual) { 'Virtual' } else { 'Physical' }) -TargetHost $LinuxTargetHosts -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
     Write-ScriptLog "Linux-Updates Skript erfolgreich ausgeführt."
 
     if (Test-Path $LinuxStatsFile) {
@@ -1674,7 +1674,7 @@ if ($IsWindowsOnlyRun) {
   Write-ScriptLog ''
   Write-ScriptLog "Führe Home Assistant-Updates Skript aus: $HAUpdateScript"
   try {
-    & $HAUpdateScript -MachineType $(if ($executionPhase.Name -eq 'VMs') { 'Virtual' } else { 'Physical' }) -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
+    & $HAUpdateScript -MachineType $(if ($executionPhase.IsVirtual) { 'Virtual' } else { 'Physical' }) -VMRebootIndexStart $script:VMRebootIndex -DeferPhysicalReboots
     Write-ScriptLog "Home Assistant-Updates Skript erfolgreich ausgeführt."
 
     if (Test-Path $HAStatsFile) {

@@ -129,7 +129,15 @@ function Get-WindowsUpdateExecutionPhases {
             if ($WriteLog) { & $WriteLog "WARNUNG: Bauart auf $($entry.Name) nicht ermittelbar; Ziel übersprungen. Details im Log." $false; & $WriteLog "Bauartabfrage $($entry.Name): $($_.Exception.Message); Dauer $($timer.Elapsed.TotalSeconds)s." $true }
         }
     }
-    [pscustomobject]@{Phases=@([pscustomobject]@{Name='VMs';Targets=@($virtual.ToArray())},[pscustomobject]@{Name='Physische Systeme';Targets=@($physical.ToArray())});Skipped=@($skipped.ToArray())}
+    # Zuerst sämtliche Windows-Ziele, danach Linux und zuletzt Home Assistant.
+    # Die Bauart bleibt auch für die spätere Neustartplanung ausdrücklich erhalten.
+    $phases = @(
+        foreach ($platform in @('Windows','Linux','HomeAssistant')) {
+            [pscustomobject]@{Name="$platform-VMs";IsVirtual=$true;Targets=@($virtual.ToArray() | Where-Object Platform -eq $platform)}
+            [pscustomobject]@{Name="$platform physisch";IsVirtual=$false;Targets=@($physical.ToArray() | Where-Object Platform -eq $platform)}
+        }
+    )
+    [pscustomobject]@{Phases=$phases;Skipped=@($skipped.ToArray())}
 }
 
 function Get-WindowsUpdateTargets {

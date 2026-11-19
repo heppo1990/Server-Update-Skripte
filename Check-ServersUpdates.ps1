@@ -203,7 +203,7 @@ $LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Whe
 $UpdateSettings = $Settings.UpdateSettings
 if (-not $ParallelTarget) {
   $configuredParallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
-  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Ziele nacheinander; zuerst alle VMs, danach physische Systeme.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig; zuerst alle VMs, danach physische Systeme." }
+  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Ziele nacheinander; zuerst Windows-VMs, dann physische Windows-Systeme, danach Linux und Home Assistant.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig; zuerst Windows-VMs, dann physische Windows-Systeme, danach Linux und Home Assistant." }
   Write-Host $parallelNotice -ForegroundColor Gray
 }
 $MailSettings = $Settings.MailSettings
@@ -428,7 +428,7 @@ $RepBody = @"
 
 # Server verarbeiten
 if ($script:IsLocalSystemRun) { $LinuxConfigured = $false; $HAConfigured = $false }
-# Ein gemeinsamer Phasenplan für alle Plattformen: VMs vollständig vor Physisch.
+# Gemeinsamer Phasenplan: Windows-VMs, Windows physisch, danach Linux und HA.
 $executionOriginalWindows = @($ServerADList | Where-Object { $_ })
 $executionOriginalLinux = $LinuxConfigured
 $executionOriginalHA = $HAConfigured
