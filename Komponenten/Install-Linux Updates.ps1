@@ -1,9 +1,11 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$DryRun,
     [switch]$CheckOnly,
     [switch]$ConnectionOnly,
     [switch]$Quiet,
+    [switch]$NoSeparateLog,
+    [string]$SharedLogPath,
     [switch]$DeferPhysicalReboots,
     [string]$KeyPath,
     [string]$SSHPath,

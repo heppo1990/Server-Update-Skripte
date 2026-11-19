@@ -1,7 +1,9 @@
-param(
+﻿param(
     [switch]$CheckOnly,
     [switch]$ConnectionOnly,
     [switch]$Quiet,
+    [switch]$NoSeparateLog,
+    [string]$SharedLogPath,
     [switch]$DeferPhysicalReboots,
     [string]$HAHost,
     [string]$User,

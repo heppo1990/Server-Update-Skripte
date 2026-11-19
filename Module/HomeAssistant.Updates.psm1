@@ -6,6 +6,8 @@ param(
     [switch]$CheckOnly,
     [switch]$ConnectionOnly,
     [switch]$Quiet,
+    [switch]$NoSeparateLog,
+    [string]$SharedLogPath,
     [switch]$DeferPhysicalReboots,
     [string]$HAHost,
     [string]$User,
@@ -58,7 +60,8 @@ if (-not $PSBoundParameters.ContainsKey('SSHPath')) {
 # ----------------------------
 $script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
     $settings.UpdateSettings.PSObject.Properties['WriteLogFile'] -and
-    [bool]$settings.UpdateSettings.WriteLogFile
+    [bool]$settings.UpdateSettings.WriteLogFile -and -not $NoSeparateLog
+$script:SharedLogPath = if ($NoSeparateLog) { $SharedLogPath } else { '' }
 $script:QuietMode = $Quiet
 $LogDir = Join-Path $repositoryRoot "Logs"
 if (-not (Test-Path $LogDir)) {
@@ -117,6 +120,7 @@ function Write-HostLog {
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
     $consoleMessage = if ($Level -eq 'Warning' -and $Message -notmatch '^\s*(WARNUNG|WARNING)\b') { "WARNUNG: $Message" } else { $Message }
     if (-not $LogOnly -and -not $script:QuietMode -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $consoleMessage -ForegroundColor $fgColor }
+    Write-WindowsUpdateSharedLog -Path $script:SharedLogPath -Component 'Home Assistant' -Message $Message
     if ($script:WriteExecutionLog) {
         Add-Content -LiteralPath $LogFile -Value $Message -Encoding utf8
     }
@@ -412,7 +416,7 @@ function Test-HAKeyLogin {
     $exitCode = $LASTEXITCODE
     $success = ($exitCode -eq 0 -and ($test -join "`n").Trim() -eq 'OK')
     if (-not $success) { $script:LastSshFailure = Get-WindowsUpdateSshFailure -Text ($test -join [Environment]::NewLine) }
-    if (-not $success -and $LogFile) {
+    if (-not $success -and ($LogFile -or $script:SharedLogPath)) {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-HostLog -Message $message -RemoteHost $RemoteHost -LogFile $LogFile } -Operation 'Home-Assistant-SSH-Verbindung prüfen' -Target $RemoteHost -DiagnosticText ($test -join [Environment]::NewLine) -Context @("Target=$User@$RemoteHost", "ExitCode=$exitCode")
     }
     return $success

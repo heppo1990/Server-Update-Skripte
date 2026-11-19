@@ -238,3 +238,10 @@ function Write-PSWindowsUpdateModuleLog {
     if ($WriteLog) { & $WriteLog $Message $Level; return }
     if ($Level -eq 'WARN') { Write-Warning $Message } else { Write-Verbose $Message }
 }
+
+function Write-WindowsUpdateSharedLog {
+    param([AllowEmptyString()][string]$Path, [Parameter(Mandatory)][string]$Component, [AllowEmptyString()][string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    $entry = '{0} [{1}] {2}' -f (Get-Date -Format 'dd.MM.yyyy HH:mm:ss'),$Component,$Message
+    Add-Content -LiteralPath $Path -Value $entry -Encoding UTF8 -ErrorAction Stop
+}

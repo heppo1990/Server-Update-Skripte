@@ -78,6 +78,8 @@ Die folgenden Tabellen beschreiben alle Felder aus `default_settings.json`. Opti
 
 ### `UpdateSettings`
 
+Check, Download und Verteilung schreiben Linux-/Home-Assistant-Details in ihr gemeinsames Laufprotokoll und erzeugen dafür keine zusätzlichen Host-Logdateien. Bei der eigentlichen Installation bleiben separate Linux-/HA-Protokolle erhalten. Die Einstellung `WriteLogFile` des aufrufenden Laufs gilt auch für das gemeinsame Protokoll.
+
 `ParallelTargets` begrenzt die gleichzeitig laufenden vollständigen Windows-Zielabläufe von Check, Download und Install. Standard: `3`; `1` führt die Ziele nacheinander aus, zulässig sind höchstens `16`. Jeder Worker verwendet einen eigenen Windows-PowerShell-5.1-Prozess und ein eigenes Teilprotokoll. Der Hauptlauf sammelt Ergebnisse und Diagnosen und versendet genau einen Gesamtbericht. Der Verwaltungsserver wird zuletzt verarbeitet; Linux und Home Assistant werden weiterhin einmal im Hauptlauf ausgeführt.
 
 VM-Neustarttermine werden prozessübergreifend auf dem Verwaltungsserver reserviert. `VMRebootIntervalMinutes` gilt als Mindestabstand, mindestens eine Minute. Wartungsfenster und der Puffer vor physischen Neustarts bleiben erhalten. Auch geplante VM-Nachinstallationen erhalten getrennte Starttermine. Die Staffelung plant unterschiedliche Startzeitpunkte; die tatsächliche Bootdauer hängt vom Ziel ab.

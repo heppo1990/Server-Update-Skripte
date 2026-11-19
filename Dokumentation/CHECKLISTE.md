@@ -1,45 +1,45 @@
-﻿# Offene Arbeiten und Prüfungen
+﻿# Offene Praxistests
 
-Nur offene technische Punkte, keine Laufhistorie. Niemals Kundendaten, Kundennamen, Kundennummern oder konkrete Servernamen aufnehmen. Ein erfolgreicher Kundenlauf reicht je Prüfung. Erledigtes wird gelöscht. Checklistenänderungen nur zusammen mit Skriptänderungen committen/pushen.
+Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Bestätigte Punkte werden gelöscht; bei teilweise bestätigten Sammelpunkten nur den offenen Rest behalten. Keine Kundendaten oder konkreten Servernamen eintragen. Die Tests begleiten die normalen Läufe und sind keine Voraussetzung für weitere Fehlerkorrekturen.
 
-## Aktuell
+## Verteilung
 
-- [ ] **Geplanter Check:** Verteilung aktualisiert bestehende Check-Aufgaben auf den PS5.1-Starthelfer. Aufgabenstart mit vorhandener, entfernter und defekter PS7 prüfen; bei fehlender PS7 muss PS5.1 übernehmen. Fehlgeschlagene Check-Läufe dürfen nicht doppelt starten. Startprotokoll unter Logs/ScheduledCheck-Launcher.log prüfen.
+- [ ] **Stand 5.2.0:** Einrichtung beziehungsweise Aktualisierung und abschließenden JEA-Verbindungstest bestätigen; AD und Zertifikatszugang getrennt abhaken.
+- [ ] **Modulbereitstellung:** Neuere Modul-/NuGet-Version dynamisch erkennen und bereitstellen; Discovery-Feed-Fallback ohne Warnung, Passwortbestätigung oder dauerhafte Änderung des PSGallery-Vertrauens.
+- [ ] **Server Core:** WinGet in Verteilung, Check und Install auslassen; Windows Update und vorhandenes Chocolatey weiter nutzen. Zertifikatszugang auf Hyper-V Server 2019 Core bestätigen.
+- [ ] **Ausgeschaltete Ziele:** Verteilung, Check, Download und Install überspringen nicht erreichbare Ziele zügig und mit kompakter Ausgabe.
 
-- [ ] **PowerShell-Vorabupdate:** Übergabe derselben WinGet-CLI aus der Suche an den PS5.1-Worker und Paketzuordnung ohne feste Installerfilter am Ziel bestätigen. Bei Installer-Technikkonflikt die Fortsetzung mit vorhandener PowerShell und den manuellen Prüfhinweis im Bericht prüfen.
+## Check, Download und Install
 
-- [ ] **Server Core:** Überspringen von WinGet in Check, Install und Verteilung bestätigen. Chocolatey und Windows Update separat prüfen. Auf Nicht-AD-Hyper-V Server 2019 Core die Endpunkt-Neueinrichtung und Chocolatey-Abfrage per Clientzertifikat bestätigen.
+- [ ] **Parallelbetrieb:** ParallelTargets=3 führt vollständige Windows-Zielabläufe gleichzeitig aus; Fehler eines Workers stoppen andere nicht. Zähler, Teilprotokolle und HTML stimmen; nur ein Gesamtbericht und eine Mail. Verwaltungsserver zuletzt; ParallelTargets=1 bleibt sequenziell.
+- [ ] **Neustartplanung:** Gemeinsame VM-Reservierungen halten Mindestabstand, eingestellten Neustartmodus und Wartungsfenster ein; VM-Nachinstallationen erhalten getrennte Starttermine. Physische Neustarts bleiben hinter dem VM-Block, Verwaltungsserver hinter dem Gesamtbericht.
+- [ ] **Geplanter Check:** Bestehende Aufgabe wird auf den PS5.1-Starthelfer aktualisiert. Fehlende/defekte PS7 fällt auf PS5.1 zurück; ein fehlgeschlagener Check startet nicht doppelt. Startprotokoll: Logs/ScheduledCheck-Launcher.log.
+- [ ] **PowerShell-Vorabupdate:** Dieselbe WinGet-CLI wie bei der Suche verwenden. Bei Installer-Technikkonflikt mit vorhandener PowerShell fortsetzen und manuelle Nacharbeit im Bericht nennen.
+- [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
+- [ ] **Paketergebnisse und Ausgabe:** Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur. Erfolgreicher Rückfall erzeugt keine zusätzliche Fehlermeldung in der Konsole; echte Fehler bleiben sichtbar.
 
-- [ ] **1. WinGet-Abschlussabfrage und Quellenreset:** Gemeinsamer Check-/Install-Abfragehelfer verwendet upgrade pro benannter App-Quelle; Prosa zählt nicht als Paket. Leere Ergebnisse nach fehlgeschlagener Quellenpflege dürfen nicht als erfolgreich gelten. Startverweigerung und nicht verfügbare AppX-Abfrage fallen auf die signaturgeprüfte portable CLI zurück. Archivdownloads erhalten ein größeres Budget mit Fortschritts-, Größen- und Stillstandsüberwachung; Quellenreset maximal 180 Sekunden. Erstlauf nach Clientbereitstellung, Quellenaktualisierung im Suchkonto und frischer Abschlussabfrage prüfen. Nachlauf innerhalb von 24 Stunden und Monatswartung nach 30 Tagen bestätigen. Vorhandene CLI vor Reparatur starten; portable Beschaffung verwendet den dauerhaften Archivcache und überwachte Downloads innerhalb des Reparaturbudgets. Fehlgeschlagene Beschaffung beendet die WinGet-Prüfung ohne erneuten Download beim Reset.
-- [ ] **2. Native AppX-Reparatur:** Provisionierung und Registrierung im echten Benutzerprofil bestätigen; ohne angemeldeten Benutzer als ausstehend melden. Portable WinGet-Nutzung ist bereits bestätigt.
-- [ ] **3. Wartungsworker und Offlinefallback:** Dynamischen Release-Web-Fallback für CLI und signaturgeprüfte Abhängigkeiten bei API-Limit bestätigen. Fester Raw-GitHub-Fallback bei Contents-API-Rate-Limit, automatische Workeraktualisierung ohne Verteilung und Rückgriff auf geprüften Cache bei Downloadfehlern auf echten Zielen bestätigen. Keine beschädigten Dateien ausführen.
-- [ ] **4. Konsolenbereinigung:** Bei verwertbaren WinGet-Treffern Teilfehler nur im Log/Bericht ausweisen, nicht als zusätzliche Konsolen-Fehlermeldung. Ausgabe auf einem echten Lauf bestätigen; echte Fehler ohne Treffer weiter anzeigen.
+## WinGet-Wartung und Downloadcache
 
-## Verbleibende Funktions- und Sicherheitsprüfungen
+- [ ] **Zentraler Reparaturablauf:** Fehler und fällige 30-Tage-Wartung verwenden denselben Ablauf. 24-Stunden-Schutz, Reset bei leeren Ergebnissen, frische Abschlussverbindung und höchstens 180 Sekunden Quellenreset bestätigen. Fehlgeschlagene Quellenpflege darf nicht als erfolgreiches leeres Ergebnis gelten; fehlgeschlagene Beschaffung startet keinen zweiten Download beim Reset.
+- [ ] **AppX-Reparatur:** Registrierung und Provisionierung im echten Benutzerprofil bestätigen; ohne erforderlichen angemeldeten Benutzer als ausstehend melden.
+- [ ] **JEA-Cacheempfang:** Check/Install liefern Archive zentral nach; vorhandene Dateien werden anhand Größe/SHA256 wiederverwendet. Offizielle Digestprüfung, Blockgrenzen und Ablehnung manipulierter Daten bestätigen; ohne überprüfbare Metadaten keine Übernahme. Ziel-Download bleibt der geprüfte Rückfallweg.
+- [ ] **Worker und Offlinefallback:** Wartungsworker aktualisiert sich ohne Verteilung. API-Sperren verwenden Release-Web-/Raw-Fallback beziehungsweise geprüften Cache; keine beschädigten oder unsignierten ausführbaren Dateien starten. Downloadfortschritt, Größenlimit und Stillstandsabbruch bestätigen.
 
-- [ ] **5. JEA-Grenzen:** Installieren/Deinstallieren und allgemeine Prozess-, Dienst-, Registry-, WMI- und Importbefehle ablehnen; nur vorgesehene Update-/Wartungsfunktionen zulassen. SYSTEM-Check-Rolle und Verlauf prüfen. Erfolgreiche Paketupdates sind bestätigt.
-- [ ] **6. WinRM-Baseline bewahren:** Bestehende Listener, Zertifikatszuordnungen, Firewallregeln und Remote-UAC-Wert unverändert lassen. Neue HTTPS-Regeln nur auf Verwaltungsserver-Adressen begrenzen; mehrere Adressen testen.
-- [ ] **7. Frische Zertifikatseinrichtung:** Nicht-AD-Bootstrap, Servernamenprüfung, neuer Clientzertifikatszugang und Ausschluss privater Schlüssel aus dem Übertragungspaket bestätigen.
-- [ ] **8. DPAPI und Settings-Rechte:** Geschützte Maildaten sowie dateibezogene ACLs bei Lesen, Bearbeiten, Synchronisieren und SYSTEM-Lauf prüfen; übrigen Skriptordner unverändert lassen.
-- [ ] **9. NuGet-/Modulversionen:** Dynamischen Onlineabgleich und Bereitstellung einer tatsächlich neueren Version prüfen. Der neue dynamische Fallback auf den offiziellen Discovery-Feed soll die bisherige Bootstrap-Warnung beheben.
-- [ ] **10. PSGallery-Vertrauen:** Modulbereitstellung ohne Änderung der dauerhaften Repository-Vertrauensstellung und ohne unbeabsichtigte Rückfragen bestätigen.
-- [ ] **11. Tatsächlicher Paketversionswechsel:** Nach Installationsversuchen die Version erneut abfragen; Installer-Erfolg allein genügt nicht als Nachweis. Einzelne Paketinstallerfehler als manuelle Nacharbeit ausgeben und am Ziel prüfen, dass sie keine Clientreparatur auslösen.
-- [ ] **12. Updater-Bereinigung:** Temporäre Updater-Dateien nach Update mit begrenzten Wiederholungen entfernen und verbleibende Pfade protokollieren.
-- [ ] **13. Cachebereinigung:** Aktivierten Windows-Update-Cache-Reset praktisch prüfen.
-- [ ] **14. Nachinstallations-Logrotation:** Nach mehreren Rotationen höchstens zwei datierte .bak-Dateien je Log bestätigen. Aufgabenanlage und Mail sind bestätigt.
-- [ ] **15. Ausgeschaltete Verteilungsziele:** Zügiges Überspringen durch dieselbe Portprüfung wie bei Check/Download/Install bestätigen; kompakte Ausgabe.
+## Sicherheit und Fehlerdiagnosen
 
-## Neue Funktionen – gemeinsam praktisch bestätigen
+- [ ] **JEA-Grenzen:** Paket-Install/Uninstall und freie Prozess-, Dienst-, Registry-, WMI- und Importbefehle ablehnen. Nur feste Update-/Wartungsfunktionen zulassen; SYSTEM-Abfragerolle und Verlauf prüfen. Cacheempfang erlaubt keine freien Zielpfade oder Skriptausführung.
+- [ ] **WinRM-Baseline:** Vorhandene Listener, Zertifikatszuordnungen, Firewallregeln und Remote-UAC unverändert lassen. Nur neue HTTPS-Regeln auf Verwaltungsserver-Adressen beschränken; mehrere Adressen berücksichtigen.
+- [ ] **Frische Zertifikatseinrichtung:** Nicht-AD-Bootstrap, Servernamenprüfung und neuer Zertifikatszugang funktionieren; nur öffentlicher Schlüssel wird übertragen.
+- [ ] **Settings und Zertifikatsdiagnosen:** DPAPI, dateibezogene Settings-Rechte und SYSTEM-Lauf prüfen. Fehlender Thumbprint/Privatschlüssel sowie zeitlich ungültige Zertifikate werden konkret gemeldet; übriger Skriptordner bleibt unverändert.
+- [ ] **SSH-Diagnosen:** Ungültiger Schlüssel, geänderter Hostschlüssel, abgelehnte Anmeldung, Nichterreichbarkeit und fehlende sudo-Rechte werden in Log/Bericht unterschieden, ohne Prüfungen zu lockern.
 
-- [ ] **SSH-Diagnosen:** Neue Unterscheidung von Schlüssel-/Hostschlüsselfehler, Anmeldung, Nichterreichbarkeit und sudo-Rechten in einem Bericht bestätigen.
-- [ ] **Zertifikatsdiagnosen:** Fehlender Thumbprint, fehlender privater Schlüssel und zeitlich ungültiges Zertifikat müssen vor einem Nicht-AD-Aufruf konkret gemeldet werden.
-- [ ] **WU-Bereitschaft:** Zeitmarkierte, begrenzte Suchprüfung statt fester Wartezeit auf einem Ziel bestätigen; Timeout darf den anschließenden regulären Check nicht verhindern.
-- [ ] **Parallelbetrieb:** Check, Download und Install mit ParallelTargets=3 praktisch bestätigen: vollständige Zielabläufe, gemeinsame Zähler/Berichte, Fehlerisolation und Verwaltungsserver zuletzt. VM-Termine mit gesperrter gemeinsamer Reservierung, Abstand und Wartungsfenster prüfen; physische Neustarts bleiben nachgelagert. PS5-Prozessparallelität, Fehlerisolation und Slotplanung lokal bestätigt.
+## Bereinigung und Skriptaktualisierung
+
+- [ ] **Linux-/HA-Protokolle:** Check, Download und Verteilung erzeugen keine separaten Linux-/HA-Logdateien; Details bleiben im jeweiligen gemeinsamen Laufprotokoll. Eigentliche Installation behält ihre eigenen Protokolle.
+
+- [ ] **Updater bei API-Sperre:** Archiv derselben festen Commit-ID und Git-Blob-Prüfung praktisch bestätigen; keine Abschaltung der Integritätsprüfung.
+- [ ] **Temporäre Dateien und Logrotation:** Updater-Reste begrenzt erneut entfernen und verbleibende Pfade protokollieren. Nachinstallation behält höchstens zwei datierte Log-Sicherungen.
 
 ## Arbeitsregeln
 
-Baseline nur ergänzen, bestehende Einstellungen nicht verschärfen oder entfernen. Fachmodule importieren einander nicht; Common bindet sie ein. Updater bleibt eigenständig. Neue Funktionen passend modularisieren. Skriptversion und erforderliche Bereitstellungsversion getrennt pflegen; Neuverteilung nur bei technisch nötiger Zieländerung.
-
-- [ ] **20. Updater bei API-Sperre:** GitHub-Dateiliste bei API-Fehler aus dem Archiv derselben festen Commit-ID ermitteln; Git-Blob-Prüfsummen weiter prüfen. Simulierter HTTP403 und echter Codeload-Download mit Git-Objektvergleich unter PS5 bestätigt. Automatische Aktualisierung auf betroffenem Ziel nach einmaligem Nachladen des Updaters bestätigen.
-
-- [ ] **Zentraler Downloadcache:** Nachlieferung über den eingeschränkten JEA-Empfänger 5.2.0 in Check/Install sowie Cachetreffer bestätigen. Erstbeschaffung und SHA256-geprüfte Übertragung bei Verteilung sind praktisch bestätigt. Offizielle Digestprüfung, Größen-/Pfadgrenzen und manipulierte Blöcke sind lokal geprüft; fehlende Metadaten müssen die Übernahme ablehnen.
+Baseline nur ergänzen. Fachmodule importieren einander nicht; Common bindet sie ein. Updater bleibt eigenständig. Skriptversion und erforderliche Verteilungsversion getrennt pflegen; Neuverteilung nur bei technisch nötiger Zieländerung. Checklistenänderungen ausschließlich zusammen mit Skriptänderungen committen und pushen.

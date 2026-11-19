@@ -439,7 +439,8 @@ if ($LinuxConfigured -and (Test-Path -LiteralPath $linuxCheckScript)) {
     Write-ScriptLog 'Linux: Kein separater Paketdownload verfügbar – prüfe Einrichtung und verfügbare Updates.'
     # SSH-Eingabeaufforderungen müssen sichtbar bleiben; das Kinderskript ist
     # im Quiet-Modus, damit nur echte SSH-Prompts die Konsole erreichen.
-    & $linuxCheckScript -CheckOnly -Quiet
+    $sharedAuxLog = if ($UpdateSettings.WriteLogFile) { $LogFileName } else { '' }
+    & $linuxCheckScript -CheckOnly -Quiet -NoSeparateLog -SharedLogPath $sharedAuxLog
     if (Test-Path -LiteralPath $linuxStatsPath) {
       $linuxStats = Get-Content -LiteralPath $linuxStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $LinuxAvailableUpdateCount = [int]$linuxStats.UpdatesInstalled
@@ -473,7 +474,8 @@ if ($HAConfigured -and (Test-Path -LiteralPath $haCheckScript)) {
   $HACheckAttempted = $true
   try {
     Write-ScriptLog 'Home Assistant: Kein separater Paketdownload verfügbar – prüfe Einrichtung und verfügbare Updates.'
-    & $haCheckScript -CheckOnly -Quiet
+    $sharedAuxLog = if ($UpdateSettings.WriteLogFile) { $LogFileName } else { '' }
+    & $haCheckScript -CheckOnly -Quiet -NoSeparateLog -SharedLogPath $sharedAuxLog
     if (Test-Path -LiteralPath $haStatsPath) {
       $haStats = Get-Content -LiteralPath $haStatsPath -Raw -Encoding UTF8 | ConvertFrom-Json
       $HAAvailableUpdateCount = [int]$haStats.AvailableUpdates

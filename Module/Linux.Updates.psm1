@@ -7,6 +7,8 @@ param(
     [switch]$CheckOnly,
     [switch]$ConnectionOnly,
     [switch]$Quiet,
+    [switch]$NoSeparateLog,
+    [string]$SharedLogPath,
     [switch]$DeferPhysicalReboots,
     [string]$KeyPath,
     [string]$SSHPath,
@@ -48,7 +50,8 @@ $script:LockWaitIntervals = if ([int]$linuxSettings.LockWaitMinutes -gt 0) { [in
 $script:LogDirectory = Join-Path $repositoryRoot 'Logs'
 $script:WriteExecutionLog = $null -ne $settings.UpdateSettings -and
     $settings.UpdateSettings.PSObject.Properties['WriteLogFile'] -and
-    [bool]$settings.UpdateSettings.WriteLogFile
+    [bool]$settings.UpdateSettings.WriteLogFile -and -not $NoSeparateLog
+$script:SharedLogPath = if ($NoSeparateLog) { $SharedLogPath } else { '' }
 $script:VMRebootLatestAt = $null
 $script:VMRebootIndex = $VMRebootIndexStart
 $script:PendingPhysicalReboots = [System.Collections.Generic.List[object]]::new()
@@ -58,6 +61,7 @@ function Write-LinuxLog {
     $color = @{ Info='White'; Success='Green'; Warning='Yellow'; Error='Red' }[$Level]
     # Detailmeldungen bleiben im Protokoll; die Konsole zeigt nur wichtige Statuszeilen.
     if ((-not $script:QuietMode -or $ConsoleWhenQuiet) -and $Message -notmatch '^\[DIAG\]') { Write-WindowsUpdateConsoleLine -Message $Message -ForegroundColor $color }
+    Write-WindowsUpdateSharedLog -Path $script:SharedLogPath -Component 'Linux' -Message $Message
     if ($script:WriteExecutionLog) {
         [IO.File]::AppendAllText($LogFile, $Message + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
     }
@@ -212,7 +216,7 @@ function Test-LinuxKeyLogin {
     $exitCode = $LASTEXITCODE
     $success = ($exitCode -eq 0 -and (($result -join "`n") -match '(?m)^OK\s*$'))
     if (-not $success) { $script:LastSshFailure = Get-WindowsUpdateSshFailure -Text ($result -join [Environment]::NewLine) }
-    if (-not $success -and $LogFile) {
+    if (-not $success -and ($LogFile -or $script:SharedLogPath)) {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-SSH-Schlüsselverbindung prüfen' -Target $RemoteHost -DiagnosticText ($result -join [Environment]::NewLine) -Context @("User=$RemoteUser", "SSHPath=$script:SSHPath", "ExitCode=$exitCode")
     }
     return $success
@@ -264,7 +268,7 @@ fi
     $exitCode = $LASTEXITCODE
     $success = ($exitCode -eq 0)
     if (-not $success) { $script:LastSshFailure = Get-WindowsUpdateSshFailure -Text ($result -join [Environment]::NewLine) }
-    if (-not $success -and $LogFile) {
+    if (-not $success -and ($LogFile -or $script:SharedLogPath)) {
         Write-WindowsUpdateDiagnostic -WriteLog { param($message) Write-LinuxLog -Message $message -LogFile $LogFile } -Operation 'Linux-NOPASSWD-Updateeinrichtung prüfen' -Target $RemoteHost -DiagnosticText ($result -join [Environment]::NewLine) -Context @("User=$RemoteUser", "SSHPath=$script:SSHPath", "ExpectedVersion=$script:LinuxSudoSetupVersion", "ExitCode=$exitCode")
     }
     return $success

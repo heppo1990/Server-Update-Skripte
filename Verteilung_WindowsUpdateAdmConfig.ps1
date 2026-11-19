@@ -414,7 +414,9 @@ if ([string]::IsNullOrWhiteSpace($TargetComputer) -and -not $CleanupLegacyTempOn
         try {
             # Ausgabe nicht abfangen: SSH-Anmeldeprompts kommen über stderr.
             # -Quiet hält normale Statusmeldungen aus der Konsole fern.
-            & $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -ConnectionOnly -Quiet
+            $sharedLogArguments = @()
+            if ($script:DeployLogEnabled -and $script:DeployLogFile) { $sharedLogArguments = @('-SharedLogPath', $script:DeployLogFile) }
+            & $hostPowerShell -NoProfile -ExecutionPolicy Bypass -File $connectionScript -ConnectionOnly -Quiet -NoSeparateLog @sharedLogArguments
             $connectionExitCode = $LASTEXITCODE
             if (-not (Test-Path -LiteralPath $statsPath -PathType Leaf)) {
                 throw "Das Einrichtungsskript lieferte keine Statusdatei (Exit-Code $connectionExitCode)."
