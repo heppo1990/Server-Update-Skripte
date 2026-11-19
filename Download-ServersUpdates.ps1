@@ -129,6 +129,11 @@ $LinuxConfigured = $null -ne $linuxSettings -and $linuxSettings.PSObject.Propert
 $HAConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host'] -and -not [string]::IsNullOrWhiteSpace([string]$haSettings.Host)
 $LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Where-Object { $_ }).Count } else { 0 }
 $UpdateSettings = $Settings.UpdateSettings
+if (-not $ParallelTarget) {
+  $configuredParallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
+  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Windows-Ziele nacheinander.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig." }
+  Write-Host $parallelNotice -ForegroundColor Gray
+}
 $MailSettings = $Settings.MailSettings
 $TargetComputers = $UpdateSettings.TargetComputers
 if ([string]::IsNullOrWhiteSpace($TargetComputers)) {
@@ -188,8 +193,7 @@ if ($ServerADList -ne $null) {
   $probeLimit = 4
   if ($UpdateSettings.PSObject.Properties['ParallelProbeLimit']) { $probeLimit = [Math]::Max(1,[Math]::Min(8,[int]$UpdateSettings.ParallelProbeLimit)) }
   $winRmProbeResults = Get-WindowsUpdateWinRmProbeBatch -ComputerName @($ServerADList | ForEach-Object { $_.Name }) -ThrottleLimit $probeLimit
-  $parallelLimit = 3
-  if ($UpdateSettings.PSObject.Properties['ParallelTargets']) { $parallelLimit = [Math]::Max(1,[Math]::Min(16,[int]$UpdateSettings.ParallelTargets)) }
+  $parallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
   if ($ParallelTarget) {
     $ServerADList = @($ServerADList | Where-Object { $_.Name -ieq $ParallelTarget })
     if ($ServerADList.Count -ne 1) { throw 'Parallelziel ist nicht eindeutig in der konfigurierten Zielliste vorhanden.' }

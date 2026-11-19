@@ -1,4 +1,12 @@
-﻿# Vollständige Windows-Zielabläufe in getrennten PS5-Prozessen. Nur der
+﻿function Get-WindowsUpdateParallelTargetLimit {
+    param([Parameter(Mandatory)][object]$Configuration)
+    if ($Configuration.PSObject.Properties['ParallelTargets']) {
+        return [Math]::Max(1,[Math]::Min(16,[int]$Configuration.ParallelTargets))
+    }
+    return 3
+}
+
+# Vollständige Windows-Zielabläufe in getrennten PS5-Prozessen. Nur der
 # Elternlauf schreibt Gesamtbericht/Mail und plant physische Neustarts.
 function Invoke-WindowsUpdateTargetBatch {
     [CmdletBinding()]
@@ -69,7 +77,7 @@ try {
                     # Prozesshandle vor dem Ende öffnen, damit ExitCode unter PS5 erhalten bleibt.
                     $null = $process.Handle
                     $pending.Add([pscustomobject]@{Target=[string]$target.Name;Process=$process;Result=$resultPath;LogFile=$configuration.Parameters.ParallelLogPath;Stdout=$stdout;Stderr=$stderr;Started=[datetime]::UtcNow})
-                    if ($WriteLog) { & $WriteLog "[$($target.Name)] Zielablauf gestartet (maximal $ThrottleLimit gleichzeitig)." }
+                    if ($WriteLog) { & $WriteLog "[$($target.Name)] Zielablauf gestartet (maximal $ThrottleLimit gleichzeitig)." $true }
                 }
                 foreach ($item in @($pending.ToArray())) {
                     if (-not $item.Process.HasExited) {
@@ -99,7 +107,7 @@ try {
                     $answer = Import-Clixml -LiteralPath $item.Result
                     if ($answer.Target -ne $item.Target) { throw 'Worker-Ergebnis gehört zu einem anderen Ziel.' }
                     $answers.Add($answer)
-                    if ($WriteLog) { & $WriteLog "[$($item.Target)] Zielablauf abgeschlossen." }
+                    if ($WriteLog) { & $WriteLog "[$($item.Target)] Zielablauf abgeschlossen." $true }
                     $item.Process.Dispose(); [void]$pending.Remove($item)
                 }
                 if ($pending.Count) { Start-Sleep -Milliseconds 250 }

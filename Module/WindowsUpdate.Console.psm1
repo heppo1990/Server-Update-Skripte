@@ -171,7 +171,7 @@ function Test-WindowsUpdateConsoleMessage {
     )
 
     if ($IsDebug) { return $true }
-    if ($Message -match '^\[[^\]]+\] Zielablauf (gestartet|abgeschlossen)') { return $true }
+    if ($Message -match '^\[[^\]]+\] Zielablauf (gestartet|abgeschlossen)') { return $false }
     if ([string]::IsNullOrWhiteSpace($Message)) {
         return $true
     }
