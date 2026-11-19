@@ -630,7 +630,7 @@ $LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Whe
 $UpdateSettings = $Settings.UpdateSettings
 if (-not $ParallelTarget) {
   $configuredParallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
-  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Ziele nacheinander; zuerst Windows-VMs, dann physische Windows-Systeme, danach Linux und Home Assistant.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig; zuerst Windows-VMs, dann physische Windows-Systeme, danach Linux und Home Assistant." }
+  $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Windows-Ziele nacheinander.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig" }
   Write-Host $parallelNotice -ForegroundColor Gray
 }
 $MailSettings = $Settings.MailSettings
