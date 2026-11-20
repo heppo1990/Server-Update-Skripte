@@ -11,8 +11,8 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Check, Download und Install
 
-- [ ] **Parallelbetrieb:** Noch prüfen: Home Assistant nach allen Windows- und Linux-Zielen; Reihenfolge auch bei ParallelTargets=1.
-- [ ] **Geplanter Check:** SYSTEM verarbeitet entfernte Ziele ohne vorgeschaltete Bauartabfrage über die eingeschränkte JEA-Abfragerolle. Ein fehlgeschlagener Check startet nicht doppelt.
+- [ ] **Parallelbetrieb:** Reihenfolge Windows-VMs, physische Windows-Systeme, Linux und Home Assistant auch bei ParallelTargets=1 bestätigen.
+- [ ] **Geplanter Check:** Ein fehlgeschlagener Check startet nicht doppelt.
 - [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
 - [ ] **Paketergebnisse:** Tatsächlichen Versionswechsel nach Installation bestätigen. Einzelne Installerfehler verlangen manuelle Nacharbeit statt Clientreparatur.
 
@@ -25,7 +25,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Sicherheit und Fehlerdiagnosen
 
-- [ ] **Nachinstallationsmail:** Abschluss- und Testmail aus der SYSTEM-Aufgabe mit STARTTLS/TLS 1.2 praktisch bestätigen. Bereits angelegte Nachinstallationsaufgaben vor dem TLS-Fix enthalten noch den alten Mailversand.
+- [ ] **Nachinstallationsmail:** Separaten Testmail-Pfad aus der SYSTEM-Aufgabe praktisch bestätigen; Abschlussmail erfolgreich bestätigt. Bereits angelegte Nachinstallationsaufgaben vor dem TLS-Fix enthalten noch den alten Mailversand.
 
 - [ ] **JEA-Grenzen:** Paket-Install/Uninstall und freie Prozess-, Dienst-, Registry-, WMI- und Importbefehle ablehnen. Nur feste Update-/Wartungsfunktionen zulassen; SYSTEM-Abfragerolle und Verlauf prüfen. Cacheempfang erlaubt keine freien Zielpfade oder Skriptausführung.
 - [ ] **WinRM-Baseline:** Vorhandene Listener, Zertifikatszuordnungen, Firewallregeln und Remote-UAC unverändert lassen. Nur neue HTTPS-Regeln auf Verwaltungsserver-Adressen beschränken; mehrere Adressen berücksichtigen.

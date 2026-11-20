@@ -1157,6 +1157,16 @@ function Register-DeferredMailTestTask {
   $taskName = 'WindowsUpdateAdm-TestDeferredMail'
   $testMailPassword = [string]$MailSettings.AuthPass
   $testMailSettings = $MailSettings | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+  $testSender = if ($testMailSettings.PSObject.Properties['Sender']) { [string]$testMailSettings.Sender } else { '' }
+  if ([string]::IsNullOrWhiteSpace($testSender)) {
+    $companyName = if ($testMailSettings.PSObject.Properties['CompanyName']) { [string]$testMailSettings.CompanyName } else { '' }
+    if ([string]::IsNullOrWhiteSpace($companyName)) { throw 'Testmail kann nicht eingerichtet werden: Absender und Firmenname fehlen in den Mail-Einstellungen.' }
+    $safeName = ConvertTo-WindowsUpdateMailSafeString -Text $companyName
+    $testSender = "Updates@$safeName.de"
+    Add-Member -InputObject $testMailSettings -NotePropertyName Sender -NotePropertyValue $testSender -Force
+  }
+  # Gleiche Absenderbildung wie bei der Abschlussmail, vor dem Aufgabenstart prüfen.
+  $null = [System.Net.Mail.MailAddress]::new($testSender)
   Add-Member -InputObject $testMailSettings -NotePropertyName AuthPass -NotePropertyValue '' -Force
   $mailJson = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($testMailSettings | ConvertTo-Json -Depth 5 -Compress)))
   $smtpHelper = 'function Send-WindowsUpdateSmtpMessageTls12 {' + ${function:Send-WindowsUpdateSmtpMessageTls12}.ToString() + '}'
