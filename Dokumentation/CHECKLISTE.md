@@ -25,7 +25,6 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## Sicherheit und Fehlerdiagnosen
 
-- [ ] **Nachinstallationsmail:** Separaten Testmail-Pfad aus der SYSTEM-Aufgabe praktisch bestätigen; Abschlussmail erfolgreich bestätigt. Bereits angelegte Nachinstallationsaufgaben vor dem TLS-Fix enthalten noch den alten Mailversand.
 
 - [ ] **JEA-Grenzen:** Paket-Install/Uninstall und freie Prozess-, Dienst-, Registry-, WMI- und Importbefehle ablehnen. Nur feste Update-/Wartungsfunktionen zulassen; SYSTEM-Abfragerolle und Verlauf prüfen. Cacheempfang erlaubt keine freien Zielpfade oder Skriptausführung.
 - [ ] **WinRM-Baseline:** Vorhandene Listener, Zertifikatszuordnungen, Firewallregeln und Remote-UAC unverändert lassen. Nur neue HTTPS-Regeln auf Verwaltungsserver-Adressen beschränken; mehrere Adressen berücksichtigen.
