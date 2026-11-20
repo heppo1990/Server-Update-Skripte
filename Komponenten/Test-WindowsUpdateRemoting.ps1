@@ -89,15 +89,17 @@ $queries = @(
                                 Get-ChildItem -LiteralPath (Join-Path $profile $relative) -Filter '*.log' -File -ErrorAction SilentlyContinue
                             }
                         })
-                        foreach($folder in @((Join-Path $env:SystemRoot 'Temp\WinGet'),(Join-Path $env:ProgramData 'Microsoft\WinGet\DiagOutputDir'))) {
+                        foreach($folder in @((Join-Path $env:SystemRoot 'Temp\WinGet'),(Join-Path $env:SystemRoot 'Temp\WinGet\defaultState'),(Join-Path $env:ProgramData 'Microsoft\WinGet\DiagOutputDir'))) {
                             $files+=@(Get-ChildItem -LiteralPath $folder -Filter '*.log' -File -ErrorAction SilentlyContinue)
                         }
                         # COM-/JEA-Logs können älter als interaktive CLI-Logs sein.
-                        $files=@($files | Where-Object Name -like 'WinGet*.log' | Sort-Object FullName -Unique)
+                        # Auch die vom Installer selbst geschriebenen Logs erhalten:
+                        # WinGet fasst deren unterschiedliche Fehler nur allgemein zusammen.
+                        $files=@($files | Sort-Object FullName -Unique)
                         $result.WinGetLogFilesFound=$files.Count
                         $result.WinGetLogs=@($files | Sort-Object LastWriteTime -Descending | Select-Object -First 24 | ForEach-Object {
                             $file=$_
-                            $lines=@(Get-Content -LiteralPath $file.FullName -Tail 600 | Select-String -Pattern 'ShellExecute|0x8a150006|0x8007|error|fail|Starting:|Terminating context|IsCOMCall|Caller:|WinGet, version' -Context 2,2 | ForEach-Object { $_.ToString() })
+                            $lines=@(Get-Content -LiteralPath $file.FullName -Tail 600 | Select-String -Pattern 'ShellExecute|0x8a150006|0x8007|\berror\b|\bfail(?:ed|ure)?\b|owner|security|Return value 3|Apply complete|Starting:|Terminating context|IsCOMCall|Caller:|WinGet, version' -Context 2,2 | ForEach-Object { $_.ToString() })
                             [pscustomobject]@{Path=$file.FullName;LastWriteTime=$file.LastWriteTime;Evidence=$lines}
                         })
                     }
