@@ -1765,11 +1765,15 @@ foreach ($linuxHost in @($LinuxUpdateDetails | Where-Object { $_.Status -eq 'Upd
 # VM-Neustart wird vorsorglich bis zu einer Stunde Ausfallzeit eingeplant.
 $physicalRebootNotBefore = if ($null -ne $script:VMRebootLatestAt) { $script:VMRebootLatestAt.AddHours(1) } else { [datetime]::MinValue }
 
+# Gemeinsame Reservierung für physische Systeme: eine Stunde Abstand, auch plattformübergreifend.
+$nextPhysicalRebootNotBefore = $physicalRebootNotBefore
+
 # Linux- und Home-Assistant-Hosts verwenden dieselbe Physisch-nach-VM-Regel.
 # Ihre Neustarts werden von den Einzelskripten gemeldet und erst jetzt gemeinsam eingeplant.
 foreach ($pendingLinuxReboot in $script:PendingLinuxPhysicalReboots) {
   try {
-    $plannedAt = Get-NextRebootTimeInWindow -StartTime ([string]$pendingLinuxReboot.RebootTime) -LatestTime ([string]$pendingLinuxReboot.LatestRebootTime) -NotBefore $physicalRebootNotBefore
+    $plannedAt = Get-NextRebootTimeInWindow -StartTime ([string]$pendingLinuxReboot.RebootTime) -LatestTime ([string]$pendingLinuxReboot.LatestRebootTime) -NotBefore $nextPhysicalRebootNotBefore
+    $nextPhysicalRebootNotBefore = $plannedAt.AddHours(1)
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($plannedAt - (Get-Date)).TotalMinutes))
     $sshPath = [string]$pendingLinuxReboot.SSHPath
     $sshArgs = @(Get-WindowsUpdateSshArguments -KeyPath ([string]$pendingLinuxReboot.KeyPath) -BatchMode -AcceptNewHostKey)
@@ -1785,7 +1789,8 @@ foreach ($pendingLinuxReboot in $script:PendingLinuxPhysicalReboots) {
 }
 foreach ($pendingHAReboot in $script:PendingHAPhysicalReboots) {
   try {
-    $plannedAt = Get-NextRebootTimeInWindow -StartTime ([string]$pendingHAReboot.RebootTime) -LatestTime ([string]$pendingHAReboot.LatestRebootTime) -NotBefore $physicalRebootNotBefore
+    $plannedAt = Get-NextRebootTimeInWindow -StartTime ([string]$pendingHAReboot.RebootTime) -LatestTime ([string]$pendingHAReboot.LatestRebootTime) -NotBefore $nextPhysicalRebootNotBefore
+    $nextPhysicalRebootNotBefore = $plannedAt.AddHours(1)
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($plannedAt - (Get-Date)).TotalMinutes))
     $sshPath = [string]$pendingHAReboot.SSHPath
     $sshArgs = @(Get-WindowsUpdateSshArguments -KeyPath ([string]$pendingHAReboot.KeyPath) -Port ([int]$pendingHAReboot.Port) -BatchMode -AcceptNewHostKey)
@@ -1809,7 +1814,9 @@ foreach ($pendingReboot in $script:PendingPhysicalReboots) {
       Write-ScriptLog "Physischer Neustart auf $($pendingReboot.Servername) wird wegen des VM-Neustartblocks auf das nächste Wartungsfenster verschoben (VMs bis $($script:VMRebootLatestAt.ToString('dd.MM.yyyy HH:mm')); eine Stunde Puffer)."
     }
   }
-  Request-RebootTask -Servername $pendingReboot.Servername -RebootTime $pendingReboot.RebootTime -LatestRebootTime $pendingReboot.LatestRebootTime -NotBefore $physicalRebootNotBefore -AuthInfo $pendingReboot.AuthInfo
+  $plannedPhysicalAt = Get-NextRebootTimeInWindow -StartTime $pendingReboot.RebootTime -LatestTime $pendingReboot.LatestRebootTime -NotBefore $nextPhysicalRebootNotBefore
+  $nextPhysicalRebootNotBefore = $plannedPhysicalAt.AddHours(1)
+  Request-RebootTask -Servername $pendingReboot.Servername -RebootTime $pendingReboot.RebootTime -LatestRebootTime $pendingReboot.LatestRebootTime -NotBefore $plannedPhysicalAt -AuthInfo $pendingReboot.AuthInfo
 }
 
 # Anwendungsupdates in Report einfügen
