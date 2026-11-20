@@ -2,12 +2,14 @@
 param(
     [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$ComputerName,
     [switch]$UseClientCertificate,
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$')][string]$ProbePackageId
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$')][string]$ProbePackageId,
+    [switch]$ProbeAsSystem
 )
 
 # Standardmäßig nur lesend. ProbePackageId ruft ausschließlich den bestehenden
 # festen JEA-Updatewrapper auf; keine Neuinstallation oder Konfigurationsänderung.
 $ErrorActionPreference = 'Stop'
+if ($ProbeAsSystem -and -not $ProbePackageId) { throw 'ProbeAsSystem benötigt ProbePackageId.' }
 $root = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $root 'Module\WindowsUpdate.Common.psm1') -ErrorAction Stop
 $auth = $null
@@ -20,15 +22,71 @@ $report = [ordered]@{ ComputerName=$ComputerName; Started=(Get-Date).ToString('o
 $probeSession=$null
 if ($ProbePackageId) {
     $timer=[Diagnostics.Stopwatch]::StartNew()
-    $section=[ordered]@{Name='JEA-Paketupdate';Success=$false;Seconds=0;Data=@();Error=''}
-    Write-Host ('[{0:HH:mm:ss}] {1}: Updateversuch für {2} über JEA' -f (Get-Date),$ComputerName,$ProbePackageId)
+    $section=[ordered]@{Name=$(if($ProbeAsSystem){'SYSTEM-Paketupdate'}else{'JEA-Paketupdate'});Success=$false;Seconds=0;Data=@();Error=''}
+    Write-Host ('[{0:HH:mm:ss}] {1}: Updateversuch für {2} ({3})' -f (Get-Date),$ComputerName,$ProbePackageId,$section.Name)
     try {
+        if ($ProbeAsSystem) {
+            # Ausschließlich administrative Standardverbindung, keine neue JEA-Freigabe.
+            $section.Data=@(Invoke-WindowsUpdateRemoteCommandWithTimeout -ComputerName $ComputerName -AuthInfo $auth -ConfigurationName Microsoft.PowerShell -TimeoutSeconds 1950 -OperationName 'SYSTEM-Gegenprobe' -ArgumentList @($ProbePackageId) -ScriptBlock {
+                param([ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$')][string]$PackageId)
+                $ErrorActionPreference='Stop'
+                $taskName='WindowsUpdateAdm-Diagnostic-'+[guid]::NewGuid().ToString('N')
+                $folder=Join-Path $env:ProgramData $taskName
+                $null=New-Item -ItemType Directory -Path $folder
+                $acl=New-Object Security.AccessControl.DirectorySecurity
+                $acl.SetAccessRuleProtection($true,$false)
+                foreach($sid in @('S-1-5-18','S-1-5-32-544')) {
+                    $identity=New-Object Security.Principal.SecurityIdentifier($sid)
+                    $rule=New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
+                    $acl.AddAccessRule($rule)
+                }
+                Set-Acl -LiteralPath $folder -AclObject $acl
+                $workerPath=Join-Path $folder 'worker.ps1'
+                $resultPath=Join-Path $folder 'result.xml'
+                $worker=@'
+param([ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$')][string]$Id)
+$ErrorActionPreference='Stop'
+try {
+    Import-Module (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\JEA_Updates\JEA_Updates.psm1') -ErrorAction Stop
+    $result=@(Update-WindowsUpdateAdmWinGetPackage -Id $Id -Source winget -ErrorAction Stop)
+    foreach($item in $result) { Add-Member -InputObject $item -NotePropertyName DiagnosticIdentity -NotePropertyValue ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -Force }
+} catch { $result=@([pscustomobject]@{Status='Failed';InstallerErrorCode='';ExtendedErrorCode='';Output=$_.Exception.ToString();DiagnosticIdentity=[Security.Principal.WindowsIdentity]::GetCurrent().Name}) }
+$result | Export-Clixml -LiteralPath (Join-Path $PSScriptRoot 'result.tmp')
+Move-Item -LiteralPath (Join-Path $PSScriptRoot 'result.tmp') -Destination (Join-Path $PSScriptRoot 'result.xml')
+'@
+                [IO.File]::WriteAllText($workerPath,$worker,[Text.UTF8Encoding]::new($true))
+                $action=New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$workerPath+'" -Id "'+$PackageId+'"')
+                $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+                $taskSettings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 32)
+                $completed=$false
+                try {
+                    $null=Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $taskSettings
+                    Start-ScheduledTask -TaskName $taskName
+                    $deadline=[DateTime]::UtcNow.AddMinutes(30)
+                    while(-not (Test-Path -LiteralPath $resultPath)) {
+                        if([DateTime]::UtcNow -gt $deadline) { throw "SYSTEM-Gegenprobe läuft zu lange. Aufgabe und Diagnoseverzeichnis bleiben zur Prüfung erhalten: $taskName; $folder" }
+                        Start-Sleep -Seconds 2
+                    }
+                    $data=Import-Clixml -LiteralPath $resultPath
+                    $completed=$true
+                    $data
+                } finally {
+                    if($completed) {
+                        # Ergebnis wurde atomar abgeschlossen, danach temporäre Aufgabe bereinigen.
+                        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+                        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            })
+        } else {
         $parameters=New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName -AuthInfo $auth -ConfigurationName WindowsUpdateAdm -OperationTimeoutSeconds 2100
         $probeSession=New-PSSession @parameters
         $section.Data=@(Invoke-Command -Session $probeSession -ErrorAction Stop -ArgumentList $ProbePackageId -ScriptBlock {
             param([string]$Id)
             Update-WindowsUpdateAdmWinGetPackage -Id $Id -Source winget -ErrorAction Stop
         })
+        }
         if ($section.Data.Count -gt 0) {
             $last=$section.Data[-1]
             $section.Success=([string]$last.Status -eq 'Ok' -and [string]$last.InstallerErrorCode -in @('','0') -and [string]$last.ExtendedErrorCode -in @('','0'))
