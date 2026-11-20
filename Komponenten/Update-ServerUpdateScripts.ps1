@@ -636,16 +636,17 @@ function Remove-ServerUpdateLegacyRootFiles {
 function Remove-ServerUpdateObsoleteScripts {
     param([Parameter(Mandatory)][string]$ScriptRoot)
 
-    $obsoleteScriptPath = Join-Path $ScriptRoot 'PendingReboot.ps1'
-    if (-not (Test-Path -LiteralPath $obsoleteScriptPath -PathType Leaf)) { return }
-
-    try {
-        Remove-Item -LiteralPath $obsoleteScriptPath -Force -ErrorAction Stop
-        Write-Host 'Veraltetes Skript PendingReboot.ps1 entfernt.' -ForegroundColor DarkGray
-    }
-    catch {
-        Write-ServerUpdateUpdaterDiagnostic -Operation 'Veraltetes Skript entfernen' -ErrorRecord $_ -Context 'PendingReboot.ps1'
-        Write-Warning "Veraltetes Skript PendingReboot.ps1 konnte nicht entfernt werden: $(Get-ServerUpdateShortError -Exception $_.Exception)"
+    foreach($relativePath in @('PendingReboot.ps1','Komponenten\Test-WindowsUpdateRemoting.ps1')) {
+        $obsoleteScriptPath = Join-Path $ScriptRoot $relativePath
+        if (-not (Test-Path -LiteralPath $obsoleteScriptPath -PathType Leaf)) { continue }
+        try {
+            Remove-Item -LiteralPath $obsoleteScriptPath -Force -ErrorAction Stop
+            Write-Host "Veraltetes Skript $relativePath entfernt." -ForegroundColor DarkGray
+        }
+        catch {
+            Write-ServerUpdateUpdaterDiagnostic -Operation 'Veraltetes Skript entfernen' -ErrorRecord $_ -Context $relativePath
+            Write-Warning "Veraltetes Skript $relativePath konnte nicht entfernt werden: $(Get-ServerUpdateShortError -Exception $_.Exception)"
+        }
     }
 }
 
