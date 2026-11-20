@@ -268,7 +268,7 @@ function Register-HAReboot {
     $physicalTime = [string]$settings.UpdateSettings.PhysicalRebootTime
     $vmStartTime = [string]$settings.UpdateSettings.VMRebootStartTime
     $vmImmediately = [bool]$settings.UpdateSettings.VMRebootImmediately
-    $interval = [Math]::Max(0, [int]$settings.UpdateSettings.VMRebootIntervalMinutes)
+    $interval = [Math]::Max(1, [int]$settings.UpdateSettings.RebootIntervalMinutes)
     $vmOffset = $VMRebootIndexStart * $interval
     $scheduled = $null
     if ($IsVirtual -and $vmImmediately) {

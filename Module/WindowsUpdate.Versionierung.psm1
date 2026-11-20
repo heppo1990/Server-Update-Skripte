@@ -3,7 +3,7 @@
 }
 
 function Get-WindowsUpdateScriptsVersion {
-    '5.3.5'
+    '5.3.6'
 }
 
 function Test-WindowsUpdateCertificateRunAsCompatibility {

@@ -629,7 +629,7 @@ $HAConfigured = $null -ne $haSettings -and $haSettings.PSObject.Properties['Host
 $LinuxConfiguredHostCount = if ($LinuxConfigured) { @($linuxSettings.Hosts | Where-Object { $_ }).Count } else { 0 }
 $UpdateSettings = $Settings.UpdateSettings
 # Vor allen Zielabläufen initialisieren, auch im separaten PS5.1-Worker.
-$vmRebootIntervalMinutes = [Math]::Max(0, [int]$UpdateSettings.VMRebootIntervalMinutes)
+$vmRebootIntervalMinutes = [Math]::Max(1, [int]$UpdateSettings.RebootIntervalMinutes)
 if (-not $ParallelTarget) {
   $configuredParallelLimit = Get-WindowsUpdateParallelTargetLimit -Configuration $UpdateSettings
   $parallelNotice = if ($configuredParallelLimit -eq 1) { 'Verarbeitung: Windows-Ziele nacheinander.' } else { "Parallele Verarbeitung: maximal $configuredParallelLimit Windows-Ziele gleichzeitig" }
@@ -1765,7 +1765,7 @@ foreach ($linuxHost in @($LinuxUpdateDetails | Where-Object { $_.Status -eq 'Upd
 # VM-Neustart wird vorsorglich bis zu einer Stunde Ausfallzeit eingeplant.
 $physicalRebootNotBefore = if ($null -ne $script:VMRebootLatestAt) { $script:VMRebootLatestAt.AddHours(1) } else { [datetime]::MinValue }
 
-# Gemeinsame Reservierung für physische Systeme: eine Stunde Abstand, auch plattformübergreifend.
+# Gemeinsame Reservierung für physische Systeme: derselbe JSON-Versatz wie für VMs.
 $nextPhysicalRebootNotBefore = $physicalRebootNotBefore
 
 # Linux- und Home-Assistant-Hosts verwenden dieselbe Physisch-nach-VM-Regel.
@@ -1773,7 +1773,7 @@ $nextPhysicalRebootNotBefore = $physicalRebootNotBefore
 foreach ($pendingLinuxReboot in $script:PendingLinuxPhysicalReboots) {
   try {
     $plannedAt = Get-NextRebootTimeInWindow -StartTime ([string]$pendingLinuxReboot.RebootTime) -LatestTime ([string]$pendingLinuxReboot.LatestRebootTime) -NotBefore $nextPhysicalRebootNotBefore
-    $nextPhysicalRebootNotBefore = $plannedAt.AddHours(1)
+    $nextPhysicalRebootNotBefore = $plannedAt.AddMinutes($vmRebootIntervalMinutes)
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($plannedAt - (Get-Date)).TotalMinutes))
     $sshPath = [string]$pendingLinuxReboot.SSHPath
     $sshArgs = @(Get-WindowsUpdateSshArguments -KeyPath ([string]$pendingLinuxReboot.KeyPath) -BatchMode -AcceptNewHostKey)
@@ -1790,7 +1790,7 @@ foreach ($pendingLinuxReboot in $script:PendingLinuxPhysicalReboots) {
 foreach ($pendingHAReboot in $script:PendingHAPhysicalReboots) {
   try {
     $plannedAt = Get-NextRebootTimeInWindow -StartTime ([string]$pendingHAReboot.RebootTime) -LatestTime ([string]$pendingHAReboot.LatestRebootTime) -NotBefore $nextPhysicalRebootNotBefore
-    $nextPhysicalRebootNotBefore = $plannedAt.AddHours(1)
+    $nextPhysicalRebootNotBefore = $plannedAt.AddMinutes($vmRebootIntervalMinutes)
     $delayMinutes = [Math]::Max(1, [int][Math]::Ceiling(($plannedAt - (Get-Date)).TotalMinutes))
     $sshPath = [string]$pendingHAReboot.SSHPath
     $sshArgs = @(Get-WindowsUpdateSshArguments -KeyPath ([string]$pendingHAReboot.KeyPath) -Port ([int]$pendingHAReboot.Port) -BatchMode -AcceptNewHostKey)
@@ -1815,7 +1815,7 @@ foreach ($pendingReboot in $script:PendingPhysicalReboots) {
     }
   }
   $plannedPhysicalAt = Get-NextRebootTimeInWindow -StartTime $pendingReboot.RebootTime -LatestTime $pendingReboot.LatestRebootTime -NotBefore $nextPhysicalRebootNotBefore
-  $nextPhysicalRebootNotBefore = $plannedPhysicalAt.AddHours(1)
+  $nextPhysicalRebootNotBefore = $plannedPhysicalAt.AddMinutes($vmRebootIntervalMinutes)
   Request-RebootTask -Servername $pendingReboot.Servername -RebootTime $pendingReboot.RebootTime -LatestRebootTime $pendingReboot.LatestRebootTime -NotBefore $plannedPhysicalAt -AuthInfo $pendingReboot.AuthInfo
 }
 

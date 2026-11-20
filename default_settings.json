@@ -42,7 +42,7 @@
 		"VMRebootStartTime": "19:00",
 		"VMRebootWindowEndTime": "3:00",
 		"VMRebootImmediately": false,
-		"VMRebootIntervalMinutes": 30
+		"RebootIntervalMinutes": 30
 	},
 	"LinuxSettings": {
 		"Hosts": [

@@ -4,7 +4,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 ## In normalen Läufen beobachten
 
-- [ ] **Physische Neustarts:** Physische Systeme erhalten plattformübergreifend eine Stunde Abstand; VM-Puffer und Wartungsfenster bleiben erhalten.
+- [ ] **Physische Neustarts:** Physische Systeme verwenden plattformübergreifend den JSON-Versatz RebootIntervalMinutes; VM-Puffer und Wartungsfenster bleiben erhalten.
 
 Diese Punkte brauchen keinen gesonderten Test, sobald der passende Fall in einem Lauf vorkommt. Ein Lauf ohne diesen Fall bestätigt den Punkt nicht.
 

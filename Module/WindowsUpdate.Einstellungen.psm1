@@ -233,7 +233,13 @@ function Get-WindowsUpdateSettings {
             }
             $targetSection = $settings.$sectionName
             foreach ($property in $sourceSection.PSObject.Properties) {
-                Add-Member -InputObject $targetSection -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force
+                $propertyName = $property.Name
+                if ($sectionName -eq 'UpdateSettings' -and $propertyName -eq 'VMRebootIntervalMinutes') {
+                    # Alten JSON-Namen übernehmen; der neue Name hat innerhalb derselben Datei Vorrang.
+                    if ($sourceSection.PSObject.Properties['RebootIntervalMinutes']) { continue }
+                    $propertyName = 'RebootIntervalMinutes'
+                }
+                Add-Member -InputObject $targetSection -NotePropertyName $propertyName -NotePropertyValue $property.Value -Force
             }
         }
     }
