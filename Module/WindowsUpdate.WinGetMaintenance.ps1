@@ -537,15 +537,14 @@ if ($Action -eq 'ClientRepair') {
         finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
     }
     $existing = Get-WinGetPath
-    if ($existing) {
+    if ($existing -and ([IO.Path]::GetFullPath($existing)).StartsWith(([IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'WinGetPortable')) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
         [Console]::Out.WriteLine("Vorhandene CLI erfolgreich geprüft: $existing")
         if ($existing -like '*WinGetPortable*') { [Console]::Out.WriteLine('__WINGET_PORTABLE__') }
         exit 0
     }
     $usable = $false
     foreach ($stage in @(
-        @{Name='Appx';Seconds=20}, @{Name='Asheroto';Seconds=35},
-        @{Name='Microsoft';Seconds=20}, @{Name='Portable';Seconds=2700}
+        @{Name='Portable';Seconds=2700}
     )) {
         try {
             $result = Invoke-WinGetRepairStage -Stage $stage.Name -TimeoutSeconds $stage.Seconds

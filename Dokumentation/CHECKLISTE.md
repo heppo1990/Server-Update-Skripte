@@ -6,7 +6,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 
 
 - [ ] **Modulbereitstellung:** Eine tatsächlich neuere Modul-/NuGet-Version bereitstellen, ohne Passwortbestätigung oder dauerhafte Änderung des PSGallery-Vertrauens.
-- [ ] **Server Core:** WinGet in Verteilung, Check und Install auslassen; Windows Update und vorhandenes Chocolatey weiter nutzen. Zertifikatszugang auf Hyper-V Server 2019 Core bestätigen.
+- [ ] **Server Core:** Noch Install bestätigen: WinGet auslassen, Windows Update und vorhandenes Chocolatey weiter nutzen. Verteilung, Check und JEA-Zertifikatszugang sind bestätigt.
 - [ ] **Erreichbarkeit:** Erreichbare IPv4-Ziele bleiben bei zusätzlicher unerreichbarer IPv6-Adresse enthalten; negative Portvorprüfung allein verwirft keinen erfolgreichen JEA-Zugang.
 
 - [ ] **Akku-Betrieb:** Einrichtung und eigene Aufgaben starten auf Akku und bleiben beim Wechsel auf Akku aktiv; vorhandene eigene Aufgaben behalten Konto, Trigger und Zeitplan.
@@ -18,6 +18,8 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 - [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
 
 ## WinGet-Wartung und Downloadcache
+
+- [ ] **Portable SYSTEM-CLI:** Vorhandene AppX-CLI ohne geschützte portable Kopie wird beim Installieren über JEA ergänzt; einmalige Wiederholung vor dem Installerstart und vollständige Ergebnisrückgabe bestätigen.
 
 - [ ] **Zentraler Reparaturablauf:** Fehler und fällige 30-Tage-Wartung verwenden denselben Ablauf. 24-Stunden-Schutz, Reset bei leeren Ergebnissen, frische Abschlussverbindung und höchstens 180 Sekunden Quellenreset bestätigen. Fehlgeschlagene Quellenpflege darf nicht als erfolgreiches leeres Ergebnis gelten; fehlgeschlagene Beschaffung startet keinen zweiten Download beim Reset.
 - [ ] **AppX-Reparatur:** Registrierung und Provisionierung im echten Benutzerprofil bestätigen; ohne erforderlichen angemeldeten Benutzer als ausstehend melden.

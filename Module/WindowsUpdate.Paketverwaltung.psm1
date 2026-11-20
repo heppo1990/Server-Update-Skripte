@@ -180,6 +180,7 @@ function Resolve-WindowsUpdateJeaWinGetResults {
     )
 
     $resolved = @()
+    $portableRepairAttempted = $false
     foreach ($item in $Results) {
         $requestProperty = if ($item) { $item.PSObject.Properties['JeaUpgradeRequest'] } else { $null }
         if (-not $requestProperty -or -not $requestProperty.Value) {
@@ -209,6 +210,18 @@ function Resolve-WindowsUpdateJeaWinGetResults {
             }
             $invokeParameters.ArgumentList = @($packageId, $source)
             $update = @(Invoke-Command @invokeParameters | Select-Object -Last 1)
+            if ($update.Count -gt 0 -and $update[0].PSObject.Properties['Output'] -and
+                [string]$update[0].Status -eq 'Failed' -and
+                [string]$update[0].Output -like '*geprüfte portable CLI im JEA-Wartungsverzeichnis fehlt*' -and
+                -not $portableRepairAttempted) {
+                # Nur vor dem Installerstart reparieren; echte Installerfehler nie wiederholen.
+                $portableRepairAttempted = $true
+                if ($WriteLog) { & $WriteLog "WinGet auf ${ComputerName}: geschützte portable CLI fehlt; einmalige Bereitstellung über JEA." $true }
+                Sync-WindowsUpdateWinGetCache -ComputerName $ComputerName -AuthInfo $AuthInfo -WriteLog $WriteLog
+                $repair = Invoke-WindowsUpdateJeaWinGetClientRepair -ComputerName $ComputerName -AuthInfo $AuthInfo
+                if ($WriteLog) { & $WriteLog ([string]$repair.Output) $true }
+                $update = @(Invoke-Command @invokeParameters | Select-Object -Last 1)
+            }
             if ($update.Count -eq 0) { throw "JEA lieferte kein WinGet-Ergebnis für '$packageId'." }
             $status = [string]$update[0].Status
             $installerCode = [string]$update[0].InstallerErrorCode
