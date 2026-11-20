@@ -175,7 +175,8 @@ function Resolve-WindowsUpdateJeaWinGetResults {
     param(
         [Parameter(Mandatory)][object[]]$Results,
         [Parameter(Mandatory)][string]$ComputerName,
-        $AuthInfo
+        $AuthInfo,
+        [scriptblock]$WriteLog
     )
 
     $resolved = @()
@@ -195,6 +196,10 @@ function Resolve-WindowsUpdateJeaWinGetResults {
         $updateOutput = ''
         $exitCode = 1
         $success = $false
+        $executionContextName = ''
+        $rebootRequired = $false
+        $nativeInstallerCode = ''
+        $failureOutput = ''
         try {
             $invokeParameters = New-WindowsUpdateInvokeCommandParams -ComputerName $ComputerName `
                 -AuthInfo $AuthInfo -ConfigurationName 'WindowsUpdateAdm' -OpenTimeoutSeconds 30 -OperationTimeoutSeconds 5400
@@ -211,20 +216,46 @@ function Resolve-WindowsUpdateJeaWinGetResults {
             $success = $status -eq 'Ok' -and $installerCode -in @('', '0') -and $extendedCode -in @('', '0')
             $exitCode = if ($success) { 0 } else { 1 }
             $updateOutput = "JEA-Update-WinGetPackage: Status=$status; InstallerErrorCode=$installerCode; ExtendedErrorCode=$extendedCode; RebootRequired=$([bool]$update[0].RebootRequired)"
-            if ($update[0].PSObject.Properties['Output']) { $updateOutput += [Environment]::NewLine + [string]$update[0].Output }
+            $rebootRequired = [bool]$update[0].RebootRequired
+            if ($update[0].PSObject.Properties['ExecutionContext']) {
+                $executionContextName = [string]$update[0].ExecutionContext
+                $updateOutput += "; Ausführung=$executionContextName"
+            }
+            if ($update[0].PSObject.Properties['ElapsedSeconds']) { $updateOutput += "; Dauer=$($update[0].ElapsedSeconds)s" }
+            if ($update[0].PSObject.Properties['Output']) {
+                $failureOutput = [string]$update[0].Output
+                $updateOutput += [Environment]::NewLine + $failureOutput
+            }
+            if ($update[0].PSObject.Properties['WorkerLog']) { $updateOutput += [Environment]::NewLine + [string]$update[0].WorkerLog }
+            $nativeMatch = [regex]::Match($updateOutput,'(?im)Installer failed with exit code:\s*(-?\d+)')
+            if ($nativeMatch.Success) { $nativeInstallerCode = $nativeMatch.Groups[1].Value }
         }
         catch {
             $updateOutput = [string]$_.Exception.Message
+            $failureOutput = $updateOutput
             if ($updateOutput.Length -gt 1200) { $updateOutput = $updateOutput.Substring(0, 1197) + '...' }
         }
 
+        if ($WriteLog -and $updateOutput) {
+            foreach ($line in ($updateOutput -split '\r?\n' | Where-Object { $_.Trim() })) { & $WriteLog "WinGet-Update auf ${ComputerName} [$packageId]: $line" $true }
+        }
+        $errorSummary = if ($success) { '' } else {
+            $detail = if ($nativeInstallerCode) { "Installer-Exitcode $nativeInstallerCode" } else {
+                $errorLines=@($failureOutput -split '\r?\n' | Where-Object { $_ -match '(?i)failed|error|fehl|cannot|could not|kein installiert|no installed|0x[0-9a-f]+' })
+                if ($errorLines.Count) { $errorLines[-1] } else { ($failureOutput -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -First 1) }
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$detail)) { $detail='Kein bestätigtes Installationsergebnis zurückgegeben' }
+            if ($detail.Length -gt 600) { $detail=$detail.Substring(0,600)+' …' }
+            "WinGet-Update für '$displayName' [$packageId] fehlgeschlagen: $detail. Manuelle Prüfung erforderlich."
+        }
         $resolved += [pscustomobject]@{
             Manager = 'Winget'; Available = $true; Success = $success; Skipped = $false
             SkipReason = ''; ExitCode = $exitCode; Packages = @($package)
             AvailableOutput = [string]$request.AvailableOutput; ActionOutput = $updateOutput
             DiagnosticOutput = if ($success) { '' } else { $updateOutput }
             RequiresManualAction = -not $success
-            ErrorSummary = if ($success) { '' } else { "WinGet-Update für '$displayName' [$packageId] über den eingeschränkten JEA-Endpunkt fehlgeschlagen; manuelle Prüfung erforderlich." }
+            ExecutionContext = $executionContextName; RebootRequired = $rebootRequired; NativeInstallerErrorCode = $nativeInstallerCode
+            ErrorSummary = $errorSummary; ManualActionText = $errorSummary
         }
     }
     return @($resolved)
@@ -3460,7 +3491,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
             else { $initialParameters.NoTimeout = $true }
             $wingetResults = @(Invoke-WindowsUpdatePackageWorker @initialParameters | Where-Object { $_.Manager -eq 'Winget' })
             if ($Mode -eq 'Install' -and -not $isLocalTarget) {
-                $wingetResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $wingetResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+                $wingetResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $wingetResults -ComputerName $ComputerName -AuthInfo $AuthInfo -WriteLog $WriteLog)
             }
             if ($wingetResults.Count -eq 0) { throw 'Die WinGet-Prüfung lieferte kein Ergebnis.' }
             $firstWingetResult = $wingetResults[-1]
@@ -3657,7 +3688,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                 else { $retryParameters.NoTimeout = $true }
                 $retryResults = @(Invoke-WindowsUpdatePackageWorker @retryParameters | Where-Object { $_.Manager -eq 'Winget' })
                 if ($Mode -eq 'Install' -and -not $isLocalTarget) {
-                    $retryResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $retryResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+                    $retryResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $retryResults -ComputerName $ComputerName -AuthInfo $AuthInfo -WriteLog $WriteLog)
                 }
                 if ($retryResults.Count -eq 0) { throw 'Die Wiederholungsprüfung lieferte kein WinGet-Ergebnis.' }
                 $retryResult = $retryResults[-1]
@@ -3690,7 +3721,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     else { $followupParameters.NoTimeout = $true }
                     $followupResults = @(Invoke-WindowsUpdatePackageWorker @followupParameters | Where-Object { $_.Manager -eq 'Winget' })
                     if ($Mode -eq 'Install' -and -not $isLocalTarget) {
-                        $followupResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $followupResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+                        $followupResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $followupResults -ComputerName $ComputerName -AuthInfo $AuthInfo -WriteLog $WriteLog)
                     }
                     if ($followupResults.Count -eq 0) { throw 'Die WinGet-Folgeprüfung nach Quellenkorrektur lieferte kein Ergebnis.' }
 
@@ -3722,7 +3753,7 @@ Add-AppxPackage -Path $quotedBundlePath -DependencyPath `$dependencies -ForceUpd
                     if ($hasCheckTimeout) { $retryParameters.TimeoutSeconds = Get-WinGetRemainingSeconds }
                     $retryResults = @(Invoke-WindowsUpdatePackageWorker @retryParameters | Where-Object { $_.Manager -eq 'Winget' })
                     if ($Mode -eq 'Install' -and -not $isLocalTarget) {
-                        $retryResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $retryResults -ComputerName $ComputerName -AuthInfo $AuthInfo)
+                        $retryResults = @(Resolve-WindowsUpdateJeaWinGetResults -Results $retryResults -ComputerName $ComputerName -AuthInfo $AuthInfo -WriteLog $WriteLog)
                     }
                     if ($retryResults.Count -eq 0) { throw 'WinGet lieferte nach Quellenaktualisierung kein Ergebnis.' }
                     $retryResult = $retryResults[-1]

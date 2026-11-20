@@ -1094,17 +1094,7 @@ exit `$process.ExitCode
     if ($InstallWinGetClientModule -and $winGetClientAvailable) {
         $jeaModulesToImport += 'Microsoft.WinGet.Client'
         $jeaVisibleFunctions += 'Update-WindowsUpdateAdmWinGetPackage'
-        $VisibleCmdlets += @{
-            Name = 'Update-WinGetPackage'
-            Parameters = @(
-                @{ Name = 'Id' }
-                @{ Name = 'Source' }
-                @{ Name = 'MatchOption' }
-                @{ Name = 'Mode' }
-                @{ Name = 'Confirm' }
-            )
-        }
-        Write-SetupLog 'JEA-WinGet-Rolle erlaubt ausschließlich Updates installierter Pakete über Update-WinGetPackage.' 'INFO'
+        Write-SetupLog 'JEA-WinGet-Rolle erlaubt ausschließlich den festen SYSTEM-Worker für Updates installierter Pakete; keine freien Aufgaben-, Prozess- oder WinGet-Modulbefehle.' 'INFO'
     } elseif ($InstallWinGetClientModule) {
         throw 'Microsoft.WinGet.Client fehlt nach der Modulbereitstellung; der eingeschränkte WinGet-Update-Endpunkt kann nicht sicher erstellt werden.'
     } else {

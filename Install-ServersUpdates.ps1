@@ -1325,8 +1325,11 @@ ForEach ($Server in $ServerADList) {
         $localManagementTargets = @($env:COMPUTERNAME, $ComputerFQDN, [System.Net.Dns]::GetHostName())
         $excludedWinGetIds = if ($localManagementTargets -contains $Servername) { @($script:ManagementPowerShellUpdateExcludeId) } else { @() }
         $excludedChocolateyIds = if ($localManagementTargets -contains $Servername) { @($script:ManagementPowerShellUpdateExcludeChocolateyId) } else { @() }
+        $packageRebootRequired = $false
         $packageResults = @(Invoke-PackageManagerUpdates -Servername $Servername -AuthInfo $svcCredential -ExcludeWinGetIds $excludedWinGetIds -ExcludeChocolateyIds $excludedChocolateyIds)
         foreach ($packageResult in $packageResults) {
+          $packageRebootProperty = $packageResult.PSObject.Properties['RebootRequired']
+          if ($packageRebootProperty -and [bool]$packageRebootProperty.Value) { $packageRebootRequired = $true }
           if ([string]$packageResult.Manager -eq '__InstallSummary') {
             $installedCountsProperty = $packageResult.PSObject.Properties['InstalledCounts']
             if ($installedCountsProperty -and $installedCountsProperty.Value -is [System.Collections.IDictionary]) {
@@ -1470,6 +1473,10 @@ ForEach ($Server in $ServerADList) {
         else {
           $rebootRequired = $false
           Write-ScriptLog "Kein Neustartstatus für $Servername abgefragt: In diesem Hauptlauf wurden keine Windows-Updates installiert."
+        }
+        if ($packageRebootRequired) {
+          $rebootRequired = $true
+          Write-ScriptLog "Paketupdate auf $Servername meldet Neustartbedarf; bestehende VM-/Host-Neustartplanung wird verwendet." -LogOnly
         }
         if ($rebootRequired) {
           $isVirtual = [bool]$script:ExecutionPhaseIsVirtual

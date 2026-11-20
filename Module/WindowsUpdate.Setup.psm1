@@ -21,25 +21,30 @@ function Get-WindowsUpdateAdmDeploymentStatus {
         if ([string]::IsNullOrWhiteSpace([string]$cs.Model)) { throw 'Hardwaremodell fehlt.' }
         $isVirtual = (($cs.Manufacturer+' '+$cs.Model+' '+$bios.Manufacturer) -match 'VMware|VirtualBox|Virtual Machine|KVM|QEMU|Xen|Bochs|Parallels|bhyve|HVM domU')
     } catch { }
-    [PSCustomObject]@{ IsVirtual = $isVirtual; Version = '__VERSION__'; TargetBuild = [Environment]::OSVersion.Version.Build; ServerCore = __SERVER_CORE__; CertificateRunAsCompatibility = __CERTIFICATE_RUNAS_COMPATIBILITY__; CacheTransferSupported = __WINGET_MAINTENANCE_ONLY__; MaintenanceRevision = '6'; MaintenanceFunctionsPresent = [bool]((Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated -CommandType Function -ErrorAction SilentlyContinue) -and (Get-Command -Name Invoke-WindowsUpdateAdmWinGetMaintenance -CommandType Function -ErrorAction SilentlyContinue)); WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
+    [PSCustomObject]@{ IsVirtual = $isVirtual; Version = '__VERSION__'; TargetBuild = [Environment]::OSVersion.Version.Build; ServerCore = __SERVER_CORE__; CertificateRunAsCompatibility = __CERTIFICATE_RUNAS_COMPATIBILITY__; CacheTransferSupported = __WINGET_MAINTENANCE_ONLY__; MaintenanceRevision = '6'; MaintenanceFunctionsPresent = [bool]((Get-Command -Name Get-WindowsUpdateAdmChocolateyOutdated -CommandType Function -ErrorAction SilentlyContinue) -and (Get-Command -Name Invoke-WindowsUpdateAdmWinGetMaintenance -CommandType Function -ErrorAction SilentlyContinue)); WinGetSystemWorker = __WINGET_UPDATE_ONLY__; WinGetUpdateOnly = __WINGET_UPDATE_ONLY__; ChocolateyUpdateOnly = __CHOCO_UPDATE_ONLY__; WinGetMaintenanceOnly = __WINGET_MAINTENANCE_ONLY__; ChocolateyMaintenanceOnly = __CHOCO_MAINTENANCE_ONLY__ }
 }
 function Update-WindowsUpdateAdmWinGetPackage {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$')][string]$Id,
-        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')][string]$Source
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\z')][string]$Id,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z')][string]$Source
     )
 
-    # JEA veröffentlicht ausschließlich diesen validierten Paket-Update-Aufruf.
-    # Install-, Uninstall- und generische Prozessbefehle sind nicht Teil der Rolle.
-    try {
-        $updates = @(Update-WinGetPackage -Id $Id -Source $Source -MatchOption EqualsCaseInsensitive -Mode Silent -Confirm:$false -ErrorAction Stop)
-        if ($updates.Count -gt 0 -and [string]$updates[-1].Status -eq 'Ok') {
-            $last = $updates[-1]
-            return [PSCustomObject]@{ Id=$Id; Status=[string]$last.Status; InstallerErrorCode=[string]$last.InstallerErrorCode; ExtendedErrorCode=[string]$last.ExtendedErrorCode; RebootRequired=[bool]$last.RebootRequired }
-        }
-    } catch { }
-    # Fester Update-only-Rückfall: kein Install/Uninstall und keine freien Argumente.
+    if (__SERVER_CORE__) { throw 'WinGet-Updates sind auf Server Core in dieser Konfiguration nicht freigegeben.' }
+    if ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) {
+        return Invoke-WindowsUpdateAdmWinGetPackageCore -Id $Id -Source $Source
+    }
+    # Aufrufer behalten ihren Kerberos-/Zertifikats-JEA-Zugang. Nur der feste
+    # Updatevorgang wird wegen inkompatibler Installer als SYSTEM ausgeführt.
+    Invoke-WindowsUpdateAdmWinGetSystemWorker -Id $Id -Source $Source
+}
+function Invoke-WindowsUpdateAdmWinGetPackageCore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\z')][string]$Id,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z')][string]$Source
+    )
+    # Ausschließlich upgrade: kein install/uninstall, keine freien CLI-Argumente.
     $portableRoot = Join-Path $PSScriptRoot 'WinGetPortable'
     $candidates = @(Get-ChildItem -LiteralPath $portableRoot -Filter winget.exe -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
     if ($candidates.Count -eq 0) { throw 'WinGet-Modul fehlgeschlagen; geprüfte portable CLI im JEA-Wartungsverzeichnis fehlt. Clientreparatur erforderlich.' }
@@ -58,12 +63,126 @@ function Update-WindowsUpdateAdmWinGetPackage {
         $process.StartInfo = $start
         if (-not $process.Start()) { throw 'WinGet-Updateprozess konnte nicht gestartet werden.' }
         $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(1800000)) { try { $process.Kill() } catch {}; throw 'WinGet-Update überschritt 30 Minuten.' }
+        if (-not $process.WaitForExit(1800000)) { try { $process.Kill() } catch {}; throw [TimeoutException]::new('WinGet-Update überschritt 30 Minuten; Zustand möglicher Installer-Unterprozesse manuell prüfen.') }
         $process.WaitForExit()
         $output = $stdout.GetAwaiter().GetResult() + [Environment]::NewLine + $stderr.GetAwaiter().GetResult()
         $code = [int]$process.ExitCode
         [PSCustomObject]@{ Id=$Id; Status=$(if ($code -in @(0,3010)) {'Ok'} else {'Failed'}); InstallerErrorCode=$(if ($code -eq 3010) {'0'} else {[string]$code}); ExtendedErrorCode=''; RebootRequired=($code -eq 3010); Output=$output }
     } finally { $process.Dispose() }
+}
+function Invoke-WindowsUpdateAdmWinGetSystemWorker {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\z')][string]$Id,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z')][string]$Source
+    )
+    $ErrorActionPreference='Stop'
+    $root=Join-Path $PSScriptRoot 'WinGetUpdateJobs'
+    $acl=New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+    if (Test-Path -LiteralPath $root) {
+        if ((Get-Item -LiteralPath $root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'WinGet-Aufgabenverzeichnis darf kein Verweis sein.' }
+        Set-Acl -LiteralPath $root -AclObject $acl
+    } else { $null=[IO.Directory]::CreateDirectory($root,$acl) }
+    $lock=$null; $folder=''; $taskName=''; $registered=$false; $completed=$false
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    try {
+        try { $lock=[IO.File]::Open((Join-Path $root 'update.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+        catch { throw 'Auf diesem Ziel läuft bereits ein WinGet-Update; kein zweites Paket parallel starten.' }
+        if (Test-Path -LiteralPath (Join-Path $root 'uncertain.json')) { throw 'Vorheriges WinGet-Update hat keinen sicheren Abschluss. Installerzustand und WinGetUpdateJobs\uncertain.json vor weiteren Updates manuell prüfen.' }
+        $pending=@(Get-ScheduledTask -TaskName 'WindowsUpdateAdm-WinGetUpdate-*' -ErrorAction SilentlyContinue)
+        if ($pending.Count -gt 0) { throw 'Eine vorherige WinGet-Aufgabe ist noch vorhanden; Zustand vor einem erneuten Update prüfen.' }
+        $jobId=[guid]::NewGuid().ToString('N')
+        $taskName='WindowsUpdateAdm-WinGetUpdate-'+$jobId
+        $folder=Join-Path $root $jobId
+        $null=[IO.Directory]::CreateDirectory($folder,$acl)
+        $workerPath=Join-Path $folder 'worker.ps1'
+        $resultPath=Join-Path $folder 'result.xml'
+        $modulePath=$ExecutionContext.SessionState.Module.Path
+        @{Id=$Id;Source=$Source;ModulePath=$modulePath;TaskName=$taskName} | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $folder 'request.json') -Encoding UTF8
+        $worker={
+            $ErrorActionPreference='Stop'
+            $started=[DateTime]::UtcNow
+            $configuration=$null
+            $result=$null
+            $log=Join-Path $PSScriptRoot 'worker.log'
+            $logLines=[Collections.Generic.List[string]]::new()
+            try {
+                $configuration=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'request.json') -Raw | ConvertFrom-Json
+                $logLines.Add(('[{0:o}] SYSTEM-Update gestartet: {1}; Quelle={2}; Identität={3}' -f $started,$configuration.Id,$configuration.Source,[Security.Principal.WindowsIdentity]::GetCurrent().Name))
+                if (-not [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { throw 'Updateworker läuft nicht als SYSTEM.' }
+                Import-Module -Name $configuration.ModulePath -ErrorAction Stop
+                $items=@(Update-WindowsUpdateAdmWinGetPackage -Id $configuration.Id -Source $configuration.Source -ErrorAction Stop)
+                if ($items.Count -ne 1) { throw 'Paketupdate lieferte kein eindeutiges Ergebnis.' }
+                $result=$items[0]
+            } catch {
+                $result=[pscustomobject]@{Id=$(if($configuration){$configuration.Id}else{''});Status='Failed';InstallerErrorCode='';ExtendedErrorCode='';RebootRequired=$false;Output=$_.Exception.ToString()}
+                Add-Member -InputObject $result -NotePropertyName Uncertain -NotePropertyValue ($_.Exception -is [TimeoutException] -or $_.Exception.InnerException -is [TimeoutException])
+            } finally {
+                try {
+                    $logLines.Add(('[{0:o}] SYSTEM-Update beendet: Status={1}; InstallerErrorCode={2}' -f [DateTime]::UtcNow,$result.Status,$result.InstallerErrorCode))
+                    $workerLog=$logLines -join [Environment]::NewLine
+                    # Eine durch Virenscanner gesperrte Textdatei darf das
+                    # Installationsergebnis nicht vernichten; Log zusätzlich im Ergebnis.
+                    try { [IO.File]::WriteAllText($log,$workerLog,[Text.UTF8Encoding]::new($true)) }
+                    catch { $workerLog += [Environment]::NewLine+'Lokale Textprotokolldatei konnte nicht geschrieben werden: '+$_.Exception.Message }
+                    Add-Member -InputObject $result -NotePropertyName ExecutionContext -NotePropertyValue 'SYSTEM' -Force
+                    Add-Member -InputObject $result -NotePropertyName ElapsedSeconds -NotePropertyValue ([Math]::Round(([DateTime]::UtcNow-$started).TotalSeconds,1)) -Force
+                    Add-Member -InputObject $result -NotePropertyName WorkerLog -NotePropertyValue $workerLog -Force
+                    for($attempt=1;$attempt -le 4;$attempt++) {
+                        try {
+                            $result | Export-Clixml -LiteralPath (Join-Path $PSScriptRoot 'result.tmp') -Depth 8
+                            Move-Item -LiteralPath (Join-Path $PSScriptRoot 'result.tmp') -Destination (Join-Path $PSScriptRoot 'result.xml') -Force
+                            break
+                        } catch { if($attempt -eq 4){throw}; Start-Sleep -Milliseconds 500 }
+                    }
+                } finally {
+                    # Auch bei verlorener Remotesitzung bleibt keine geplante Aufgabe zurück.
+                    if ($configuration) { Unregister-ScheduledTask -TaskName $configuration.TaskName -Confirm:$false -ErrorAction SilentlyContinue }
+                }
+            }
+        }.ToString()
+        [IO.File]::WriteAllText($workerPath,$worker,[Text.UTF8Encoding]::new($true))
+        $action=New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$workerPath+'"')
+        $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 32)
+        $null=Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings
+        $registered=$true
+        Start-ScheduledTask -TaskName $taskName
+        $deadline=[DateTime]::UtcNow.AddMinutes(31)
+        while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+            if ([DateTime]::UtcNow -gt $deadline) { throw 'SYSTEM-Update lieferte innerhalb von 31 Minuten kein Ergebnis. Aufgabe und Arbeitsdaten zur Prüfung behalten; kein automatischer zweiter Versuch.' }
+            $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            if (-not $task) {
+                if (Test-Path -LiteralPath $resultPath -PathType Leaf) { break }
+                throw 'SYSTEM-Updateaufgabe wurde ohne Ergebnis beendet.'
+            }
+            $info=Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+            if ($info -and [string]$task.State -ne 'Running' -and [int64]$info.LastTaskResult -notin @(0,267009,267011) -and $info.LastRunTime -gt (Get-Date).AddMinutes(-2)) {
+                throw "SYSTEM-Updateworker konnte nicht abgeschlossen werden; Aufgaben-Exitcode: $($info.LastTaskResult)."
+            }
+            Start-Sleep -Seconds 2
+        }
+        $result=Import-Clixml -LiteralPath $resultPath
+        if ([string]$result.Id -ne $Id -or [string]$result.Status -notin @('Ok','Failed') -or -not $result.PSObject.Properties['Output']) { throw 'SYSTEM-Update lieferte ein ungültiges Ergebnis.' }
+        if ($result.PSObject.Properties['Uncertain'] -and $result.Uncertain) {
+            @{Id=$Id;TaskName=$taskName;CreatedUtc=[DateTime]::UtcNow.ToString('o');Reason=$result.Output} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'uncertain.json') -Encoding UTF8
+        }
+        $completed=$true
+        $result
+    } catch {
+        $failure=$_
+        if ($registered -and -not $completed) {
+            try { @{Id=$Id;TaskName=$taskName;CreatedUtc=[DateTime]::UtcNow.ToString('o');Reason=$failure.Exception.Message} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'uncertain.json') -Encoding UTF8 } catch { }
+        }
+        [pscustomobject]@{Id=$Id;Status='Failed';InstallerErrorCode='';ExtendedErrorCode='';RebootRequired=$false;Output=$failure.Exception.ToString();ExecutionContext='SYSTEM-Worker';ElapsedSeconds=[Math]::Round($timer.Elapsed.TotalSeconds,1);WorkerLog=''}
+    } finally {
+        if ($completed -or (-not $registered -and $folder)) {
+            if ($taskName) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
+            if ($folder) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        if ($lock) { $lock.Dispose() }
+    }
 }
 function Update-WindowsUpdateAdmChocolateyPackages {
     [CmdletBinding()]
