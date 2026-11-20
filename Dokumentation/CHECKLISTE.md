@@ -16,7 +16,7 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 - [ ] **Parallelbetrieb:** Reihenfolge Windows-VMs, physische Windows-Systeme, Linux und Home Assistant auch bei ParallelTargets=1 bestätigen.
 - [ ] **Geplanter Check:** Ein fehlgeschlagener Check startet nicht doppelt.
 - [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
-- [ ] **Paketupdates über SYSTEM-Worker (5.3.1):** Nach Verteilung je einen AD- und einen Zertifikats-/Hypervisor-Aufruf über den festen JEA-Wrapper bestätigen: vorhandene Pakete dynamisch aktualisieren, vollständige Erfolgs-/Fehlerrückgabe einschließlich Neustartbedarf in Log und Mail, Aufgabenbereinigung. Installerfehler bleiben manuelle Nacharbeit; kein freier Aufgaben-/Prozessaufruf.
+- [ ] **Paketupdates über SYSTEM-Worker (5.3.2):** Nach Verteilung je einen AD- und einen Zertifikats-/Hypervisor-Aufruf über den festen JEA-Wrapper bestätigen: vorhandene Pakete dynamisch aktualisieren, vollständige Erfolgs-/Fehlerrückgabe einschließlich Neustartbedarf in Log und Mail, Aufgabenbereinigung. Installerfehler bleiben manuelle Nacharbeit; kein freier Aufgaben-/Prozessaufruf.
 
 ## WinGet-Wartung und Downloadcache
 

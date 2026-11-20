@@ -84,13 +84,18 @@ function Invoke-WindowsUpdateAdmWinGetSystemWorker {
         if ((Get-Item -LiteralPath $root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'WinGet-Aufgabenverzeichnis darf kein Verweis sein.' }
         Set-Acl -LiteralPath $root -AclObject $acl
     } else { $null=[IO.Directory]::CreateDirectory($root,$acl) }
-    $lock=$null; $folder=''; $taskName=''; $registered=$false; $completed=$false
+    $lock=$null; $folder=''; $taskName=''; $registered=$false; $completed=$false; $taskFolder=$null
     $timer=[Diagnostics.Stopwatch]::StartNew()
     try {
         try { $lock=[IO.File]::Open((Join-Path $root 'update.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
         catch { throw 'Auf diesem Ziel läuft bereits ein WinGet-Update; kein zweites Paket parallel starten.' }
         if (Test-Path -LiteralPath (Join-Path $root 'uncertain.json')) { throw 'Vorheriges WinGet-Update hat keinen sicheren Abschluss. Installerzustand und WinGetUpdateJobs\uncertain.json vor weiteren Updates manuell prüfen.' }
-        $pending=@(Get-ScheduledTask -TaskName 'WindowsUpdateAdm-WinGetUpdate-*' -ErrorAction SilentlyContinue)
+        # JEA deaktiviert die automatische Cmdlet-Modulauflösung. Die feste
+        # COM-Schnittstelle benötigt keine freigegebenen ScheduledTasks-Cmdlets.
+        $scheduler=New-Object -ComObject 'Schedule.Service'
+        $scheduler.Connect()
+        $taskFolder=$scheduler.GetFolder('\')
+        $pending=@($taskFolder.GetTasks(0) | Where-Object { $_.Name -like 'WindowsUpdateAdm-WinGetUpdate-*' })
         if ($pending.Count -gt 0) { throw 'Eine vorherige WinGet-Aufgabe ist noch vorhanden; Zustand vor einem erneuten Update prüfen.' }
         $jobId=[guid]::NewGuid().ToString('N')
         $taskName='WindowsUpdateAdm-WinGetUpdate-'+$jobId
@@ -138,28 +143,47 @@ function Invoke-WindowsUpdateAdmWinGetSystemWorker {
                     }
                 } finally {
                     # Auch bei verlorener Remotesitzung bleibt keine geplante Aufgabe zurück.
-                    if ($configuration) { Unregister-ScheduledTask -TaskName $configuration.TaskName -Confirm:$false -ErrorAction SilentlyContinue }
+                    if ($configuration) {
+                        try {
+                            $cleanupScheduler=New-Object -ComObject 'Schedule.Service'
+                            $cleanupScheduler.Connect()
+                            $cleanupScheduler.GetFolder('\').DeleteTask($configuration.TaskName,0)
+                        } catch { }
+                    }
                 }
             }
         }.ToString()
         [IO.File]::WriteAllText($workerPath,$worker,[Text.UTF8Encoding]::new($true))
-        $action=New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$workerPath+'"')
-        $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 32) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-        $null=Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings
+        $definition=$scheduler.NewTask(0)
+        $definition.RegistrationInfo.Description='WindowsUpdateAdm: festes Update eines installierten Pakets'
+        $definition.Principal.UserId='SYSTEM'
+        $definition.Principal.LogonType=5
+        $definition.Principal.RunLevel=1
+        $definition.Settings.Enabled=$true
+        $definition.Settings.AllowDemandStart=$true
+        $definition.Settings.DisallowStartIfOnBatteries=$false
+        $definition.Settings.StopIfGoingOnBatteries=$false
+        $definition.Settings.StartWhenAvailable=$true
+        $definition.Settings.ExecutionTimeLimit='PT32M'
+        $definition.Settings.MultipleInstances=2
+        $action=$definition.Actions.Create(0)
+        $action.Path=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $action.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$workerPath+'"'
+        $action.WorkingDirectory=$folder
+        $task=$taskFolder.RegisterTaskDefinition($taskName,$definition,6,'SYSTEM',$null,5,'D:P(A;;FA;;;SY)(A;;FA;;;BA)')
         $registered=$true
-        Start-ScheduledTask -TaskName $taskName
+        $null=$task.Run($null)
         $deadline=[DateTime]::UtcNow.AddMinutes(31)
         while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
             if ([DateTime]::UtcNow -gt $deadline) { throw 'SYSTEM-Update lieferte innerhalb von 31 Minuten kein Ergebnis. Aufgabe und Arbeitsdaten zur Prüfung behalten; kein automatischer zweiter Versuch.' }
-            $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            $task=$null
+            try { $task=$taskFolder.GetTask($taskName) } catch { }
             if (-not $task) {
                 if (Test-Path -LiteralPath $resultPath -PathType Leaf) { break }
                 throw 'SYSTEM-Updateaufgabe wurde ohne Ergebnis beendet.'
             }
-            $info=Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-            if ($info -and [string]$task.State -ne 'Running' -and [int64]$info.LastTaskResult -notin @(0,267009,267011) -and $info.LastRunTime -gt (Get-Date).AddMinutes(-2)) {
-                throw "SYSTEM-Updateworker konnte nicht abgeschlossen werden; Aufgaben-Exitcode: $($info.LastTaskResult)."
+            if ([int]$task.State -ne 4 -and [int64]$task.LastTaskResult -notin @(0,267009,267011) -and $task.LastRunTime -gt (Get-Date).AddMinutes(-2)) {
+                throw "SYSTEM-Updateworker konnte nicht abgeschlossen werden; Aufgaben-Exitcode: $($task.LastTaskResult)."
             }
             Start-Sleep -Seconds 2
         }
@@ -178,7 +202,7 @@ function Invoke-WindowsUpdateAdmWinGetSystemWorker {
         [pscustomobject]@{Id=$Id;Status='Failed';InstallerErrorCode='';ExtendedErrorCode='';RebootRequired=$false;Output=$failure.Exception.ToString();ExecutionContext='SYSTEM-Worker';ElapsedSeconds=[Math]::Round($timer.Elapsed.TotalSeconds,1);WorkerLog=''}
     } finally {
         if ($completed -or (-not $registered -and $folder)) {
-            if ($taskName) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
+            if ($taskName -and $taskFolder) { try { $taskFolder.DeleteTask($taskName,0) } catch { } }
             if ($folder) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
         }
         if ($lock) { $lock.Dispose() }
