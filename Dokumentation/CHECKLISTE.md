@@ -9,12 +9,14 @@ Ein erfolgreicher Praxistest an einem beliebigen System reicht je Funktion. Best
 - [ ] **Server Core:** WinGet in Verteilung, Check und Install auslassen; Windows Update und vorhandenes Chocolatey weiter nutzen. Zertifikatszugang auf Hyper-V Server 2019 Core bestätigen.
 - [ ] **Erreichbarkeit:** Erreichbare IPv4-Ziele bleiben bei zusätzlicher unerreichbarer IPv6-Adresse enthalten; negative Portvorprüfung allein verwirft keinen erfolgreichen JEA-Zugang.
 
+- [ ] **Akku-Betrieb:** Einrichtung und eigene Aufgaben starten auf Akku und bleiben beim Wechsel auf Akku aktiv; vorhandene eigene Aufgaben behalten Konto, Trigger und Zeitplan.
+
 ## Check, Download und Install
 
 - [ ] **Parallelbetrieb:** Reihenfolge Windows-VMs, physische Windows-Systeme, Linux und Home Assistant auch bei ParallelTargets=1 bestätigen.
 - [ ] **Geplanter Check:** Ein fehlgeschlagener Check startet nicht doppelt.
 - [ ] **WU-Cache und Bereitschaft:** Aktivierter Cache-Reset funktioniert; Suchbereitschaft wird mit Zeitmarkern begrenzt geprüft, statt fest zu warten. Timeout verhindert den regulären Check nicht.
-- [ ] **Paketupdates über SYSTEM-Worker (5.3.0):** Nach Verteilung je einen AD- und einen Zertifikats-/Hypervisor-Aufruf über den festen JEA-Wrapper bestätigen: vorhandene Pakete dynamisch aktualisieren, vollständige Erfolgs-/Fehlerrückgabe einschließlich Neustartbedarf in Log und Mail, Aufgabenbereinigung. Installerfehler bleiben manuelle Nacharbeit; kein freier Aufgaben-/Prozessaufruf.
+- [ ] **Paketupdates über SYSTEM-Worker (5.3.1):** Nach Verteilung je einen AD- und einen Zertifikats-/Hypervisor-Aufruf über den festen JEA-Wrapper bestätigen: vorhandene Pakete dynamisch aktualisieren, vollständige Erfolgs-/Fehlerrückgabe einschließlich Neustartbedarf in Log und Mail, Aufgabenbereinigung. Installerfehler bleiben manuelle Nacharbeit; kein freier Aufgaben-/Prozessaufruf.
 
 ## WinGet-Wartung und Downloadcache
 

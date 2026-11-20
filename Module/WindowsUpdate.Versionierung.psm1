@@ -1,9 +1,9 @@
 ﻿function Get-WindowsUpdateAdmDeploymentVersion {
-    '5.3.0'
+    '5.3.1'
 }
 
 function Get-WindowsUpdateScriptsVersion {
-    '5.3.0'
+    '5.3.1'
 }
 
 function Test-WindowsUpdateCertificateRunAsCompatibility {

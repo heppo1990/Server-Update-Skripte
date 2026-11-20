@@ -182,6 +182,11 @@ try {
     Write-SetupLog "Computer: $env:COMPUTERNAME" "INFO"
     Write-SetupLog "PowerShell Version: $($PSVersionTable.PSVersion)" "INFO"
     Write-SetupLog "TLS-Protokolle: $([Net.ServicePointManager]::SecurityProtocol)" "INFO"
+    if (-not $FinalizeJEA) {
+        try {
+            foreach($updatedTask in @(Update-WindowsUpdateTaskBatteryPolicies)) { Write-SetupLog "Akku-Betrieb für vorhandene eigene Aufgabe '$updatedTask' aktiviert; Zeitplan und Konto beibehalten." 'INFO' }
+        } catch { Write-SetupLog "Akku-Bedingungen vorhandener Aufgaben konnten nicht vollständig aktualisiert werden: $($_.Exception.Message)" 'WARN' }
+    }
     $offlineRoot = if ($OfflineModuleRoot) { $OfflineModuleRoot } else { $PSScriptRoot }
     $offlinePSWU = Join-Path $offlineRoot 'PSWindowsUpdate'
 
@@ -838,12 +843,20 @@ try {
         $taskName = 'WindowsUpdateAdm-Finalize'
         $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
             (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name New-ScheduledTaskSettingsSet -ErrorAction SilentlyContinue) -and
             (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue) -and
             (Get-Command -Name Start-ScheduledTask -ErrorAction SilentlyContinue)
         if ($scheduledTaskCmdletsAvailable) {
             $action = New-ScheduledTaskAction -Execute $localPowerShell -Argument $arguments
             $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
+            $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+            $previousTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            if ($previousTask -and [string]$previousTask.State -eq 'Queued') {
+                # Eine alte Akku-Warteschlange kann noch auf ein inzwischen
+                # bereinigtes Setupverzeichnis zeigen. Nur den wartenden Lauf verwerfen.
+                Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            }
+            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $taskSettings -Force | Out-Null
             Start-ScheduledTask -TaskName $taskName
         }
         else {
@@ -869,6 +882,7 @@ exit `$process.ExitCode
             if ($LASTEXITCODE -ne 0) {
                 throw "Die JEA-Finalisierungsaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())"
             }
+            Set-WindowsUpdateTaskBatteryPolicy -TaskName $taskName
             $runOutput = & $schtasks /Run /TN $taskName 2>&1
             if ($LASTEXITCODE -ne 0) {
                 throw "Die JEA-Finalisierungsaufgabe konnte mit schtasks.exe nicht gestartet werden: $((@($runOutput) -join ' ').Trim())"

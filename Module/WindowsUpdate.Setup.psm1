@@ -145,7 +145,7 @@ function Invoke-WindowsUpdateAdmWinGetSystemWorker {
         [IO.File]::WriteAllText($workerPath,$worker,[Text.UTF8Encoding]::new($true))
         $action=New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$workerPath+'"')
         $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 32)
+        $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 32) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
         $null=Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings
         $registered=$true
         Start-ScheduledTask -TaskName $taskName

@@ -57,7 +57,7 @@ Move-Item -LiteralPath (Join-Path $PSScriptRoot 'result.tmp') -Destination (Join
                 [IO.File]::WriteAllText($workerPath,$worker,[Text.UTF8Encoding]::new($true))
                 $action=New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$workerPath+'" -Id "'+$PackageId+'"')
                 $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-                $taskSettings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 32)
+                $taskSettings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 32) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
                 $completed=$false
                 try {
                     $null=Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $taskSettings

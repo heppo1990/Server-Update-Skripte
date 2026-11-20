@@ -1,6 +1,42 @@
 ﻿# Fachmodul: WindowsUpdate.Remoting
 # Wird durch WindowsUpdate.Common.psm1 in dessen Modulbereich eingebunden.
 
+function Set-WindowsUpdateTaskBatteryPolicy {
+    # Fallback für unsere SYSTEM-/interaktiven Aufgaben, auch mit schtasks.exe.
+    # Definition, Trigger und Konto bleiben erhalten; nur die Akku-Sperren entfallen.
+    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$TaskName)
+    $service=New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $separator=$TaskName.LastIndexOf('\')
+    $folderName=if($separator -gt 0){$TaskName.Substring(0,$separator)}else{'\'}
+    $name=if($separator -ge 0){$TaskName.Substring($separator+1)}else{$TaskName}
+    $folder=$service.GetFolder($folderName)
+    $registered=$folder.GetTask($name)
+    $definition=$registered.Definition
+    $userId=[string]$definition.Principal.UserId
+    $logonType=[int]$definition.Principal.LogonType
+    if($logonType -notin @(3,5) -or ($logonType -eq 5 -and $userId -notmatch '^(?i:SYSTEM|S-1-5-18|[^\\]+\\SYSTEM)$')) { throw 'Akku-Fallback erwartet eine unserer SYSTEM- oder interaktiven Aufgaben ohne gespeichertes Kennwort.' }
+    $securityDescriptor=$registered.GetSecurityDescriptor(4)
+    $definition.Settings.DisallowStartIfOnBatteries=$false
+    $definition.Settings.StopIfGoingOnBatteries=$false
+    $null=$folder.RegisterTaskDefinition($name,$definition,6,$userId,$null,$logonType,$securityDescriptor)
+}
+
+function Update-WindowsUpdateTaskBatteryPolicies {
+    # Nur bekannte eigene Aufgaben migrieren. Die Finalisierung wird separat
+    # aus ihrer alten Warteschlange geholt und mit dem aktuellen Setup neu angelegt.
+    $service=New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    foreach($task in $service.GetFolder('\').GetTasks(1)) {
+        if($task.Name -notmatch '^WindowsUpdateAdm-(?:Reboot|DeferredUpdates(?:-AtStartup|-Expiry)?|TestDeferredMail|Worker-[a-f0-9]{32}|WinGet(?:Update|AppX|Check|Install|Repair)?-[a-f0-9]{32}|AppxRegistration-\d+)$') { continue }
+        $settings=$task.Definition.Settings
+        if($settings.DisallowStartIfOnBatteries -or $settings.StopIfGoingOnBatteries) {
+            Set-WindowsUpdateTaskBatteryPolicy -TaskName $task.Path
+            [string]$task.Name
+        }
+    }
+}
+
 function New-WindowsUpdateInvokeCommandParams {
     param(
         [Parameter(Mandatory)][string]$ComputerName,
@@ -372,20 +408,23 @@ finally {
     $worker = $worker.Replace('__CONFIG__', $config64)
 
     $register = {
-        param($Name, $WorkerPath, $ResultPath, $Worker)
+        param($Name, $WorkerPath, $ResultPath, $Worker, $BatteryPolicyDefinition)
+        . ([scriptblock]::Create('function Set-WindowsUpdateTaskBatteryPolicy {'+$BatteryPolicyDefinition+'}'))
         New-Item -ItemType Directory -Path (Split-Path -Parent $WorkerPath) -Force | Out-Null
         Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
         [IO.File]::WriteAllText($WorkerPath, $Worker, [Text.Encoding]::UTF8)
         $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
             (Get-Command -Name New-ScheduledTaskTrigger -ErrorAction SilentlyContinue) -and
             (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+            (Get-Command -Name New-ScheduledTaskSettingsSet -ErrorAction SilentlyContinue) -and
             (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue) -and
             (Get-Command -Name Start-ScheduledTask -ErrorAction SilentlyContinue)
         if ($scheduledTaskCmdletsAvailable) {
             $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$WorkerPath`""
             $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(10)
             $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-            Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+            $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
             Start-ScheduledTask -TaskName $Name
         } else {
             # Auf Windows 7 die temporäre SYSTEM-Aufgabe mit schtasks.exe anlegen und starten.
@@ -396,13 +435,14 @@ finally {
             $taskCommand = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $WorkerPath
             $createOutput = & $schtasks /Create /TN $Name /SC ONCE /SD $date /ST $time /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
             if ($LASTEXITCODE -ne 0) { throw "SYSTEM-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())" }
+            Set-WindowsUpdateTaskBatteryPolicy -TaskName $Name
             $runOutput = & $schtasks /Run /TN $Name 2>&1
             if ($LASTEXITCODE -ne 0) { throw "SYSTEM-Aufgabe konnte mit schtasks.exe nicht gestartet werden: $((@($runOutput) -join ' ').Trim())" }
         }
     }
     $params = New-WindowsUpdateInvokeCommandParams -ComputerName $TargetComputer -AuthInfo $AuthInfo -OperationTimeoutSeconds $TimeoutSeconds
     $params.ScriptBlock = $register
-    $params.ArgumentList = @($taskName, $workerPath, $resultPath, $worker)
+    $params.ArgumentList = @($taskName, $workerPath, $resultPath, $worker, ${function:Set-WindowsUpdateTaskBatteryPolicy}.ToString())
     # Check, Download und Installation werden vom jeweiligen Einstiegsskript
     # angekündigt. Die generische Meldung wäre dort eine redundante Dopplung.
     if ($Mode -notin @('Check', 'Download', 'Install')) {

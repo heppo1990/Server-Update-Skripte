@@ -259,7 +259,8 @@ function Register-OneTimeRemoteTask {
   $deferredLogCallback = New-DeferredModuleLogCallback -WriteLog $WriteLog
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Script))
   $sb = {
-    param($Name, $RunAt, $Encoded, $Password)
+    param($Name, $RunAt, $Encoded, $Password, $BatteryPolicyDefinition)
+    . ([scriptblock]::Create('function Set-WindowsUpdateTaskBatteryPolicy {'+$BatteryPolicyDefinition+'}'))
     if (-not [string]::IsNullOrEmpty($Password)) {
       if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
         try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
@@ -277,12 +278,14 @@ function Register-OneTimeRemoteTask {
     $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
       (Get-Command -Name New-ScheduledTaskTrigger -ErrorAction SilentlyContinue) -and
       (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name New-ScheduledTaskSettingsSet -ErrorAction SilentlyContinue) -and
       (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)
     if ($scheduledTaskCmdletsAvailable) {
       $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
       $trigger = New-ScheduledTaskTrigger -Once -At $RunAt
       $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-      Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+      $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+      Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
     } else {
       # Einmalige SYSTEM-Aufgabe auf Windows 7 über den eingebauten Task-Scheduler-CLI anlegen.
       $schtasks = Join-Path $env:WINDIR 'System32\schtasks.exe'
@@ -291,12 +294,13 @@ function Register-OneTimeRemoteTask {
       $taskCommand = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {0}' -f $Encoded
       $createOutput = & $schtasks /Create /TN $Name /SC ONCE /SD $startDate /ST $startTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
       if ($LASTEXITCODE -ne 0) { throw "SYSTEM-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($createOutput) -join ' ').Trim())" }
+      Set-WindowsUpdateTaskBatteryPolicy -TaskName $Name
     }
   }
   # Keine Erweiterung der JEA-Rechte: Aufgaben werden über die normale WinRM-Verbindung
   # des ohnehin administrativen Aufrufers angelegt.
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $At, $encoded, $MailPassword)
+  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $At, $encoded, $MailPassword, ${function:Set-WindowsUpdateTaskBatteryPolicy}.ToString())
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Aufgabe '$TaskName' auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 
@@ -318,7 +322,8 @@ function Register-StartupRemoteTask {
   # Der vollständige Worker wird geschützt als temporäre Datei abgelegt. Ein
   # CMD-Starthelfer protokolliert Prozessstart und Fehler vor PowerShell.
   $sb = {
-    param($Name, $WorkerScript, $Password, $RunAt, $WindowEndTime, $TaskExpiresAt)
+    param($Name, $WorkerScript, $Password, $RunAt, $WindowEndTime, $TaskExpiresAt, $BatteryPolicyDefinition)
+    . ([scriptblock]::Create('function Set-WindowsUpdateTaskBatteryPolicy {'+$BatteryPolicyDefinition+'}'))
     if (-not [string]::IsNullOrEmpty($Password)) {
       if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
         try { Add-Type -AssemblyName System.Security.Cryptography.ProtectedData -ErrorAction Stop }
@@ -432,6 +437,7 @@ exit /b %WORKER_EXIT%
     $scheduledTaskCmdletsAvailable = (Get-Command -Name New-ScheduledTaskAction -ErrorAction SilentlyContinue) -and
       (Get-Command -Name New-ScheduledTaskTrigger -ErrorAction SilentlyContinue) -and
       (Get-Command -Name New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue) -and
+      (Get-Command -Name New-ScheduledTaskSettingsSet -ErrorAction SilentlyContinue) -and
       (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)
     if ($scheduledTaskCmdletsAvailable) {
       $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/d /c ""{0}""' -f $RunnerPath) -WorkingDirectory (Split-Path -Parent $WorkerPath)
@@ -467,7 +473,7 @@ exit /b %WORKER_EXIT%
       )
       if ($expiryTriggerAt -gt [datetime]::MinValue) { $triggers += New-ScheduledTaskTrigger -Once -At $expiryTriggerAt }
       $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-      $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew
+      $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
       Register-ScheduledTask -TaskName $Name -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
     } else {
       # schtasks unterstützt nur einen Trigger je Task; Windows 7 erhält deshalb
@@ -480,6 +486,7 @@ exit /b %WORKER_EXIT%
       $repeatDurationText = '{0:D2}:{1:D2}' -f [int][Math]::Floor($repeatDuration.TotalHours), $repeatDuration.Minutes
       $windowOutput = & $schtasks /Create /TN $Name /SC DAILY /SD $startDate /ST $startTime /RI 15 /DU $repeatDurationText /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
       if ($LASTEXITCODE -ne 0) { throw "Wiederholungsaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($windowOutput) -join ' ').Trim())" }
+      Set-WindowsUpdateTaskBatteryPolicy -TaskName $Name
       $startupName = $Name + '-AtStartup'
       $expiryName = $Name + '-Expiry'
       if ($expiryTriggerAt -gt [datetime]::MinValue) {
@@ -487,6 +494,7 @@ exit /b %WORKER_EXIT%
         $expiryTime = $expiryTriggerAt.ToString('HH:mm', [Globalization.CultureInfo]::InvariantCulture)
         $expiryOutput = & $schtasks /Create /TN $expiryName /SC ONCE /SD $expiryDate /ST $expiryTime /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
         if ($LASTEXITCODE -ne 0) { & $schtasks /Delete /TN $Name /F *> $null; throw "Ablaufaufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($expiryOutput) -join ' ').Trim())" }
+        Set-WindowsUpdateTaskBatteryPolicy -TaskName $expiryName
       }
       $startupOutput = & $schtasks /Create /TN $startupName /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $taskCommand /F 2>&1
       if ($LASTEXITCODE -ne 0) {
@@ -494,10 +502,11 @@ exit /b %WORKER_EXIT%
         & $schtasks /Delete /TN $expiryName /F *> $null
         throw "Systemstart-Aufgabe konnte mit schtasks.exe nicht erstellt werden: $((@($startupOutput) -join ' ').Trim())"
       }
+      Set-WindowsUpdateTaskBatteryPolicy -TaskName $startupName
     }
   }
   $params = New-WindowsUpdateInvokeCommandParams -ComputerName $Servername -AuthInfo $AuthInfo
-  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At, $MaintenanceEndTime, $ExpiresAt)
+  $params.ScriptBlock = $sb; $params.ArgumentList = @($TaskName, $Script, $MailPassword, $At, $MaintenanceEndTime, $ExpiresAt, ${function:Set-WindowsUpdateTaskBatteryPolicy}.ToString())
   Invoke-WindowsUpdateWithRetry -OperationName "Remote-Startaufgabe '$TaskName' auf $Servername" -WriteLog $deferredLogCallback -ScriptBlock { Invoke-Command @params | Out-Null }
 }
 

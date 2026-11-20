@@ -723,7 +723,7 @@ if (-not $response.Success) { exit 1 }
                 } catch { }
                 $logonType = if ($hasInteractiveSession) { 'Interactive' } else { 'S4U' }
                 $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType $logonType -RunLevel Highest
-                $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSeconds) -StartWhenAvailable
+                $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSeconds) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
                 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
                 $taskRegistered = $true
                 Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
@@ -1841,7 +1841,8 @@ finally {
                     # while that user's console session is active.
                     $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType Interactive -RunLevel Limited
                     $notes += "Benutzeraufgabe wird mit interaktivem Principal '$userName' (SID '$userSid') registriert."
-                    Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force -ErrorAction Stop | Out-Null
+                    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+                    Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
                     $taskRegistered = $true
                     $taskStartedAt = Get-Date
                     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
